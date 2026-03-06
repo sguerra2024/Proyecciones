@@ -5,7 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <changelist_data name="Santiago Guerra" email="santiago.guerra76@yahoo.com" automatic="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -15,6 +15,7 @@
   <component name="Git.Settings">
     <option name="PREVIOUS_COMMIT_AUTHORS">
       <list>
+        <option value="Santiago Guerra &lt;santiago.guerra76@yahoo.com&gt;" />
         <option value="sguerra@agromejoraecuador.com" />
         <option value="Agromejora_Data" />
       </list>
@@ -192,7 +193,23 @@
       <option name="project" value="LOCAL" />
       <updated>1772745748693</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772764809527</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1772764809527</updated>
+    </task>
+    <task id="LOCAL-00010" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772764823234</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1772764823234</updated>
+    </task>
+    <option name="localTasksCounter" value="11" />
     <servers />
   </component>
   <component name="UpdateCopyrightCheckinHandler">
