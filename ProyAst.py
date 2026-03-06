@@ -48,7 +48,7 @@ print('Sem_final', df['Semana'].max())
 
 df_1 = pd.read_excel(file_path)
 print(df_1)
-var_proy = var_interes[0]
+var_proy = var_interes[1]
 print(var_proy)
 
 df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
