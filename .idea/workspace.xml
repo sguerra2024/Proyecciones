@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio_" />
+    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio_">
+      <change beforePath="$PROJECT_DIR$/.idea/ProyAst_" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProyAst_" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -223,7 +225,15 @@
       <option name="project" value="LOCAL" />
       <updated>1772765342359</updated>
     </task>
-    <option name="localTasksCounter" value="13" />
+    <task id="LOCAL-00013" summary="inicio_">
+      <option name="closed" value="true" />
+      <created>1772765868112</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1772765868112</updated>
+    </task>
+    <option name="localTasksCounter" value="14" />
     <servers />
   </component>
   <component name="UpdateCopyrightCheckinHandler">
