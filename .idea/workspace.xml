@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio" />
+    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -63,7 +65,7 @@
   <component name="RunManager" selected="Python.ProyAst">
     <configuration name="ProyAst" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="PythonProject" />
-      <option name="ENV_FILES" value="" />
+      <option name="ENV_FILES" value="https://github.com/sguerra2024/Proyecciones.git" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
       <envs>
@@ -106,6 +108,10 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
+    <list>
+      <item itemvalue="Python.proyast_bloq" />
+      <item itemvalue="Python.ProyAst" />
+    </list>
     <recent_temporary>
       <list>
         <item itemvalue="Python.ProyAst" />
@@ -247,7 +253,15 @@
       <option name="project" value="LOCAL" />
       <updated>1772838099683</updated>
     </task>
-    <option name="localTasksCounter" value="16" />
+    <task id="LOCAL-00016" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772839065275</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1772839065275</updated>
+    </task>
+    <option name="localTasksCounter" value="17" />
     <servers />
   </component>
   <component name="UpdateCopyrightCheckinHandler">
