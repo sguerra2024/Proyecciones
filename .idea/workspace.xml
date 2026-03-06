@@ -4,9 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio">
-      <changelist_data name="Santiago Guerra" email="santiago.guerra76@yahoo.com" automatic="false" />
-    </list>
+    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -209,7 +207,15 @@
       <option name="project" value="LOCAL" />
       <updated>1772764823234</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772764920523</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1772764920523</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="UpdateCopyrightCheckinHandler">
