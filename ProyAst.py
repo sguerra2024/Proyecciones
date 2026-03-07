@@ -21,7 +21,7 @@ async def ProyAst(file: UploadFile):
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
-file_path = "C:\\Users\\Personal\\Desktop\\Proyecto_Proyecciones_Dn\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+file_path = "Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 df = pd.read_excel(file_path)
 df_info = pd.DataFrame(df)
 print(df.head())
