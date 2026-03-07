@@ -1,3 +1,5 @@
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -14,8 +16,6 @@ async def ProyAst(file: UploadFile):
     # procesar con tu modelo
     resultados = ProyAst.predict(df)
     return {"estimaciones": resultados}
-
-
 
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
@@ -120,8 +120,6 @@ print(proy.tail(6))
 
 # Entrenamiento modelo
 
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
 
 # file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
@@ -135,7 +133,8 @@ x_len = (len(x_frame))
 print(x_frame)
 y_final = y_frame.iloc[:x_len]
 print(y_final)
-X_train, X_test, y_train, y_test = train_test_split(x_frame, y_frame, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    x_frame, y_frame, test_size=0.2, random_state=42)
 
 modelo = RandomForestRegressor(n_estimators=100, random_state=42)
 
@@ -154,4 +153,5 @@ plt.legend()
 plt.grid(True)
 plt.title(f"{[var_proy]}")
 plt.show()
-y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx', index=False, startcol=2)
+y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
+                index=False, startcol=2)
