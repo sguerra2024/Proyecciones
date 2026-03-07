@@ -16,7 +16,6 @@ async def ProyAst(file: UploadFile):
     return {"estimaciones": resultados}
 
 
-# uvicorn ProyAst:app --host 0.0.0.0 --port $PORT
 
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
@@ -146,7 +145,7 @@ pred_1 = modelo.predict(x_frame)
 
 y_pred = pd.DataFrame((pred_1), columns=['prediction'])
 
-print(y_pred.tail(6))
+print(y_pred.tail(5))
 plt.figure(figsize=(7, 4))
 plt.plot(y_pred, label='Modelo', color='blue', linewidth=2)
 plt.plot(y_frame, label='Produccion', color='red', linestyle='--')
