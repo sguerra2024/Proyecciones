@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ProyAst.py" beforeDir="false" afterPath="$PROJECT_DIR$/ProyAst.py" afterDir="false" />
-    </list>
+    <list default="true" id="00bf7b83-21a0-458d-98a8-b5470d218492" name="Changes" comment="inicio" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -66,7 +63,7 @@
   <component name="RunManager" selected="Python.ProyAst">
     <configuration name="ProyAst" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="PythonProject" />
-      <option name="ENV_FILES" value="https://github.com/sguerra2024/Proyecciones.git" />
+      <option name="ENV_FILES" value="gh repo clone sguerra2024/Proyecciones" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
       <envs>
@@ -318,7 +315,23 @@
       <option name="project" value="LOCAL" />
       <updated>1772841635962</updated>
     </task>
-    <option name="localTasksCounter" value="24" />
+    <task id="LOCAL-00024" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772851337781</created>
+      <option name="number" value="00024" />
+      <option name="presentableId" value="LOCAL-00024" />
+      <option name="project" value="LOCAL" />
+      <updated>1772851337781</updated>
+    </task>
+    <task id="LOCAL-00025" summary="inicio">
+      <option name="closed" value="true" />
+      <created>1772851371473</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1772851371473</updated>
+    </task>
+    <option name="localTasksCounter" value="26" />
     <servers />
   </component>
   <component name="UpdateCopyrightCheckinHandler">
