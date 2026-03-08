@@ -6,4 +6,5 @@ pandas
 scikit-learn
 openpyxl
 streamlit
+python-multipart
 
