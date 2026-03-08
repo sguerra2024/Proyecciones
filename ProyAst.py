@@ -21,7 +21,7 @@ async def ProyAst(file: UploadFile):
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
-file_path = "Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+file_path = "C:\\Users\\Personal\\PycharmProjects\\PythonProject\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 df = pd.read_excel(file_path)
 df_info = pd.DataFrame(df)
 print(df.head())
@@ -48,7 +48,7 @@ print('Sem_final', df['Semana'].max())
 
 df_1 = pd.read_excel(file_path)
 print(df_1)
-var_proy = var_interes[1]
+var_proy = var_interes[3]
 print(var_proy)
 
 df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
