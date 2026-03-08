@@ -18,9 +18,6 @@ async def ProyAst(file: UploadFile):
     return {"estimaciones": resultados}
 
 
-# uvicorn ProyAst:app --host 0.0.0.0 --port $PORT
-
-
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
 file_path = "https://github.com/sguerra2024/Proyecciones/blob/main/Produccion%20Astroflores%20BL25-26-27-28%20a%20la%20Semana%2009.xlsx"
