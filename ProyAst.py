@@ -3,6 +3,7 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import streamlit as st
 from fastapi import FastAPI, UploadFile
 
 # tu modelo de ML
@@ -17,10 +18,13 @@ async def ProyAst(file: UploadFile):
     resultados = ProyAst.predict(df)
     return {"estimaciones": resultados}
 
+st.title("ESTIMADOS DE UNIDADES PRODUCTIVAS")
+st.write("1.- Sube tu archivo Excel ")
+st.write("2.- Selleciona la variedad")
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
-file_path = "https://github.com/sguerra2024/Proyecciones/blob/main/Produccion%20Astroflores%20BL25-26-27-28%20a%20la%20Semana%2009.xlsx"
+file_path = "C:\\Users\\Personal\\PycharmProjects\\PythonProject\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 df = pd.read_excel(file_path)
 df_info = pd.DataFrame(df)
 print(df.head())
@@ -143,8 +147,9 @@ modelo.fit(X_train, y_train)
 pred_1 = modelo.predict(x_frame)
 
 y_pred = pd.DataFrame((pred_1), columns=['prediction'])
-
 print(y_pred.tail(6))
+
+
 plt.figure(figsize=(7, 4))
 plt.plot(y_pred, label='Modelo', color='blue', linewidth=2)
 plt.plot(y_frame, label='Produccion', color='red', linestyle='--')
@@ -153,5 +158,7 @@ plt.legend()
 plt.grid(True)
 plt.title(f"{[var_proy]}")
 plt.show()
+st.pyplot(plt.gcf())
+
 y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
                 index=False, startcol=2)
