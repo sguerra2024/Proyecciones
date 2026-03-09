@@ -40,12 +40,6 @@ if file_path is not None:
     df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
     cant_varied = df['Bloque&Varid'].count()
     st.write(f"Cantidad total de registros: {cant_varied}")
-    # CARACTERISTICAS DEL PATRON"
-
-    st.write('CARACTERISTICAS DE LA BASE PATRON')
-    st.write('Temp_Max', df['TMP MAX'].max())
-    st.write('Temp_Min', df['TMP MIN'].min())
-    st.write("2.- Seleciona la variedad")
 
     # 2. CALCULAR EL MENOR MSE
 
@@ -160,6 +154,12 @@ if file_path is not None:
     st.pyplot(fig)
 
     y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
-                    index=False, startcol=2)
+                    index=True, startcol=2)
+    # CARACTERISTICAS DEL PATRON"
+
+    st.write('CARACTERISTICAS PATRON SELECCIONADO')
+    st.write('Temp_Max', df['TMP MAX'].tail(25).max())
+    st.write('Temp_Min', df['TMP MIN'].tail().min())
+
 else:
     st.write("Por favor, sube un archivo Excel para continuar.")
