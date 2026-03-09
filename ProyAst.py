@@ -24,7 +24,8 @@ st.write("2.- Selleciona la variedad")
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
-file_path = "C:\\Users\\Personal\\PycharmProjects\\PythonProject\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+# file_path = "C:\\Users\\Personal\\PycharmProjects\\PythonProject\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 df = pd.read_excel(file_path)
 df_info = pd.DataFrame(df)
 print(df.head())
@@ -149,16 +150,14 @@ pred_1 = modelo.predict(x_frame)
 y_pred = pd.DataFrame((pred_1), columns=['prediction'])
 print(y_pred.tail(6))
 
-
-plt.figure(figsize=(7, 4))
-plt.plot(y_pred, label='Modelo', color='blue', linewidth=2)
-plt.plot(y_frame, label='Produccion', color='red', linestyle='--')
-plt.plot(proy, label='Proy_patron', color='green', linestyle='-')
-plt.legend()
-plt.grid(True)
-plt.title(f"{[var_proy]}")
-plt.show()
-st.pyplot(plt.gcf())
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(y_pred, label='Modelo', color='blue', linewidth=2)
+ax.plot(y_frame, label='Produccion', color='red', linestyle='--')
+ax.plot(proy, label='Proy_patron', color='green', linestyle='-')
+ax.legend()
+ax.grid(True)
+ax.set_title(f"Proyección: {var_proy}")
+st.pyplot(fig)
 
 y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
                 index=False, startcol=2)
