@@ -32,9 +32,9 @@ if file_path is not None:
     df_info = pd.DataFrame(df)
     print(df.head())
     var_interes = df['Bloque&Varid'].unique()
-    print(var_interes)
-    st.write("Variedades disponibles:")
-    st.dataframe(pd.DataFrame(var_interes, columns=['Bloque&Varid']))
+    # print(var_interes)
+    # st.write("Variedades disponibles:")
+    # st.dataframe(pd.DataFrame(var_interes, columns=['Bloque&Varid']))
     selected_var = st.selectbox(
         "Selecciona la variedad a proyectar", var_interes)
     df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
@@ -153,13 +153,14 @@ if file_path is not None:
     ax.set_title(f"Proyección: {var_proy}")
     st.pyplot(fig)
 
-    y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
+    y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\ProyModelo.xlsx',
                     index=True, startcol=2)
-    # CARACTERISTICAS DEL PATRON"
+    st.write(y_pred, unsafe_allow_html=False)
+
+# CARACTERISTICAS DEL PATRON"
 
     st.write('CARACTERISTICAS PATRON SELECCIONADO')
-    st.write('Temp_Max', df['TMP MAX'].tail(25).max())
-    st.write('Temp_Min', df['TMP MIN'].tail().min())
+    st.write('Temp_Max', df['TMP MAX'].tail(50).mean())
 
 else:
     st.write("Por favor, sube un archivo Excel para continuar.")
