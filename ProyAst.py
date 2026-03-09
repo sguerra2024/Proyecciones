@@ -20,8 +20,7 @@ async def ProyAst(file: UploadFile):
 
 st.markdown("<h1 style='font-size: 22px; text-align: center;'>ESTIMADOS DE UNIDADES PRODUCTIVAS</h1>",
             unsafe_allow_html=True)
-st.write("1.- Sube tu archivo Excel ")
-st.write("2.- Seleciona la variedad")
+
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
@@ -35,11 +34,11 @@ if file_path is not None:
     var_interes = df['Bloque&Varid'].unique()
     print(var_interes)
     df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
-    pd.pivot_table = df_filtered.pivot_table(values=['Tallos/m2'],
-                                             columns=['Bloque', 'Variedad'],
-                                             index=['Anio', 'Semana'],
-                                             aggfunc='sum')
-    # pd.pivot_table.plot(kind='line')
+    pivot_table = df_filtered.pivot_table(values=['Tallos/m2'],
+                                          columns=['Bloque&Varid'],
+                                          index=['Anio', 'Semana'],
+                                          aggfunc='count')
+    st.write(pivot_table)
     # CARACTERISTICAS DEL PATRON"
 
     st.write('CARACTERISTICAS DE LA BASE PATRON')
@@ -48,6 +47,7 @@ if file_path is not None:
     st.write('Anio', df['Anio'].unique())
     st.write('Sem_inicio', df['Semana'].min())
     st.write('Sem_final', df['Semana'].max())
+    st.write("2.- Seleciona la variedad")
 
     # 2. CALCULAR EL MENOR MSE
 
