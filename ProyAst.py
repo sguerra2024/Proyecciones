@@ -24,8 +24,8 @@ st.write("2.- Selleciona la variedad")
 
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
 
-# file_path = "C:\\Users\\Personal\\PycharmProjects\\PythonProject\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
-file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
+file_path = "https://github.com/sguerra2024/Proyecciones/blob/main/Produccion%20Astroflores%20BL25-26-27-28%20a%20la%20Semana%2009.xlsx"
+# file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 df = pd.read_excel(file_path)
 df_info = pd.DataFrame(df)
 print(df.head())
