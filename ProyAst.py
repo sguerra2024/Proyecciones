@@ -33,20 +33,18 @@ if file_path is not None:
     print(df.head())
     var_interes = df['Bloque&Varid'].unique()
     print(var_interes)
+    st.write("Variedades disponibles:")
+    st.dataframe(pd.DataFrame(var_interes, columns=['Bloque&Varid']))
+    selected_var = st.selectbox(
+        "Selecciona la variedad a proyectar", var_interes)
     df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
-    pivot_table = df_filtered.pivot_table(values=['Tallos/m2'],
-                                          columns=['Bloque&Varid'],
-                                          index=['Anio', 'Semana'],
-                                          aggfunc='count')
-    st.write(pivot_table)
+    cant_varied = df['Bloque&Varid'].count()
+    st.write(f"Cantidad total de registros: {cant_varied}")
     # CARACTERISTICAS DEL PATRON"
 
     st.write('CARACTERISTICAS DE LA BASE PATRON')
     st.write('Temp_Max', df['TMP MAX'].max())
     st.write('Temp_Min', df['TMP MIN'].min())
-    st.write('Anio', df['Anio'].unique())
-    st.write('Sem_inicio', df['Semana'].min())
-    st.write('Sem_final', df['Semana'].max())
     st.write("2.- Seleciona la variedad")
 
     # 2. CALCULAR EL MENOR MSE
@@ -55,7 +53,7 @@ if file_path is not None:
 
     df_1 = pd.read_excel(file_path)
     print(df_1)
-    var_proy = var_interes[0]
+    var_proy = selected_var
     print(var_proy)
 
     df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
