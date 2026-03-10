@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 
@@ -39,6 +41,32 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/")
+def root() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "service": "Proyecciones API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "predict": "/api/v1/predict",
+            "predict_compat": "/predict",
+        },
+    }
+
+
+@app.exception_handler(404)
+async def not_found_handler(_: Request, __: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "ok": False,
+            "detail": "Route not found.",
+            "expected": ["/", "/health", "/api/v1/predict", "/predict"],
+        },
+    )
 
 
 def _validate_api_key(x_api_key: str | None) -> None:
@@ -147,3 +175,16 @@ async def predict_from_excel(
         "ok": True,
         "result": result,
     }
+
+
+@app.post("/predict")
+async def predict_from_excel_compat(
+    file: UploadFile = File(...),
+    selected_var: str | None = Form(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    return await predict_from_excel(
+        file=file,
+        selected_var=selected_var,
+        x_api_key=x_api_key,
+    )
