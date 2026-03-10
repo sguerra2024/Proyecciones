@@ -8,4 +8,5 @@ openpyxl
 streamlit
 python-multipart
 altair<5
+requests
 

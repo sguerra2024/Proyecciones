@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import requests
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -47,6 +48,49 @@ if file_path is not None:
     # st.dataframe(pd.DataFrame(var_interes, columns=['Bloque&Varid']))
     selected_var = st.selectbox(
         "Selecciona la variedad a proyectar", var_interes)
+
+    # Optional: call the private API deployed on Render.
+    api_url_default = st.secrets.get(
+        "API_URL", "https://proyecciones-api.onrender.com/predict")
+    api_key_default = st.secrets.get("API_KEY", "")
+
+    api_url = st.text_input("URL API Render", value=api_url_default)
+    api_key = st.text_input("API Key", value=api_key_default, type="password")
+
+    if st.button("Ejecutar por API"):
+        try:
+            uploaded_bytes = file_path.getvalue()
+            response = requests.post(
+                api_url,
+                headers={"X-API-Key": api_key},
+                files={
+                    "file": (
+                        file_path.name,
+                        uploaded_bytes,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+                data={"selected_var": selected_var},
+                timeout=120,
+            )
+
+            if response.ok:
+                result_json = response.json()
+                st.success("Respuesta recibida desde API Render")
+                st.json(result_json)
+
+                result = result_json.get("result", {})
+                preview = result.get("preview", [])
+                if preview:
+                    st.dataframe(pd.DataFrame(preview))
+                st.stop()
+
+            st.error(f"Error API: {response.status_code}")
+            st.code(response.text)
+
+        except Exception as exc:
+            st.error(f"No fue posible llamar la API: {exc}")
+
     df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
     cant_varied = df['Bloque&Varid'].count()
     st.write(f"Cantidad total de registros: {cant_varied}")
