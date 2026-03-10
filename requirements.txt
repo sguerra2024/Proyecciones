@@ -7,4 +7,5 @@ scikit-learn
 openpyxl
 streamlit
 python-multipart
+altair<5
 
