@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
+import os
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -50,9 +51,15 @@ if file_path is not None:
         "Selecciona la variedad a proyectar", var_interes)
 
     # Optional: call the private API deployed on Render.
-    api_url_default = st.secrets.get(
-        "API_URL", "https://proyecciones-api.onrender.com/predict")
-    api_key_default = st.secrets.get("API_KEY", "")
+    api_url_default = "https://proyecciones-api.onrender.com/predict"
+    api_key_default = ""
+    try:
+        api_url_default = st.secrets.get("API_URL", api_url_default)
+        api_key_default = st.secrets.get("API_KEY", api_key_default)
+    except Exception:
+        # Local fallback when secrets.toml is not configured.
+        api_url_default = os.getenv("API_URL", api_url_default)
+        api_key_default = os.getenv("API_KEY", api_key_default)
 
     api_url = st.text_input("URL API Render", value=api_url_default)
     api_key = st.text_input("API Key", value=api_key_default, type="password")
@@ -223,7 +230,6 @@ if file_path is not None:
     </style>
     """, unsafe_allow_html=True)
 
-    
 
 # CARACTERISTICAS DEL PATRON"
 
