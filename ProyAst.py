@@ -166,6 +166,20 @@ if file_path is not None:
     y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\ProyModelo.xlsx',
                     index=True, startcol=2)
     st.write(y_pred, unsafe_allow_html=False)
+    # Reducir tamaño visual del selectbox (alto y fuente)
+    st.markdown("""
+    <style>
+    div[data-baseweb="select"] > div {
+        min-height: 30px !important;
+        font-size: 12px !important;
+    }
+    div[data-baseweb="select"] span {
+        font-size: 12px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    
 
 # CARACTERISTICAS DEL PATRON"
 
