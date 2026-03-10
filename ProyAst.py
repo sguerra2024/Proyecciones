@@ -5,10 +5,20 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from fastapi import FastAPI, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 # tu modelo de ML
 
 app = FastAPI()
+
+# Agregar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite peticiones desde cualquier dominio
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/ProyAst.py")
