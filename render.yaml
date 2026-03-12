@@ -10,4 +10,15 @@ services:
       - key: API_KEY
         sync: false
       - key: FRONTEND_ORIGINS
-        value: https://tu-sitio.com
+        sync: false
+  - type: web
+    name: proyecciones-streamlit
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run ProyAst.py --server.address 0.0.0.0 --server.port $PORT --server.headless true
+    envVars:
+      - key: API_URL
+        sync: false
+      - key: API_KEY
+        sync: false
