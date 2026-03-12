@@ -46,6 +46,7 @@ def root() -> dict[str, Any]:
         "ok": True,
         "service": "Proyecciones API",
         "version": "1.0.0",
+        "auth_enabled": bool(os.getenv("API_KEY", "").strip()),
         "endpoints": {
             "health": "/health",
             "predict": "/api/v1/predict",
@@ -67,12 +68,9 @@ async def not_found_handler(_: Request, __: Exception) -> JSONResponse:
 
 
 def _validate_api_key(x_api_key: str | None) -> None:
-    expected = os.getenv("API_KEY", "")
+    expected = os.getenv("API_KEY", "").strip()
     if not expected:
-        raise HTTPException(
-            status_code=500,
-            detail="API_KEY is not configured in server environment.",
-        )
+        return
     if not x_api_key or not secrets.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="Invalid API key.")
 
@@ -109,7 +107,8 @@ async def predict_from_excel(
     df = _read_excel_from_upload(file, raw)
 
     try:
-        result = train_projection_model(df, selected_var)
+        result = train_projection_model(
+            df, selected_var, include_chart_df=False)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

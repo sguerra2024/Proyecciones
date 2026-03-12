@@ -53,8 +53,15 @@ def _render_api_section(uploaded_file, selected_var: str) -> None:
         return
 
     if not response.ok:
-        st.error(f"Error API: {response.status_code}")
-        st.code(response.text)
+        detail_text = response.text
+        try:
+            error_payload = response.json()
+            detail_text = error_payload.get("detail", detail_text)
+            st.error(f"Error API: {response.status_code} - {detail_text}")
+            st.json(error_payload)
+        except ValueError:
+            st.error(f"Error API: {response.status_code} - {detail_text}")
+            st.code(response.text)
         return
 
     result_json = response.json()
@@ -63,56 +70,68 @@ def _render_api_section(uploaded_file, selected_var: str) -> None:
 
     preview = result_json.get("result", {}).get("preview", [])
     if preview:
-        st.dataframe(pd.DataFrame(preview), use_container_width=True)
+        st.dataframe(pd.DataFrame(preview), width="stretch")
 
 
 def _render_local_projection(df: pd.DataFrame, selected_var: str) -> None:
+    # 1. Buscar patron de referencia (menor MSE en Tallos/m2)
+    reference_pattern = find_reference_pattern(df, selected_var)
+    ref_series = reference_pattern["series"] if reference_pattern else None
+
+    # 2. Entrenar modelo con Tallos/m2 del patron como features (logica original)
     try:
-        model_result = train_projection_model(df, selected_var)
+        model_result = train_projection_model(
+            df, selected_var, reference_series=ref_series
+        )
     except ValueError as exc:
         st.error(str(exc))
         return
 
     chart_df = model_result["chart_df"].copy()
-    reference_pattern = find_reference_pattern(df, selected_var)
 
-    if reference_pattern:
+    # 3. Proyeccion patron escalada a la variedad objetivo
+    if ref_series is not None:
         scaled_projection = scale_reference_projection(
-            reference_pattern["series"],
-            chart_df["produccion_real"],
+            ref_series,
+            chart_df["tallos_m2_real"],
         )
         if not scaled_projection.empty:
             chart_df = chart_df.iloc[: len(scaled_projection)].copy()
             chart_df["proyeccion_patron"] = scaled_projection.values
 
-    metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+    ref_label = reference_pattern["reference_var"] if reference_pattern else "No encontrado"
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
     metric_col_1.metric("Filas usadas", model_result["rows_used"])
     metric_col_2.metric("RMSE", f"{model_result['rmse']:.2f}")
-    metric_col_3.metric(
-        "Patrón referencia",
-        reference_pattern["reference_var"] if reference_pattern else "No encontrado",
+    metric_col_3.metric("Patrón referencia", ref_label)
+    tallos_m2_avg = model_result.get("tallos_m2_avg")
+    metric_col_4.metric(
+        "Promedio Tallos/m2",
+        f"{tallos_m2_avg:.2f}" if tallos_m2_avg is not None else "N/D",
     )
 
+    if model_result.get("using_reference_pattern"):
+        st.caption(f"Modelo entrenado con Tallos/m2 del patrón: {ref_label}")
+    else:
+        st.caption(
+            "Modelo entrenado con Tallos/m2 propios de la variedad (patron no disponible).")
+
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(chart_df["produccion_real"].reset_index(drop=True),
-            label="Producción real", color="#b42318", linestyle="--")
+    ax.plot(chart_df["tallos_m2_real"].reset_index(drop=True),
+            label="Tallos/m2 real", color="#b42318", linestyle="--")
     ax.plot(chart_df["prediccion_modelo"].reset_index(drop=True),
-            label="Predicción modelo", color="#0b6e4f", linewidth=2)
+            label="Predicción Tallos/m2 (RF)", color="#0b6e4f", linewidth=2)
     if "proyeccion_patron" in chart_df:
-        ax.plot(chart_df["proyeccion_patron"].reset_index(
-            drop=True), label="Proyección patrón", color="#1d4ed8", linewidth=2)
+        ax.plot(chart_df["proyeccion_patron"].reset_index(drop=True),
+                label="Patrón Tallos/m2 (escalado)", color="#1d4ed8", linewidth=2)
     ax.set_title(f"Proyección para {selected_var}")
     ax.set_xlabel("Observación")
-    ax.set_ylabel("Producción")
+    ax.set_ylabel("Tallos/m2")
     ax.grid(True, alpha=0.25)
     ax.legend()
     st.pyplot(fig, clear_figure=True)
 
-    st.dataframe(chart_df.tail(20), use_container_width=True)
-
-    if "TMP MAX" in df.columns:
-        st.write("Temp_Max promedio últimas 50 filas",
-                 round(df["TMP MAX"].tail(50).mean(), 2))
+    st.dataframe(chart_df.tail(20), width="stretch")
 
 
 def main() -> None:

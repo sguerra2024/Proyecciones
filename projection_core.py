@@ -53,7 +53,16 @@ def get_varieties(df: pd.DataFrame, finca: str | None = None) -> list[str]:
     return sorted(varieties)
 
 
-def train_projection_model(df: pd.DataFrame, selected_var: str | None) -> dict[str, Any]:
+def train_projection_model(
+    df: pd.DataFrame,
+    selected_var: str | None,
+    reference_series: "pd.Series | None" = None,
+    include_chart_df: bool = True,
+) -> dict[str, Any]:
+    """Entrena un RandomForestRegressor para proyectar Tallos/m2 de la variedad
+    seleccionada. Si se entrega `reference_series` (Tallos/m2 de la variedad patron),
+    se usa como features; si no, cae de vuelta a los Tallos/m2 propios de la variedad.
+    """
     validate_required_columns(df)
 
     if selected_var:
@@ -65,14 +74,33 @@ def train_projection_model(df: pd.DataFrame, selected_var: str | None) -> dict[s
         selected_var = first_var.iloc[0]
         subset = df[df["Bloque&Varid"].astype(str) == str(selected_var)].copy()
 
-    subset = subset.dropna(
-        subset=["Tallos/m2", "Produccion"]).reset_index(drop=True)
-    if len(subset) < 8:
-        raise ValueError(
-            "No hay suficientes filas para entrenar el modelo de la variedad seleccionada.")
+    subset = subset.dropna(subset=["Tallos/m2"]).reset_index(drop=True)
+    target = subset["Tallos/m2"].astype(float)
 
-    features = subset[["Tallos/m2"]].astype(float)
-    target = subset["Produccion"].astype(float)
+    using_reference = False
+    if reference_series is not None:
+        ref_values = (
+            pd.to_numeric(reference_series, errors="coerce")
+            .dropna()
+            .reset_index(drop=True)
+        )
+        common_len = min(len(ref_values), len(target))
+        if common_len >= 8:
+            features = pd.DataFrame(
+                {"Tallos/m2_patron": ref_values.iloc[:common_len].values})
+            target = target.iloc[:common_len].reset_index(drop=True)
+            using_reference = True
+
+    if not using_reference:
+        # Fallback: usar Tallos/m2 propios de la variedad
+        own = subset.reset_index(drop=True)
+        if len(own) < 8:
+            raise ValueError(
+                "No hay suficientes filas para entrenar el modelo de la variedad seleccionada."
+            )
+        features = own[[
+            "Tallos/m2"]].astype(float).rename(columns={"Tallos/m2": "Tallos/m2_patron"})
+        target = own["Tallos/m2"].astype(float)
 
     x_train, _, y_train, _ = train_test_split(
         features,
@@ -81,7 +109,7 @@ def train_projection_model(df: pd.DataFrame, selected_var: str | None) -> dict[s
         random_state=42,
     )
 
-    model = RandomForestRegressor(n_estimators=150, random_state=42)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(x_train, y_train)
 
     predictions = model.predict(features)
@@ -89,19 +117,24 @@ def train_projection_model(df: pd.DataFrame, selected_var: str | None) -> dict[s
 
     chart_df = pd.DataFrame(
         {
-            "tallos_m2": features["Tallos/m2"].round(4),
-            "produccion_real": target.round(2),
+            "tallos_m2_patron": features["Tallos/m2_patron"].round(4),
+            "tallos_m2_real": target.round(2),
             "prediccion_modelo": np.round(predictions, 2),
         }
     )
 
-    return {
+    result = {
         "selected_var": str(selected_var),
-        "rows_used": int(len(subset)),
+        "rows_used": int(len(target)),
         "rmse": rmse,
-        "chart_df": chart_df,
+        "using_reference_pattern": using_reference,
+        "tallos_m2_avg": float(target.mean()) if not target.empty else None,
         "preview": chart_df.tail(20).to_dict(orient="records"),
     }
+    if include_chart_df:
+        result["chart_df"] = chart_df
+
+    return result
 
 
 def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any] | None:
