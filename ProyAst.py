@@ -1,195 +1,161 @@
-import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from typing import Any
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from fastapi import FastAPI
+from pydantic import BaseModel
 import streamlit as st
-import requests
-import os
-from projection_core import (
-    find_reference_pattern,
-    get_fincas,
-    get_varieties,
-    load_excel_bytes,
-    scale_reference_projection,
-    train_projection_model,
-)
+
+file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
+if file_path is not None:
+    df = pd.read_excel(file_path)
+    # st.write(df.head())
+# 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
+    fincas = sorted(df["Finca"].dropna().astype(str).unique().tolist())
+    selected_finca = st.selectbox("Finca", fincas)
+
+    df_finca = df[df["Finca"].astype(str) == selected_finca].copy()
+
+    variedades = sorted(
+        df_finca["Bloque&Varid"].dropna().astype(str).unique().tolist())
+    selected_var = st.selectbox("Bloque&Variedad", variedades)
+
+    df = pd.read_excel(file_path)
+    df_info = pd.DataFrame(df)
+    # st.write(df.head())
+    var_interes = df['Bloque&Varid'].unique()
+    # st.write(var_interes)
+    df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
+    pd.pivot_table = df_filtered.pivot_table(values=['Tallos/m2'],
+                                             columns=['Bloque', 'Variedad'],
+                                             index=['Anio', 'Semana'],
+                                             aggfunc='sum')
+    # pd.pivot_table.plot(kind='lintch")e')
+# CARACTERISTICAS DEL PATRON"
+
+    st.write('CARACTERISTICAS DE LA BASE PATRON')
+    st.write('Temp_Max', df['TMP MAX'].max())
+    st.write('Temp_Min', df['TMP MIN'].min())
 
 
-def _get_api_defaults() -> tuple[str, str]:
-    api_url_default = "https://proyecciones-api.onrender.com/predict"
-    api_key_default = ""
-    try:
-        api_url_default = st.secrets.get("API_URL", api_url_default)
-        api_key_default = st.secrets.get("API_KEY", api_key_default)
-    except Exception:
-        api_url_default = os.getenv("API_URL", api_url_default)
-        api_key_default = os.getenv("API_KEY", api_key_default)
-    return api_url_default, api_key_default
+# 2. CALCULAR EL MENOR MSE
 
+# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
-def _render_api_section(uploaded_file, selected_var: str) -> None:
-    api_url_default, api_key_default = _get_api_defaults()
-    api_url = st.text_input("URL API Render", value=api_url_default)
-    api_key = st.text_input("API Key", value=api_key_default, type="password")
+    df_1 = pd.read_excel(file_path)
+    # st.write(df_1)
+    var_proy = var_interes[1]
+    # st.write(var_proy)
 
-    if not st.button("Ejecutar por API"):
-        return
+    df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
 
-    try:
-        uploaded_bytes = uploaded_file.getvalue()
-        response = requests.post(
-            api_url,
-            headers={"X-API-Key": api_key},
-            files={
-                "file": (
-                    uploaded_file.name,
-                    uploaded_bytes,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            },
-            data={"selected_var": selected_var},
-            timeout=120,
-        )
-    except Exception as exc:
-        st.error(f"No fue posible llamar la API: {exc}")
-        return
+    print(df_filtered_)
+    y = df_filtered_['Produccion']
+    pivot_table_ = df_filtered_.pivot_table(values=['Tallos/m2'],
+                                            columns=['Bloque&Varid'],
+                                            index=['Anio', 'Semana'],
+                                            aggfunc='sum')
+# pivot_table_.plot(kind='line')
+    df_2 = pivot_table_
+    arr_2 = np.array(df_2)
+    arr_list = arr_2.tolist()
 
-    if not response.ok:
-        detail_text = response.text
-        try:
-            error_payload = response.json()
-            detail_text = error_payload.get("detail", detail_text)
-            st.error(f"Error API: {response.status_code} - {detail_text}")
-            st.json(error_payload)
-        except ValueError:
-            st.error(f"Error API: {response.status_code} - {detail_text}")
-            st.code(response.text)
-        return
+    arr_list = []
 
-    result_json = response.json()
-    st.success("Respuesta recibida desde API Render")
-    st.json(result_json)
+    for name, group in df.groupby(['Bloque&Varid']):
+        mse = np.mean(abs(group['Tallos/m2'].to_numpy() - arr_2))
+        arr_list.append((name, mse))
+        arr_list.sort(key=lambda x: x[1])
 
-    preview = result_json.get("result", {}).get("preview", [])
-    if preview:
-        st.dataframe(pd.DataFrame(preview), width="stretch")
+    print(arr_list)
 
+# 3.- IMPORTAR BASE DE VARIEDADES A PROYECTAR Y COMPARAR CURVA CON PATRON SELECCIONADO\n",
 
-def _render_local_projection(df: pd.DataFrame, selected_var: str) -> None:
-    # 1. Buscar patron de referencia (menor MSE en Tallos/m2)
-    reference_pattern = find_reference_pattern(df, selected_var)
-    ref_series = reference_pattern["series"] if reference_pattern else None
+# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
-    # 2. Entrenar modelo con Tallos/m2 del patron como features (logica original)
-    try:
-        model_result = train_projection_model(
-            df, selected_var, reference_series=ref_series
-        )
-    except ValueError as exc:
-        st.error(str(exc))
-        return
+    df_3 = pd.read_excel(file_path)
+    var_patron = arr_list[0]
+    var_patron_list = list(var_patron[0])
+    var_patron_1 = arr_list[1]
+    var_patron_alt = list(var_patron_1[0])
+    # st.write(var_proy)
+    # st.write(var_patron_list)
+    # st.write(var_patron_alt)
 
-    chart_df = model_result["chart_df"].copy()
-
-    # 3. Proyeccion patron escalada a la variedad objetivo
-    if ref_series is not None:
-        scaled_projection = scale_reference_projection(
-            ref_series,
-            chart_df["tallos_m2_real"],
-        )
-        if not scaled_projection.empty:
-            chart_df = chart_df.iloc[: len(scaled_projection)].copy()
-            chart_df["proyeccion_patron"] = scaled_projection.values
-
-    ref_label = reference_pattern["reference_var"] if reference_pattern else "No encontrado"
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
-    metric_col_1.metric("Filas usadas", model_result["rows_used"])
-    metric_col_2.metric("RMSE", f"{model_result['rmse']:.2f}")
-    metric_col_3.metric("Patrón referencia", ref_label)
-    tallos_m2_avg = model_result.get("tallos_m2_avg")
-    metric_col_4.metric(
-        "Promedio Tallos/m2",
-        f"{tallos_m2_avg:.2f}" if tallos_m2_avg is not None else "N/D",
-    )
-
-    if model_result.get("using_reference_pattern"):
-        st.caption(f"Modelo entrenado con Tallos/m2 del patrón: {ref_label}")
+    if [var_proy] == var_patron_list:
+        combined_varieties = ([var_proy] + var_patron_alt)
     else:
-        st.caption(
-            "Modelo entrenado con Tallos/m2 propios de la variedad (patron no disponible).")
+        combined_varieties = ([var_proy] + var_patron_list)
 
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot(chart_df["tallos_m2_real"].reset_index(drop=True),
-            label="Tallos/m2 real", color="#b42318", linestyle="--")
-    ax.plot(chart_df["prediccion_modelo"].reset_index(drop=True),
-            label="Predicción Tallos/m2 (RF)", color="#0b6e4f", linewidth=2)
-    if "proyeccion_patron" in chart_df:
-        ax.plot(chart_df["proyeccion_patron"].reset_index(drop=True),
-                label="Patrón Tallos/m2 (escalado)", color="#1d4ed8", linewidth=2)
-    ax.set_title(f"Proyección para {selected_var}")
-    ax.set_xlabel("Observación")
-    ax.set_ylabel("Tallos/m2")
-    ax.grid(True, alpha=0.25)
+    df_filtered = df_3[df_3['Bloque&Varid'].isin(combined_varieties)]
+    # st.write(df_filtered.head())
+    pivot_table_3 = df_filtered.pivot_table(values=['Tallos/m2'],
+                                            columns=['Bloque&Varid'],
+                                            index=['Anio', 'Semana'],
+                                            aggfunc='sum')
+    # pivot_table_3.plot(kind='line')
+
+# 4. CALCULO DE LA PROYECCION CON PATRON SELECCIONADO Y MODEL0\n"
+
+# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+
+    df = pd.read_excel(file_path)
+    if [var_proy] == var_patron_list:
+        var_patron_list = var_patron_alt
+
+    df_filtered = df[df['Bloque&Varid'].isin(var_patron_list)]
+# df_filtered_ = df[df['Bloque&Varid'].isin(var_proy)]
+    index = np.array(df_filtered['Tallos/m2'])
+    m2 = np.array(df_filtered_.to_records(index=False))[0]
+    m2_1 = np.float64(m2[10])
+    print(var_proy, m2[10], 'M2')
+    index_1 = np.float64(index)
+    print(index_1*m2_1)
+    proy = pd.Series(index_1*m2_1)
+    # st.write(proy.tail(6))
+# proy.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',index=False, startcol=0)
+
+# Entrenamiento modelo
+
+
+# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
+
+    df_1 = pd.read_excel(file_path)
+    y = df_1[df_1['Bloque&Varid'].isin([var_proy])]
+    y_frame = pd.DataFrame(y['Produccion']).reset_index(drop=True).dropna()
+    print(len(y_frame))
+    x = pd.DataFrame(index_1[0:]).dropna()
+    x_frame = pd.DataFrame(x)
+    x_len = (len(x_frame))
+    print(x_frame)
+    y_final = y_frame.iloc[:x_len]
+    print(y_final)
+    X_train, X_test, y_train, y_test = train_test_split(
+        x_frame, y_frame, test_size=0.2, random_state=42)
+
+    modelo = RandomForestRegressor(n_estimators=100, random_state=42)
+
+    modelo.fit(X_train, y_train)
+
+    pred_1 = modelo.predict(x_frame)
+
+    y_pred = pd.DataFrame((pred_1), columns=['prediction'])
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(y_pred.reset_index(drop=True),
+            label='Modelo', color='blue', linewidth=2)
+    ax.plot(y_frame.reset_index(drop=True),
+            label='Produccion', color='red', linestyle='--')
+    ax.plot(proy.reset_index(drop=True), label='Proy_patron',
+            color='green', linestyle='-')
     ax.legend()
+    ax.grid(True)
     st.pyplot(fig, clear_figure=True)
-
-    st.dataframe(chart_df.tail(20), width="stretch")
-
-
-def main() -> None:
-    st.set_page_config(page_title="Estimados Productivos", layout="wide")
-    st.markdown(
-        "<h1 style='font-size: 22px; text-align: center;'>ESTIMADOS DE UNIDADES PRODUCTIVAS</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <style>
-        div[data-baseweb="select"] > div {
-            min-height: 10px !important;
-            font-size: 12px !important;
-        }
-        div[data-baseweb="select"] span {
-            font-size: 12px !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    uploaded_file = st.file_uploader("Sube archivo Excel", type=["xlsx"])
-    if uploaded_file is None:
-        st.write("Por favor, sube un archivo Excel para continuar.")
-        return
-
-    try:
-        df = load_excel_bytes(uploaded_file.getvalue())
-    except ValueError as exc:
-        st.error(str(exc))
-        return
-
-    fincas = get_fincas(df)
-    selected_finca = None
-    working_df = df
-    if fincas:
-        selected_finca = st.selectbox("Finca", fincas)
-        working_df = df[df["Finca"].astype(str) == str(selected_finca)].copy()
-
-    varieties = get_varieties(working_df)
-    if not varieties:
-        st.error("No hay variedades disponibles para la finca seleccionada.")
-        return
-
-    selected_var = st.selectbox("Variedad a proyectar", varieties)
-
-    st.write(f"Cantidad total de registros: {len(working_df)}")
-    if selected_finca:
-        st.write(f"Finca seleccionada: {selected_finca}")
-
-    st.subheader("Consumo de API")
-    _render_api_section(uploaded_file, selected_var)
-
-    st.subheader("Proyección local")
-    _render_local_projection(working_df, selected_var)
-
-
-if __name__ == "__main__":
-    main()
+    y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
+                    index=False, startcol=2)
+    st.write(y_pred.tail(6))
+else:
+    st.info("Por favor, sube un archivo Excel.")
