@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from projection_core import load_excel_bytes, train_projection_model, validate_required_columns
 
@@ -41,18 +41,8 @@ def health() -> dict[str, str]:
 
 
 @app.get("/")
-def root() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "service": "Proyecciones API",
-        "version": "1.0.0",
-        "auth_enabled": bool(os.getenv("API_KEY", "").strip()),
-        "endpoints": {
-            "health": "/health",
-            "predict": "/api/v1/predict",
-            "predict_compat": "/predict",
-        },
-    }
+def root() -> PlainTextResponse:
+    return PlainTextResponse("Proyecciones API online")
 
 
 @app.exception_handler(404)
@@ -111,6 +101,9 @@ async def predict_from_excel(
             df, selected_var, include_chart_df=False)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Avoid publishing full preview data in public API responses.
+    result.pop("preview", None)
 
     return {
         "ok": True,
