@@ -1,5 +1,9 @@
-Estimaciones de lotes agricolas productivos, en base a patrones historicos y modelo machine learning.
-
+Esta aplicacion le sirve para estimar la producción semanal de rosas, en base a patrones historicos y un modelo machine learning.
+Siga los siguientes pasos:
+1. Elabora una hoja EXCEL p¿que contenga las siguientes columnas:
+     AÑO
+     FINCA
+     
 Estructura actual:
 - ProyAst.py: interfaz Streamlit.
 - api_render.py: API FastAPI para Render.
