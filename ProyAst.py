@@ -5,9 +5,14 @@ from typing import Any
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
 import streamlit as st
+
+logo_path = Path(__file__).with_name("1-07(3).jpg")
+if logo_path.exists():
+    st.image(str(logo_path), width=220)
 
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
@@ -47,7 +52,7 @@ if file_path is not None:
 
     df_1 = pd.read_excel(file_path)
     # st.write(df_1)
-    var_proy = var_interes[1]
+    var_proy = selected_var
     # st.write(var_proy)
 
     df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
@@ -142,10 +147,10 @@ if file_path is not None:
 
     pred_1 = modelo.predict(x_frame)
 
-    y_pred = pd.DataFrame((pred_1), columns=['prediction'])
+    y_pred = pd.DataFrame(pred_1, columns=['Estimado'])
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(y_pred.reset_index(drop=True),
+    ax.plot(y_pred['Estimado'].reset_index(drop=True),
             label='Modelo', color='blue', linewidth=2)
     ax.plot(y_frame.reset_index(drop=True),
             label='Produccion', color='red', linestyle='--')
@@ -156,6 +161,6 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
     y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
                     index=False, startcol=2)
-    st.write(y_pred.tail(6))
+    st.write(y_pred.tail(6).round(0))
 else:
     st.info("Por favor, sube un archivo Excel.")
