@@ -14,6 +14,10 @@ logo_path = Path(__file__).with_name("Agromejora.jpg")
 if logo_path.exists():
     st.image(str(logo_path), width=220)
 
+readme_path = Path(__file__).with_name("README.md")
+if readme_path.exists():
+    st.link_button("Abrir README", readme_path.resolve().as_uri())
+
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
     df = pd.read_excel(file_path)
@@ -121,7 +125,7 @@ if file_path is not None:
     print(index_1*m2_1)
     proy = pd.Series(index_1*m2_1)
     # st.write(proy.tail(6))
-# proy.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',index=False, startcol=0)
+
 
 # Entrenamiento modelo
 
@@ -131,7 +135,7 @@ if file_path is not None:
     df_1 = pd.read_excel(file_path)
     y = df_1[df_1['Bloque&Varid'].isin([var_proy])]
     y_frame = pd.DataFrame(y['Produccion']).reset_index(drop=True).dropna()
-    print(len(y_frame))
+    y_len = len(y_frame)
     x = pd.DataFrame(index_1[0:]).dropna()
     x_frame = pd.DataFrame(x)
     x_len = (len(x_frame))
