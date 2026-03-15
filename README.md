@@ -13,9 +13,9 @@ Para iniciar, se requiere un archivo Excel con los campos:
 - Ciclo
 - Tallos/m2
 
-Los patrones son producciones anteriores, de similitud de clima, finca, pinch, ciclo. Se recomienda tener al menos datos 7 variedades o mas, de 52 semanas anteriores en un archivo excel. 
+Los patrones son producciones anteriores, de similitud de clima, finca, pinch, ciclo. Se recomienda tener al menos datos de 7 variedades o mas, de 52 semanas anteriores en un archivo excel. 
 El modelo solo puede proyectar variedades incluidas en el archivo de entrada.
-Ej. Deseo proyectar la semana 10,11,12,13 del 2026, copio y pego los historicos en la columna de 'Produccion' en las semanas a proyectar 2026, para que el modelo proyecte lo indicado 
+Ej. Deseo proyectar la semana 10,11,12,13 del 2026, copio y pego los historicos en la columna de 'Produccion' en las semanas a proyectar 2026, para que el modelo proyecte lo indicado. 
 
 El siguiente paso es subir el archivo al sistema, seleccionar la variedad y visualizar la proyeccion del modelo.
 
