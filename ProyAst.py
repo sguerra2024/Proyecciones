@@ -12,7 +12,7 @@ import streamlit as st
 
 logo_path = Path(__file__).with_name("Agromejora.jpg")
 if logo_path.exists():
-    st.image(str(logo_path), width=220)
+    st.image(str(logo_path), width=190)
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
@@ -50,8 +50,7 @@ if file_path is not None:
 # CARACTERISTICAS DEL PATRON"
 
     st.write('CARACTERISTICAS DE LA BASE PATRON')
-    st.write('Temp_Max', df['TMP MAX'].max())
-    st.write('Temp_Min', df['TMP MIN'].min())
+    st.write('Prom Tallos/m2', df['Tallos/m2'].max())
 
 
 # 2. CALCULAR EL MENOR MSE
@@ -86,8 +85,6 @@ if file_path is not None:
     print(arr_list)
 
 # 3.- IMPORTAR BASE DE VARIEDADES A PROYECTAR Y COMPARAR CURVA CON PATRON SELECCIONADO\n",
-
-# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
     df_3 = pd.read_excel(file_path)
     var_patron = arr_list[0]
@@ -155,10 +152,10 @@ if file_path is not None:
 
     pred_1 = modelo.predict(x_frame)
 
-    y_pred = pd.DataFrame(pred_1, columns=['Estimado'])
+    y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(y_pred['Estimado'].reset_index(drop=True),
+    ax.plot(y_pred['Estimado_modelo'].reset_index(drop=True),
             label='Modelo', color='blue', linewidth=2)
     ax.plot(y_frame.reset_index(drop=True),
             label='Produccion', color='red', linestyle='--')
@@ -169,6 +166,6 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
     y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
                     index=False, startcol=2)
-    st.write(y_pred.tail(6).round(0))
+    st.write(y_pred.tail(4).round(0))
 else:
-    st.info("Por favor, sube un archivo Excel.")
+    st.info("Por favor, sube el archivo Excel.")

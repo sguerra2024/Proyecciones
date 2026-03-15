@@ -11,15 +11,15 @@ Para iniciar, se requiere un archivo Excel con los campos:
 - Produccion
 - m2Variedad
 - Ciclo
-- TMP
-- TMP MAX
-- TMP MIN
 - Tallos/m2
 
-Para crear patrones historicos se recomienda al menos un ano de datos y 7 variedades o mas. El modelo solo puede proyectar variedades incluidas en el archivo de entrada.
-Ej.si deseo proyectar la semana 10,11,12,13 del 2016, debo copiar los historicos correspondientes en las semanas a proyectar 2026, para que el modelo proyecte lo indicado 
+Los patrones son producciones anteriores, de similitud de clima, finca, pinch, ciclo. Se recomienda tener al menos datos 7 variedades o mas, de 52 semanas anteriores en un archivo excel. 
+El modelo solo puede proyectar variedades incluidas en el archivo de entrada.
+Ej. Deseo proyectar la semana 10,11,12,13 del 2026, copio y pego los historicos en la columna de 'Produccion' en las semanas a proyectar 2026, para que el modelo proyecte lo indicado 
 
 El siguiente paso es subir el archivo al sistema, seleccionar la variedad y visualizar la proyeccion del modelo.
+
+Para mayor información contacto: +593 985381052; +1(240)3576750; sguerra@agromejoraecuador.com
 
 Estructura actual:
 - ProyAst.py: interfaz Streamlit.
