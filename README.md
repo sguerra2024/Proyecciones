@@ -1,9 +1,25 @@
-Esta aplicacion le sirve para estimar la producción semanal de rosas, en base a patrones historicos y un modelo machine learning.
-Siga los siguientes pasos:
-1. Elabora una hoja EXCEL p¿que contenga las siguientes columnas:
-     AÑO
-     FINCA
-     
+Estimaciones de produccion semanal de rosas, en base a patrones historicos y un modelo de machine learning.
+
+Para iniciar, se requiere un archivo Excel con los campos:
+- Anio
+- Semana
+- Producto
+- Finca
+- Bloque
+- Variedad
+- Bloque&Varid
+- Produccion
+- m2Variedad
+- Ciclo
+- TMP
+- TMP MAX
+- TMP MIN
+- Tallos/m2
+
+Para crear patrones historicos utiles se recomienda al menos un ano de datos y 7 variedades o mas. El modelo solo puede proyectar variedades incluidas en el archivo de entrada.
+
+El siguiente paso es subir el archivo al sistema, seleccionar la variedad y visualizar la proyeccion del modelo.
+
 Estructura actual:
 - ProyAst.py: interfaz Streamlit.
 - api_render.py: API FastAPI para Render.

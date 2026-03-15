@@ -16,7 +16,11 @@ if logo_path.exists():
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
-    st.link_button("Abrir README", readme_path.resolve().as_uri())
+    with st.expander("Ver README"):
+        try:
+            st.markdown(readme_path.read_text(encoding="utf-8"))
+        except Exception:
+            st.code(readme_path.read_text(errors="ignore"))
 
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
