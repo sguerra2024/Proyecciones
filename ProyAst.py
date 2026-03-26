@@ -12,7 +12,7 @@ import streamlit as st
 
 logo_path = Path(__file__).with_name("Denmar.jpeg")
 if logo_path.exists():
-    st.image(str(logo_path), width=190)
+    st.image(str(logo_path), width=170)
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
