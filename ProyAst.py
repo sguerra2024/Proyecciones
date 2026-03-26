@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import streamlit as st
 
-logo_path = Path(__file__).with_name("Agromejora.jpg")
+logo_path = Path(__file__).with_name("Denmar.jpeg")
 if logo_path.exists():
     st.image(str(logo_path), width=190)
 
