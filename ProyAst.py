@@ -136,6 +136,39 @@ if file_path is not None:
     df_1 = pd.read_excel(file_path)
     y = df_1[df_1['Bloque&Varid'].isin([var_proy])]
     y_frame = pd.DataFrame(y['Produccion']).reset_index(drop=True).dropna()
+
+    # Promedio semanal de Tallos/m2 por cada anio para calcular factor de correccion.
+    df_promedio = y[['Anio', 'Semana', 'Tallos/m2']].dropna().copy()
+    promedio_semanal = (
+        df_promedio
+        .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
+        .mean()
+    )
+    promedio_semanal_anual = (
+        promedio_semanal
+        .groupby('Anio', as_index=False)['Tallos/m2']
+        .mean()
+        .rename(columns={'Tallos/m2': 'promedio_semanal_tallos_m2'})
+        .sort_values('Anio')
+    )
+
+    factor_correccion = 1.0
+    if not promedio_semanal_anual.empty:
+        anio_objetivo = promedio_semanal_anual['Anio'].max()
+        prom_objetivo = float(
+            promedio_semanal_anual.loc[
+                promedio_semanal_anual['Anio'] == anio_objetivo,
+                'promedio_semanal_tallos_m2'
+            ].iloc[0]
+        )
+        historico = promedio_semanal_anual[
+            promedio_semanal_anual['Anio'] != anio_objetivo
+        ]['promedio_semanal_tallos_m2']
+        prom_historico = float(
+            historico.mean()) if not historico.empty else prom_objetivo
+        if prom_historico != 0:
+            factor_correccion = prom_objetivo / prom_historico
+
     y_len = len(y_frame)
     x = pd.DataFrame(index_1[0:]).dropna()
     x_frame = pd.DataFrame(x)
@@ -148,24 +181,67 @@ if file_path is not None:
 
     modelo = RandomForestRegressor(n_estimators=100, random_state=42)
 
-    modelo.fit(X_train, y_train)
+    modelo.fit(X_train, y_train.values.ravel())
 
     pred_1 = modelo.predict(x_frame)
 
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
+    y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(y_pred['Estimado_modelo'].reset_index(drop=True),
-            label='Modelo', color='blue', linewidth=2)
-    ax.plot(y_frame.reset_index(drop=True),
+    # Etiquetas eje X: Anio-Semana alineadas con x_frame
+    etiquetas_anio_semana = (
+        df_filtered_[['Anio', 'Semana']]
+        .dropna()
+        .reset_index(drop=True)
+        .apply(lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1)
+    )
+    n_puntos = len(y_pred)
+    etiquetas_x = etiquetas_anio_semana.iloc[:n_puntos].tolist()
+    x_pos = range(n_puntos)
+
+    # Marcar cambios de año para lineas verticales divisoras
+    cambios_anio = []
+    anio_prev = None
+    for i, lbl in enumerate(etiquetas_x):
+        anio_actual = lbl.split('-')[0]
+        if anio_prev and anio_actual != anio_prev:
+            cambios_anio.append(i)
+        anio_prev = anio_actual
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(x_pos, y_pred['Estimado_modelo'].reset_index(drop=True),
+            label='Modelo', color='orange', linewidth=2)
+    ax.plot(x_pos, y_frame.reset_index(drop=True),
             label='Produccion', color='red', linestyle='--')
-    ax.plot(proy.reset_index(drop=True), label='Proy_patron',
-            color='green', linestyle='-')
+    ax.plot(x_pos, proy.reset_index(drop=True),
+            label='Proy_patron', color='green', linestyle='-')
+
+    for c in cambios_anio:
+        ax.axvline(x=c, color='gray', linestyle=':', linewidth=1)
+
+    # Mostrar etiqueta cada 4 semanas para no saturar el eje
+    paso = max(1, n_puntos // 20)
+    ticks_pos = list(range(0, n_puntos, paso))
+    ticks_lbl = [etiquetas_x[i] for i in ticks_pos]
+    ax.set_xticks(ticks_pos)
+    ax.set_xticklabels(ticks_lbl, rotation=45, ha='right', fontsize=8)
+    ax.set_xlabel('Año - Semana')
+    ax.set_ylabel('Produccion')
+    ax.set_title(f'Proyeccion de produccion - {var_proy}')
     ax.legend()
     ax.grid(True)
+    plt.tight_layout()
     st.pyplot(fig, clear_figure=True)
+
+    st.write('Factor de correccion aplicado', round(factor_correccion, 4))
+    st.write('Promedio semanal Tallos/m2 por anio')
+    st.dataframe(promedio_semanal_anual, use_container_width=True)
+
     y_pred.to_excel(r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx',
                     index=False, startcol=2)
-    st.write(y_pred.tail(4).round(0))
+    etiquetas_tail = etiquetas_anio_semana.iloc[:len(y_pred)].tail(4).values
+    y_pred_tail = y_pred.tail(4).round(0).copy()
+    y_pred_tail.index = etiquetas_tail
+    st.write(y_pred_tail)
 else:
     st.info("Por favor, sube el archivo Excel.")
