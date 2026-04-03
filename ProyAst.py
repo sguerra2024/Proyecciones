@@ -49,8 +49,8 @@ if file_path is not None:
     # pd.pivot_table.plot(kind='lintch")e')
 # CARACTERISTICAS DEL PATRON"
 
-    st.write('CARACTERISTICAS DE LA BASE PATRON')
-    st.write('Prom Tallos/m2', df['Tallos/m2'].max())
+    #st.write('CARACTERISTICAS DE LA BASE PATRON')
+    #st.write('Prom Tallos/m2', df['Tallos/m2'].max())
 
 
 # 2. CALCULAR EL MENOR MSE
