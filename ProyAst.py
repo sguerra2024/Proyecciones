@@ -1,9 +1,9 @@
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 from typing import Any
 import subprocess
 import sys
+import pickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,6 +16,9 @@ if __name__ == "__main__" and "--via-run" not in sys.argv:
     subprocess.run([sys.executable, "-m", "streamlit",
                    "run", __file__, "--", "--via-run"], check=False)
     raise SystemExit
+
+models_dir = Path(__file__).with_name("modelos")
+models_dir.mkdir(exist_ok=True)
 
 logo_path = Path(__file__).with_name("Denmar.jpeg")
 if logo_path.exists():
@@ -141,16 +144,61 @@ if file_path is not None:
 # file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
     df_1 = pd.read_excel(file_path)
-    y = df_1[df_1['Bloque&Varid'].isin([var_proy])]
-    y_frame = pd.DataFrame(y['Produccion']).reset_index(drop=True).dropna()
+    y_actual = df_1[df_1['Bloque&Varid'].isin([var_proy])].copy()
+
+    ejecutar_entrenamiento = st.button('Entrenar / Reentrenar ahora')
+    if ejecutar_entrenamiento:
+        st.session_state['entrenado'] = True
+    if not st.session_state.get('entrenado', False):
+        st.info(
+            'Configura la opcion de historico y presiona "Entrenar / Reentrenar ahora".')
+        st.stop()
+
+    entrenamiento_df = (
+        y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+        .dropna()
+        .reset_index(drop=True)
+    )
+    entrenamiento_df = entrenamiento_df.sort_values(
+        ['Anio', 'Semana']
+    ).reset_index(drop=True)
+
+    # Ajustar el objetivo de entrenamiento con la regla agronomica
+    # para que el modelo la aprenda, no solo se corrija al final.
+    prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
+    running_max_train = -np.inf
+    ajustes_train = 0
+    for i in range(len(prod_train) - 1):
+        if prod_train[i] > running_max_train:
+            running_max_train = prod_train[i]
+            limite_next = prod_train[i] * 0.57
+            if prod_train[i + 1] > limite_next:
+                prod_train[i + 1] = limite_next
+                ajustes_train += 1
+        else:
+            running_max_train = max(running_max_train, prod_train[i])
+    entrenamiento_df['Produccion_ajustada'] = prod_train
+
+    eval_actual_df = (
+        y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+        .dropna()
+        .sort_values(['Anio', 'Semana'])
+        .reset_index(drop=True)
+    )
+    y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
     # Promedio semanal de Tallos/m2 por cada anio para calcular factor de correccion.
-    df_promedio = y[['Anio', 'Semana', 'Tallos/m2']].dropna().copy()
-    promedio_semanal = (
-        df_promedio
-        .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
-        .mean()
-    )
+    if {'Anio', 'Semana', 'Tallos/m2'}.issubset(y_actual.columns):
+        df_promedio = y_actual[['Anio', 'Semana', 'Tallos/m2']].dropna().copy()
+        promedio_semanal = (
+            df_promedio
+            .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
+            .mean()
+        )
+    else:
+        df_promedio = pd.DataFrame(columns=['Anio', 'Semana', 'Tallos/m2'])
+        promedio_semanal = pd.DataFrame(
+            columns=['Anio', 'Semana', 'Tallos/m2'])
     promedio_semanal_anual = (
         promedio_semanal
         .groupby('Anio', as_index=False)['Tallos/m2']
@@ -176,31 +224,95 @@ if file_path is not None:
         if prom_historico != 0:
             factor_correccion = prom_objetivo / prom_historico
 
-    y_len = len(y_frame)
-    x = pd.DataFrame(index_1[0:]).dropna()
-    x_frame = pd.DataFrame(x)
-    x_len = (len(x_frame))
-    print(x_frame)
-    y_final = y_frame.iloc[:x_len]
-    print(y_final)
-    X_train, X_test, y_train, y_test = train_test_split(
-        x_frame, y_frame, test_size=0.2, random_state=42)
+    n_train = len(entrenamiento_df)
+    if n_train < 5:
+        st.error('No hay suficientes datos para entrenar/reentrenar el modelo.')
+        st.stop()
 
-    modelo = RandomForestRegressor(n_estimators=100, random_state=42)
+    x_train_df = pd.DataFrame(
+        entrenamiento_df['Tallos/m2']).reset_index(drop=True)
+    x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
+    y_train_df = pd.DataFrame(
+        entrenamiento_df['Produccion_ajustada']).reset_index(drop=True)
+
+    if len(eval_actual_df) == 0:
+        st.error(
+            'No hay suficientes datos actuales validos para generar la evaluacion.')
+        st.stop()
+
+    x_frame = pd.DataFrame(eval_actual_df['Tallos/m2']).reset_index(drop=True)
+    x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
+    y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
+
+    split_idx = int(len(x_train_df) * 0.8)
+    split_idx = min(max(split_idx, 1), len(x_train_df) - 1)
+    X_train, X_test = x_train_df.iloc[:split_idx], x_train_df.iloc[split_idx:]
+    y_train, y_test = y_train_df.iloc[:split_idx], y_train_df.iloc[split_idx:]
+
+    modelo = RandomForestRegressor(
+        n_estimators=100,
+        random_state=42,
+        max_depth=12,
+        min_samples_leaf=2
+    )
 
     modelo.fit(X_train, y_train.values.ravel())
+
+    model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
+    model_file = models_dir / f'rf_{model_name}.pkl'
+    with open(model_file, 'wb') as f:
+        pickle.dump(modelo, f)
+
+    st.info('Modelo entrenado con base actual y regla agronomica integrada.')
+    st.caption(f'Modelo guardado en: {model_file.name}')
 
     pred_1 = modelo.predict(x_frame)
 
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
     y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
 
+    # Regla agronomica estricta: despues de cada nuevo maximo semanal,
+    # la semana siguiente debe quedar por debajo del 57% de ese pico.
+    pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
+    ajustes_pico = 0
+    running_max = -np.inf
+    for i in range(len(pred_vals) - 1):
+        if pred_vals[i] > running_max:
+            running_max = pred_vals[i]
+            limite_siguiente = pred_vals[i] * 0.57
+            if pred_vals[i + 1] > limite_siguiente:
+                pred_vals[i + 1] = limite_siguiente
+                ajustes_pico += 1
+        else:
+            running_max = max(running_max, pred_vals[i])
+
+    # Segunda pasada de seguridad para evitar picos consecutivos por redondeos.
+    for i in range(1, len(pred_vals)):
+        max_hasta_prev = pred_vals[:i].max()
+        if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
+            pred_vals[i] = pred_vals[i - 1] * 0.57
+            ajustes_pico += 1
+
+    # Regla de valores iguales consecutivos: el segundo se ajusta al 57% del primero.
+    ajustes_iguales = 0
+    for i in range(1, len(pred_vals)):
+        if pred_vals[i] == pred_vals[i - 1]:
+            pred_vals[i] = pred_vals[i - 1] * 0.57
+            ajustes_iguales += 1
+
+    # Ajuste de media: si la media del modelo difiere de la media de produccion,
+    # escalar las predicciones para igualarlas.
+    prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
+    media_real = prod_real_vals.mean()
+    media_modelo = pred_vals.mean()
+    if media_modelo != 0 and not np.isclose(media_modelo, media_real):
+        pred_vals = pred_vals * (media_real / media_modelo)
+
+    y_pred['Estimado_modelo'] = pred_vals
+
     # Etiquetas eje X: Anio-Semana alineadas con x_frame
-    etiquetas_anio_semana = (
-        df_filtered_[['Anio', 'Semana']]
-        .dropna()
-        .reset_index(drop=True)
-        .apply(lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1)
+    etiquetas_anio_semana = eval_actual_df.apply(
+        lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1
     )
     n_puntos = len(y_pred)
     etiquetas_x = etiquetas_anio_semana.iloc[:n_puntos].tolist()
