@@ -1,21 +1,12 @@
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
-from typing import Any
-import subprocess
-import sys
 import pickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from fastapi import FastAPI
-from pydantic import BaseModel
 import streamlit as st
 
-if __name__ == "__main__" and "--via-run" not in sys.argv:
-    subprocess.run([sys.executable, "-m", "streamlit",
-                   "run", __file__, "--", "--via-run"], check=False)
-    raise SystemExit
 
 models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
