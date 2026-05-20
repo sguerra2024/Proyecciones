@@ -137,22 +137,26 @@ if file_path is not None:
     df_1 = pd.read_excel(file_path)
     y_actual = df_1[df_1['Bloque&Varid'].isin([var_proy])].copy()
 
-    ejecutar_entrenamiento = st.button('Entrenar / Reentrenar ahora')
-    if ejecutar_entrenamiento:
-        st.session_state['entrenado'] = True
-    if not st.session_state.get('entrenado', False):
-        st.info(
-            'Configura la opcion de historico y presiona "Entrenar / Reentrenar ahora".')
-        st.stop()
-
     entrenamiento_df = (
         y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
         .dropna()
         .reset_index(drop=True)
     )
+    entrenamiento_df['Anio'] = pd.to_numeric(
+        entrenamiento_df['Anio'], errors='coerce')
+    entrenamiento_df['Semana'] = pd.to_numeric(
+        entrenamiento_df['Semana'], errors='coerce')
+    entrenamiento_df = entrenamiento_df.dropna(subset=['Anio', 'Semana'])
+    entrenamiento_df['Anio'] = entrenamiento_df['Anio'].astype(int)
+    entrenamiento_df['Semana'] = entrenamiento_df['Semana'].astype(int)
     entrenamiento_df = entrenamiento_df.sort_values(
         ['Anio', 'Semana']
     ).reset_index(drop=True)
+    entrenamiento_df = entrenamiento_df[
+        (entrenamiento_df['Anio'] > 2025) |
+        ((entrenamiento_df['Anio'] == 2025)
+         & (entrenamiento_df['Semana'] >= 1))
+    ].reset_index(drop=True)
 
     # Ajustar el objetivo de entrenamiento con la regla agronomica
     # para que el modelo la aprenda, no solo se corrija al final.
@@ -216,6 +220,9 @@ if file_path is not None:
             factor_correccion = prom_objetivo / prom_historico
 
     n_train = len(entrenamiento_df)
+    if n_train == 0:
+        st.error('No hay datos desde 2025-01 para entrenar el modelo.')
+        st.stop()
     if n_train < 5:
         st.error('No hay suficientes datos para entrenar/reentrenar el modelo.')
         st.stop()
@@ -239,23 +246,42 @@ if file_path is not None:
     split_idx = min(max(split_idx, 1), len(x_train_df) - 1)
     X_train, X_test = x_train_df.iloc[:split_idx], x_train_df.iloc[split_idx:]
     y_train, y_test = y_train_df.iloc[:split_idx], y_train_df.iloc[split_idx:]
-
-    modelo = RandomForestRegressor(
-        n_estimators=100,
-        random_state=42,
-        max_depth=12,
-        min_samples_leaf=2
-    )
-
-    modelo.fit(X_train, y_train.values.ravel())
+    inicio_train = entrenamiento_df.iloc[0]
+    fin_train = entrenamiento_df.iloc[split_idx - 1]
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    with open(model_file, 'wb') as f:
-        pickle.dump(modelo, f)
+    train_key = f'entrenado_{model_name}'
 
-    st.info('Modelo entrenado con base actual y regla agronomica integrada.')
-    st.caption(f'Modelo guardado en: {model_file.name}')
+    if train_key not in st.session_state:
+        modelo = RandomForestRegressor(
+            n_estimators=100,
+            random_state=42,
+            max_depth=12,
+            min_samples_leaf=2
+        )
+        modelo.fit(X_train, y_train.values.ravel())
+        st.session_state[train_key] = modelo
+        with open(model_file, 'wb') as f:
+            pickle.dump(modelo, f)
+        st.info('Modelo entrenado automaticamente una vez con el 80% de los datos.')
+        st.caption(
+            'Rango de entrenamiento usado: '
+            f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
+            f"a {int(fin_train['Anio'])}-{int(fin_train['Semana']):02d} "
+            f"({split_idx} de {len(entrenamiento_df)} registros)."
+        )
+        st.caption(f'Modelo guardado en: {model_file.name}')
+    else:
+        modelo = st.session_state[train_key]
+        st.caption(
+            'Modelo ya entrenado en esta sesion; se reutiliza para la proyeccion.')
+        st.caption(
+            'Rango de entrenamiento configurado: '
+            f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
+            f"a {int(fin_train['Anio'])}-{int(fin_train['Semana']):02d} "
+            f"({split_idx} de {len(entrenamiento_df)} registros)."
+        )
 
     pred_1 = modelo.predict(x_frame)
 
