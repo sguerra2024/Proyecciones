@@ -13,7 +13,7 @@ models_dir.mkdir(exist_ok=True)
 
 logo_path = Path(__file__).with_name("Denmar.jpeg")
 if logo_path.exists():
-    st.image(str(logo_path), width=170)
+    st.image(str(logo_path), width=100)
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
@@ -89,17 +89,19 @@ if file_path is not None:
 
     df_3 = pd.read_excel(file_path)
     var_patron = arr_list[0]
-    var_patron_list = list(var_patron[0])
+    var_patron_id = str(var_patron[0][0])
     var_patron_1 = arr_list[1]
-    var_patron_alt = list(var_patron_1[0])
+    var_patron_alt_id = str(var_patron_1[0][0])
     # st.write(var_proy)
     # st.write(var_patron_list)
     # st.write(var_patron_alt)
 
-    if [var_proy] == var_patron_list:
-        combined_varieties = ([var_proy] + var_patron_alt)
+    if var_proy == var_patron_id:
+        patron_seleccionado = var_patron_alt_id
     else:
-        combined_varieties = ([var_proy] + var_patron_list)
+        patron_seleccionado = var_patron_id
+
+    combined_varieties = [var_proy, patron_seleccionado]
 
     df_filtered = df_3[df_3['Bloque&Varid'].isin(combined_varieties)]
     # st.write(df_filtered.head())
@@ -107,6 +109,8 @@ if file_path is not None:
                                             columns=['Bloque&Varid'],
                                             index=['Anio', 'Semana'],
                                             aggfunc='sum')
+    # st.write('pivot_table_3')
+    # st.dataframe(pivot_table_3, width='stretch')
     # pivot_table_3.plot(kind='line')
 
 # 4. CALCULO DE LA PROYECCION CON PATRON SELECCIONADO Y MODEL0\n"
@@ -114,10 +118,7 @@ if file_path is not None:
 # file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
 
     df = pd.read_excel(file_path)
-    if [var_proy] == var_patron_list:
-        var_patron_list = var_patron_alt
-
-    df_filtered = df[df['Bloque&Varid'].isin(var_patron_list)]
+    df_filtered = df[df['Bloque&Varid'].isin([patron_seleccionado])]
 # df_filtered_ = df[df['Bloque&Varid'].isin(var_proy)]
     index = np.array(df_filtered['Tallos/m2'])
     m2 = np.array(df_filtered_.to_records(index=False))[0]
@@ -136,6 +137,32 @@ if file_path is not None:
 
     df_1 = pd.read_excel(file_path)
     y_actual = df_1[df_1['Bloque&Varid'].isin([var_proy])].copy()
+    patron_actual = df_1[df_1['Bloque&Varid'].isin(
+        [patron_seleccionado])].copy()
+
+    if patron_actual.empty:
+        st.error('No hay datos del patron seleccionado para entrenar/prediccion.')
+        st.stop()
+
+    patron_weekly = patron_actual[[
+        'Anio', 'Semana', 'Tallos/m2']].dropna().copy()
+    patron_weekly['Anio'] = pd.to_numeric(
+        patron_weekly['Anio'], errors='coerce')
+    patron_weekly['Semana'] = pd.to_numeric(
+        patron_weekly['Semana'], errors='coerce')
+    patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
+    patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
+    patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
+    patron_weekly = (
+        patron_weekly
+        .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
+        .mean()
+        .rename(columns={'Tallos/m2': 'Tallos_m2_patron'})
+    )
+
+    # Pesos para priorizar el patron en entrenamiento y prediccion.
+    patron_feature_weight = 5
+    patron_prediction_weight = 0.7
 
     entrenamiento_df = (
         y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
@@ -157,6 +184,17 @@ if file_path is not None:
         ((entrenamiento_df['Anio'] == 2025)
          & (entrenamiento_df['Semana'] >= 1))
     ].reset_index(drop=True)
+    entrenamiento_df = entrenamiento_df.merge(
+        patron_weekly,
+        on=['Anio', 'Semana'],
+        how='left'
+    )
+    entrenamiento_df['Tallos_m2_patron'] = entrenamiento_df[
+        'Tallos_m2_patron'
+    ].fillna(entrenamiento_df['Tallos/m2'])
+    entrenamiento_df['Tallos_m2_patron_ponderado'] = (
+        entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
+    )
 
     # Ajustar el objetivo de entrenamiento con la regla agronomica
     # para que el modelo la aprenda, no solo se corrija al final.
@@ -179,6 +217,17 @@ if file_path is not None:
         .dropna()
         .sort_values(['Anio', 'Semana'])
         .reset_index(drop=True)
+    )
+    eval_actual_df = eval_actual_df.merge(
+        patron_weekly,
+        on=['Anio', 'Semana'],
+        how='left'
+    )
+    eval_actual_df['Tallos_m2_patron'] = eval_actual_df[
+        'Tallos_m2_patron'
+    ].fillna(eval_actual_df['Tallos/m2'])
+    eval_actual_df['Tallos_m2_patron_ponderado'] = (
+        eval_actual_df['Tallos_m2_patron'] * patron_feature_weight
     )
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
@@ -227,8 +276,9 @@ if file_path is not None:
         st.error('No hay suficientes datos para entrenar/reentrenar el modelo.')
         st.stop()
 
-    x_train_df = pd.DataFrame(
-        entrenamiento_df['Tallos/m2']).reset_index(drop=True)
+    x_train_df = entrenamiento_df[
+        ['Tallos/m2', 'Tallos_m2_patron', 'Tallos_m2_patron_ponderado']
+    ].reset_index(drop=True)
     x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
     y_train_df = pd.DataFrame(
         entrenamiento_df['Produccion_ajustada']).reset_index(drop=True)
@@ -238,7 +288,9 @@ if file_path is not None:
             'No hay suficientes datos actuales validos para generar la evaluacion.')
         st.stop()
 
-    x_frame = pd.DataFrame(eval_actual_df['Tallos/m2']).reset_index(drop=True)
+    x_frame = eval_actual_df[
+        ['Tallos/m2', 'Tallos_m2_patron', 'Tallos_m2_patron_ponderado']
+    ].reset_index(drop=True)
     x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
@@ -264,7 +316,7 @@ if file_path is not None:
         st.session_state[train_key] = modelo
         with open(model_file, 'wb') as f:
             pickle.dump(modelo, f)
-        st.info('Modelo entrenado automaticamente una vez con el 80% de los datos.')
+        # st.info('Modelo entrenado automaticamente una vez con el 80% de los datos.')
         st.caption(
             'Rango de entrenamiento usado: '
             f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
@@ -291,12 +343,22 @@ if file_path is not None:
     # Regla agronomica estricta: despues de cada nuevo maximo semanal,
     # la semana siguiente debe quedar por debajo del 57% de ese pico.
     pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
+
+    # Mezcla dirigida con la proyeccion del patron para dar mas peso en prediccion.
+    proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
+    n_blend = min(len(pred_vals), len(proy_vals))
+    if n_blend > 0:
+        pred_vals[:n_blend] = (
+            (1 - patron_prediction_weight) * pred_vals[:n_blend]
+            + patron_prediction_weight * proy_vals[:n_blend]
+        )
+
     ajustes_pico = 0
     running_max = -np.inf
     for i in range(len(pred_vals) - 1):
         if pred_vals[i] > running_max:
             running_max = pred_vals[i]
-            limite_siguiente = pred_vals[i] * 0.57
+            limite_siguiente = pred_vals[i] * 0.4
             if pred_vals[i + 1] > limite_siguiente:
                 pred_vals[i + 1] = limite_siguiente
                 ajustes_pico += 1
@@ -307,14 +369,14 @@ if file_path is not None:
     for i in range(1, len(pred_vals)):
         max_hasta_prev = pred_vals[:i].max()
         if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1] * 0.57
+            pred_vals[i] = pred_vals[i - 1] * 0.4
             ajustes_pico += 1
 
-    # Regla de valores iguales consecutivos: el segundo se ajusta al 57% del primero.
+    # Regla de valores iguales consecutivos: el segundo se ajusta al 40% del primero.
     ajustes_iguales = 0
     for i in range(1, len(pred_vals)):
         if pred_vals[i] == pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1] * 0.57
+            pred_vals[i] = pred_vals[i - 1] * 0.4
             ajustes_iguales += 1
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
