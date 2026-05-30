@@ -500,7 +500,7 @@ if file_path is not None:
 
         st.success(
             f'Excel exportado con todos los datos del modelo en: {ruta_salida}')
-    y_pred_tail = y_pred.tail(5).round(0).copy()
+    y_pred_tail = y_pred.tail(4).round(0).copy()
     etiquetas_tail = etiquetas_anio_semana.iloc[:len(
         y_pred)].tail(len(y_pred_tail)).values
     y_pred_tail.index = etiquetas_tail
