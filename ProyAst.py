@@ -121,9 +121,17 @@ if file_path is not None:
     df_filtered = df[df['Bloque&Varid'].isin([patron_seleccionado])]
 # df_filtered_ = df[df['Bloque&Varid'].isin(var_proy)]
     index = np.array(df_filtered['Tallos/m2'])
-    m2 = np.array(df_filtered_.to_records(index=False))[0]
-    m2_1 = np.float64(m2[10])
-    print(var_proy, m2[10], 'M2')
+    m2 = df_filtered_.iloc[0]
+    m2_col = next(
+        (col for col in df_filtered_.columns if str(
+            col).strip().lower() == 'm2variedad'),
+        None
+    )
+    if m2_col is None:
+        st.error('No se encontro la columna m2Variedad en la base de datos.')
+        st.stop()
+    m2_1 = np.float64(m2[m2_col])
+    print(var_proy, m2[m2_col], 'M2')
     index_1 = np.float64(index)
     print(index_1*m2_1)
     proy = pd.Series(index_1*m2_1)
@@ -492,8 +500,9 @@ if file_path is not None:
 
         st.success(
             f'Excel exportado con todos los datos del modelo en: {ruta_salida}')
-    etiquetas_tail = etiquetas_anio_semana.iloc[:len(y_pred)].tail(4).values
-    y_pred_tail = y_pred.tail(4).round(0).copy()
+    y_pred_tail = y_pred.tail(5).round(0).copy()
+    etiquetas_tail = etiquetas_anio_semana.iloc[:len(
+        y_pred)].tail(len(y_pred_tail)).values
     y_pred_tail.index = etiquetas_tail
     st.write(y_pred_tail)
 else:
