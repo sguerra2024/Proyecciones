@@ -1,9 +1,11 @@
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 import pickle
+import io
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import re
 from pathlib import Path
 import streamlit as st
 
@@ -30,12 +32,394 @@ if file_path is not None:
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
     fincas = sorted(df["Finca"].dropna().astype(str).unique().tolist())
     selected_finca = st.selectbox("Finca", fincas)
+    st.markdown(
+        "<p style='color:#F28C28;font-weight:700;margin:0.25rem 0 0.25rem 0;'>"
+        "PARA PROYECTAR FINCA:"
+        "</p>",
+        unsafe_allow_html=True
+    )
+    run_masiva = st.button('PROYECTAR FINCA')
 
     df_finca = df[df["Finca"].astype(str) == selected_finca].copy()
 
     variedades = sorted(
         df_finca["Bloque&Varid"].dropna().astype(str).unique().tolist())
     selected_var = st.selectbox("Bloque&Variedad", variedades)
+
+    def nombre_base_variedad(valor):
+        txt = str(valor).strip().upper()
+        txt = re.sub(r'^\d+\s*', '', txt)
+        txt = re.sub(r'\s+', ' ', txt)
+        return txt
+
+    def seleccionar_patron(arr_list, var_proy):
+        var_obj = str(var_proy).strip()
+        var_obj_norm = var_obj.upper()
+        base_obj = nombre_base_variedad(var_obj)
+        candidatos = [
+            str(item[0][0]).strip()
+            for item in arr_list
+            if str(item[0][0]).strip().upper() != var_obj_norm
+        ]
+        if len(candidatos) == 0:
+            raise ValueError('No hay suficientes patrones para comparar.')
+
+        # Regla para ambos flujos: priorizar misma familia cuando exista.
+        for candidato in candidatos:
+            if nombre_base_variedad(candidato) == base_obj and candidato.strip().upper() != var_obj_norm:
+                return candidato
+
+        # Respaldo defensivo para evitar auto-seleccion por cualquier inconsistencia.
+        for candidato in candidatos:
+            if candidato.strip().upper() != var_obj_norm:
+                return candidato
+
+        raise ValueError(
+            'No hay un patron distinto de la variedad proyectada.')
+
+    def proyectar_variedad_masiva(df_base, var_proy):
+        df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
+        if df_filtered_.empty:
+            raise ValueError('Sin datos para la variedad seleccionada.')
+
+        pivot_table_ = df_filtered_.pivot_table(values=['Tallos/m2'],
+                                                columns=['Bloque&Varid'],
+                                                index=['Anio', 'Semana'],
+                                                aggfunc='sum')
+        arr_2 = np.array(pivot_table_).reshape(-1)
+
+        arr_list = []
+        for name, group in df_base.groupby(['Bloque&Varid']):
+            vals = group['Tallos/m2'].to_numpy()
+            n_cmp = min(len(vals), len(arr_2))
+            if n_cmp == 0:
+                continue
+            mse = np.mean(abs(vals[:n_cmp] - arr_2[:n_cmp]))
+            arr_list.append((name, mse))
+
+        if len(arr_list) < 2:
+            raise ValueError('No hay suficientes patrones para comparar.')
+
+        arr_list.sort(key=lambda x: x[1])
+        patron_seleccionado = seleccionar_patron(arr_list, var_proy)
+
+        df_patron = df_base[df_base['Bloque&Varid'].isin(
+            [patron_seleccionado])]
+        if df_patron.empty:
+            raise ValueError('No hay datos del patron seleccionado.')
+
+        m2_col = next(
+            (col for col in df_filtered_.columns if str(
+                col).strip().lower() == 'm2variedad'),
+            None
+        )
+        if m2_col is None:
+            raise ValueError(
+                'No se encontro la columna m2Variedad en la base de datos.')
+
+        m2_1 = np.float64(df_filtered_.iloc[0][m2_col])
+        proy = pd.Series(np.float64(np.array(df_patron['Tallos/m2'])) * m2_1)
+
+        y_actual = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
+        patron_actual = df_base[df_base['Bloque&Varid'].isin(
+            [patron_seleccionado])].copy()
+
+        patron_weekly = patron_actual[[
+            'Anio', 'Semana', 'Tallos/m2']].dropna().copy()
+        patron_weekly['Anio'] = pd.to_numeric(
+            patron_weekly['Anio'], errors='coerce')
+        patron_weekly['Semana'] = pd.to_numeric(
+            patron_weekly['Semana'], errors='coerce')
+        patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
+        patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
+        patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
+        patron_weekly = (
+            patron_weekly
+            .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
+            .mean()
+            .rename(columns={'Tallos/m2': 'Tallos_m2_patron'})
+        )
+
+        patron_feature_weight = 5
+        patron_prediction_weight = 0.45
+        peak_decay_train = 0.75
+        peak_decay_pred = 0.75
+
+        entrenamiento_df = (
+            y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+            .dropna()
+            .reset_index(drop=True)
+        )
+        entrenamiento_df['Anio'] = pd.to_numeric(
+            entrenamiento_df['Anio'], errors='coerce')
+        entrenamiento_df['Semana'] = pd.to_numeric(
+            entrenamiento_df['Semana'], errors='coerce')
+        entrenamiento_df = entrenamiento_df.dropna(subset=['Anio', 'Semana'])
+        entrenamiento_df['Anio'] = entrenamiento_df['Anio'].astype(int)
+        entrenamiento_df['Semana'] = entrenamiento_df['Semana'].astype(int)
+        entrenamiento_df = entrenamiento_df.sort_values(
+            ['Anio', 'Semana']).reset_index(drop=True)
+        entrenamiento_df = entrenamiento_df[
+            (entrenamiento_df['Anio'] > 2025) |
+            ((entrenamiento_df['Anio'] == 2025)
+             & (entrenamiento_df['Semana'] >= 1))
+        ].reset_index(drop=True)
+        entrenamiento_df = entrenamiento_df.merge(
+            patron_weekly,
+            on=['Anio', 'Semana'],
+            how='left'
+        )
+        entrenamiento_df['Tallos_m2_patron'] = entrenamiento_df[
+            'Tallos_m2_patron'
+        ].fillna(entrenamiento_df['Tallos/m2'])
+        entrenamiento_df['Tallos_m2_patron_ponderado'] = (
+            entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
+        )
+
+        prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
+        running_max_train = -np.inf
+        for i in range(len(prod_train) - 1):
+            if prod_train[i] > running_max_train:
+                running_max_train = prod_train[i]
+                limite_next = prod_train[i] * peak_decay_train
+                if prod_train[i + 1] > limite_next:
+                    prod_train[i + 1] = limite_next
+            else:
+                running_max_train = max(running_max_train, prod_train[i])
+        entrenamiento_df['Produccion_ajustada'] = prod_train
+
+        eval_actual_df = (
+            y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+            .dropna()
+            .sort_values(['Anio', 'Semana'])
+            .reset_index(drop=True)
+        )
+        eval_actual_df = eval_actual_df.merge(
+            patron_weekly,
+            on=['Anio', 'Semana'],
+            how='left'
+        )
+        eval_actual_df['Tallos_m2_patron'] = eval_actual_df[
+            'Tallos_m2_patron'
+        ].fillna(eval_actual_df['Tallos/m2'])
+        eval_actual_df['Tallos_m2_patron_ponderado'] = (
+            eval_actual_df['Tallos_m2_patron'] * patron_feature_weight
+        )
+
+        if len(entrenamiento_df) < 5 or len(eval_actual_df) == 0:
+            raise ValueError(
+                'No hay suficientes datos para entrenar/prediccion.')
+
+        x_train_df = entrenamiento_df[
+            ['Tallos/m2', 'Tallos_m2_patron_ponderado']
+        ].reset_index(drop=True)
+        x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
+        y_train_df = pd.DataFrame(
+            entrenamiento_df['Produccion_ajustada']).reset_index(drop=True)
+
+        x_frame = eval_actual_df[
+            ['Tallos/m2', 'Tallos_m2_patron_ponderado']
+        ].reset_index(drop=True)
+        x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
+        y_frame = pd.DataFrame(
+            eval_actual_df['Produccion']).reset_index(drop=True)
+
+        split_idx = int(len(x_train_df) * 0.8)
+        split_idx = min(max(split_idx, 1), len(x_train_df) - 1)
+
+        model_name = ''.join(
+            ch if ch.isalnum() else '_' for ch in str(var_proy))
+        train_key = f'entrenado_masivo_{model_name}_cal_v2'
+
+        if train_key not in st.session_state:
+            modelo = RandomForestRegressor(
+                n_estimators=100,
+                random_state=42,
+                max_depth=12,
+                min_samples_leaf=2
+            )
+            modelo.fit(x_train_df.iloc[:split_idx],
+                       y_train_df.iloc[:split_idx].values.ravel())
+            st.session_state[train_key] = modelo
+        else:
+            modelo = st.session_state[train_key]
+
+        y_pred = pd.DataFrame(modelo.predict(x_frame),
+                              columns=['Estimado_modelo'])
+        pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
+        proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
+        n_blend = min(len(pred_vals), len(proy_vals))
+        if n_blend > 0:
+            pred_vals[:n_blend] = (
+                (1 - patron_prediction_weight) * pred_vals[:n_blend]
+                + patron_prediction_weight * proy_vals[:n_blend]
+            )
+
+        running_max = -np.inf
+        for i in range(len(pred_vals) - 1):
+            if pred_vals[i] > running_max:
+                running_max = pred_vals[i]
+                limite_siguiente = pred_vals[i] * peak_decay_pred
+                if pred_vals[i + 1] > limite_siguiente:
+                    pred_vals[i + 1] = limite_siguiente
+            else:
+                running_max = max(running_max, pred_vals[i])
+
+        for i in range(1, len(pred_vals)):
+            max_hasta_prev = pred_vals[:i].max()
+            if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
+                pred_vals[i] = pred_vals[i - 1] * peak_decay_pred
+
+        prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
+        media_real = prod_real_vals.mean()
+        media_modelo = pred_vals.mean()
+        if media_modelo != 0 and not np.isclose(media_modelo, media_real):
+            pred_vals = pred_vals * (media_real / media_modelo)
+
+        y_pred['Estimado_modelo'] = pred_vals
+
+        etiquetas_anio_semana = eval_actual_df.apply(
+            lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1
+        )
+        n_export = min(
+            len(etiquetas_anio_semana),
+            len(y_frame),
+            len(proy),
+            len(y_pred)
+        )
+        df_export = pd.DataFrame({
+            'Variedad_proyectada': [var_proy] * n_export,
+            'Anio_Semana': etiquetas_anio_semana.iloc[:n_export].values,
+            'Produccion_real': y_frame.iloc[:n_export, 0].values,
+            'Proy_patron': proy.iloc[:n_export].values,
+            'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
+        })
+        df_export['Error'] = (
+            df_export['Produccion_real'] - df_export['Estimado_modelo']
+        )
+        df_export['Error_abs'] = df_export['Error'].abs()
+        df_export['Error_pct'] = np.where(
+            df_export['Produccion_real'] != 0,
+            (df_export['Error_abs'] / df_export['Produccion_real']) * 100,
+            np.nan
+        )
+
+        return {
+            'df_export': df_export,
+            'mse_modelo': mean_squared_error(df_export['Produccion_real'], df_export['Estimado_modelo']),
+            'mse_patron': mean_squared_error(df_export['Produccion_real'], df_export['Proy_patron'])
+        }
+
+    if run_masiva:
+        # La corrida masiva se limita a la finca seleccionada en pantalla.
+        df_masivo = df_finca.copy()
+        # Respetar el orden original de aparicion en la base.
+        variedades_todas = (
+            df_masivo['Bloque&Varid']
+            .dropna()
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
+
+        if len(variedades_todas) == 0:
+            st.warning(
+                'No hay Bloque&Varid disponibles en la finca seleccionada.')
+            st.stop()
+
+        resultados_export = []
+        resumen = []
+        errores = []
+        progreso = st.progress(0)
+
+        for i, var_item in enumerate(variedades_todas, start=1):
+            try:
+                resultado = proyectar_variedad_masiva(df_masivo, var_item)
+                resultados_export.append(resultado['df_export'])
+                resumen.append({
+                    'Variedad_proyectada': var_item,
+                    'MSE_modelo': resultado['mse_modelo'],
+                    'MSE_proy_patron': resultado['mse_patron']
+                })
+            except Exception as e:
+                errores.append({
+                    'Variedad_proyectada': var_item,
+                    'Error': str(e)
+                })
+            progreso.progress(i / len(variedades_todas))
+
+        if resultados_export:
+            df_export_todo = pd.concat(resultados_export, ignore_index=True)
+        else:
+            df_export_todo = pd.DataFrame(
+                columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
+
+        # Reordenar resultados al orden original del archivo cargado.
+        df_original_order = df_masivo.copy().reset_index(drop=True)
+        df_original_order['_orden_original'] = np.arange(
+            len(df_original_order))
+        # Evitar choque de nombres al hacer merge si la base ya trae esta columna.
+        if 'Estimado_modelo' in df_original_order.columns:
+            df_original_order = df_original_order.drop(
+                columns=['Estimado_modelo'])
+        df_original_order['Variedad_proyectada'] = df_original_order['Bloque&Varid'].astype(
+            str)
+        df_original_order['Anio_Semana'] = df_original_order.apply(
+            lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1
+        )
+
+        if 'Estimado_modelo' not in df_export_todo.columns:
+            df_export_todo['Estimado_modelo'] = np.nan
+
+        df_estimado_ordenado = df_original_order.merge(
+            df_export_todo[['Variedad_proyectada',
+                            'Anio_Semana', 'Estimado_modelo']],
+            on=['Variedad_proyectada', 'Anio_Semana'],
+            how='left'
+        ).sort_values('_orden_original')
+
+        # Si no se pudo proyectar una variedad/semana, exportar 0.
+        df_estimado_ordenado['Estimado_modelo'] = df_estimado_ordenado[
+            'Estimado_modelo'
+        ].fillna(0)
+        df_estimado_ordenado['Estimado_modelo'] = np.rint(
+            df_estimado_ordenado['Estimado_modelo']
+        ).astype(np.int64)
+        df_export_estimado = df_estimado_ordenado[[
+            'Estimado_modelo']].reset_index(drop=True)
+
+        if len(errores) == 0:
+            st.success('Proyeccion masiva completada.')
+        elif len(errores) == len(variedades_todas):
+            st.error(
+                'No se pudo proyectar ninguna variedad; '
+                'se exportara 0 en Estimado_modelo para todos los registros.'
+            )
+        else:
+            st.warning(
+                'Algunas variedades no se pudieron proyectar; '
+                'se exportara 0 en Estimado_modelo para esos casos.'
+            )
+            detalle_fallos = '\n'.join(
+                f"- {item['Variedad_proyectada']}: {item['Error']}" for item in errores
+            )
+            if detalle_fallos:
+                st.info(f'Motivos de no proyeccion:\n{detalle_fallos}')
+
+        buffer_masivo = io.BytesIO()
+        with pd.ExcelWriter(buffer_masivo, engine='openpyxl') as writer:
+            # Exportar unicamente la columna Estimado_modelo.
+            df_export_estimado.to_excel(
+                writer, sheet_name='Estimado_modelo', index=False)
+        st.download_button(
+            'Exportar datos a Excel',
+            data=buffer_masivo.getvalue(),
+            file_name='Proyecto_todas_variedades.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            key='descargar_masivo'
+        )
+
+        st.stop()
 
     df = pd.read_excel(file_path)
     df_info = pd.DataFrame(df)
@@ -88,18 +472,7 @@ if file_path is not None:
 # 3.- IMPORTAR BASE DE VARIEDADES A PROYECTAR Y COMPARAR CURVA CON PATRON SELECCIONADO\n",
 
     df_3 = pd.read_excel(file_path)
-    var_patron = arr_list[0]
-    var_patron_id = str(var_patron[0][0])
-    var_patron_1 = arr_list[1]
-    var_patron_alt_id = str(var_patron_1[0][0])
-    # st.write(var_proy)
-    # st.write(var_patron_list)
-    # st.write(var_patron_alt)
-
-    if var_proy == var_patron_id:
-        patron_seleccionado = var_patron_alt_id
-    else:
-        patron_seleccionado = var_patron_id
+    patron_seleccionado = seleccionar_patron(arr_list, var_proy)
 
     combined_varieties = [var_proy, patron_seleccionado]
 
@@ -170,7 +543,9 @@ if file_path is not None:
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
     patron_feature_weight = 5
-    patron_prediction_weight = 0.7
+    patron_prediction_weight = 0.45
+    peak_decay_train = 0.75
+    peak_decay_pred = 0.75
 
     entrenamiento_df = (
         y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
@@ -212,7 +587,7 @@ if file_path is not None:
     for i in range(len(prod_train) - 1):
         if prod_train[i] > running_max_train:
             running_max_train = prod_train[i]
-            limite_next = prod_train[i] * 0.57
+            limite_next = prod_train[i] * peak_decay_train
             if prod_train[i + 1] > limite_next:
                 prod_train[i + 1] = limite_next
                 ajustes_train += 1
@@ -285,7 +660,7 @@ if file_path is not None:
         st.stop()
 
     x_train_df = entrenamiento_df[
-        ['Tallos/m2', 'Tallos_m2_patron', 'Tallos_m2_patron_ponderado']
+        ['Tallos/m2', 'Tallos_m2_patron_ponderado']
     ].reset_index(drop=True)
     x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
     y_train_df = pd.DataFrame(
@@ -297,7 +672,7 @@ if file_path is not None:
         st.stop()
 
     x_frame = eval_actual_df[
-        ['Tallos/m2', 'Tallos_m2_patron', 'Tallos_m2_patron_ponderado']
+        ['Tallos/m2', 'Tallos_m2_patron_ponderado']
     ].reset_index(drop=True)
     x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
@@ -311,7 +686,7 @@ if file_path is not None:
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    train_key = f'entrenado_{model_name}'
+    train_key = f'entrenado_{model_name}_cal_v2'
 
     if train_key not in st.session_state:
         modelo = RandomForestRegressor(
@@ -366,7 +741,7 @@ if file_path is not None:
     for i in range(len(pred_vals) - 1):
         if pred_vals[i] > running_max:
             running_max = pred_vals[i]
-            limite_siguiente = pred_vals[i] * 0.4
+            limite_siguiente = pred_vals[i] * peak_decay_pred
             if pred_vals[i + 1] > limite_siguiente:
                 pred_vals[i + 1] = limite_siguiente
                 ajustes_pico += 1
@@ -377,14 +752,14 @@ if file_path is not None:
     for i in range(1, len(pred_vals)):
         max_hasta_prev = pred_vals[:i].max()
         if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1] * 0.4
+            pred_vals[i] = pred_vals[i - 1] * peak_decay_pred
             ajustes_pico += 1
 
-    # Regla de valores iguales consecutivos: el segundo se ajusta al 40% del primero.
+    # Regla de valores iguales consecutivos: mantener el valor evita caidas artificiales.
     ajustes_iguales = 0
     for i in range(1, len(pred_vals)):
         if pred_vals[i] == pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1] * 0.4
+            pred_vals[i] = pred_vals[i - 1]
             ajustes_iguales += 1
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
@@ -441,7 +816,7 @@ if file_path is not None:
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
     st.write('Promedio semanal Tallos/m2 por anio')
-    st.dataframe(promedio_semanal_anual, use_container_width=True)
+    st.dataframe(promedio_semanal_anual, width='stretch')
 
     n_export = min(
         len(etiquetas_anio_semana),
@@ -453,7 +828,7 @@ if file_path is not None:
     df_export = pd.DataFrame({
         'Variedad_proyectada': [var_proy] * n_export,
         'Anio_Semana': etiquetas_anio_semana.iloc[:n_export].values,
-        'Tallos_m2_patron': x_frame.iloc[:n_export, 0].values,
+        'Tallos_m2_patron': eval_actual_df['Tallos_m2_patron'].iloc[:n_export].values,
         'Produccion_real': y_frame.iloc[:n_export, 0].values,
         'Proy_patron': proy.iloc[:n_export].values,
         'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
@@ -477,29 +852,33 @@ if file_path is not None:
         df_export['Proy_patron']
     )
 
-    ruta_salida = r'C:\\Users\\Personal\\Desktop\\Proyecto.xlsx'
-    if st.button('Exportar datos a Excel'):
-        with pd.ExcelWriter(ruta_salida, engine='openpyxl') as writer:
-            df_export.to_excel(writer, sheet_name='Datos_modelo', index=False)
-            df_export[
-                ['Anio_Semana', 'Produccion_real', 'Estimado_modelo',
-                 'Error', 'Error_abs', 'Error_pct']
-            ].to_excel(writer, sheet_name='Errores_modelo', index=False)
-            promedio_semanal_anual.to_excel(
-                writer, sheet_name='Promedio_anual', index=False)
-            pd.DataFrame([
-                {'metrica': 'MSE_modelo', 'valor': mse_modelo},
-                {'metrica': 'MSE_proy_patron', 'valor': mse_patron},
-                {'metrica': 'factor_correccion', 'valor': factor_correccion},
-                {'metrica': 'MAE_modelo',
-                    'valor': df_export['Error_abs'].mean()},
-                {'metrica': 'MAPE_modelo_pct',
-                    'valor': df_export['Error_pct'].mean()},
-                {'metrica': 'variedad_proyectada', 'valor': var_proy}
-            ]).to_excel(writer, sheet_name='Resumen', index=False)
+    buffer_individual = io.BytesIO()
+    with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
+        df_export.to_excel(writer, sheet_name='Datos_modelo', index=False)
+        df_export[
+            ['Anio_Semana', 'Produccion_real', 'Estimado_modelo',
+             'Error', 'Error_abs', 'Error_pct']
+        ].to_excel(writer, sheet_name='Errores_modelo', index=False)
+        promedio_semanal_anual.to_excel(
+            writer, sheet_name='Promedio_anual', index=False)
+        pd.DataFrame([
+            {'metrica': 'MSE_modelo', 'valor': mse_modelo},
+            {'metrica': 'MSE_proy_patron', 'valor': mse_patron},
+            {'metrica': 'factor_correccion', 'valor': factor_correccion},
+            {'metrica': 'MAE_modelo',
+                'valor': df_export['Error_abs'].mean()},
+            {'metrica': 'MAPE_modelo_pct',
+                'valor': df_export['Error_pct'].mean()},
+            {'metrica': 'variedad_proyectada', 'valor': var_proy}
+        ]).to_excel(writer, sheet_name='Resumen', index=False)
 
-        st.success(
-            f'Excel exportado con todos los datos del modelo en: {ruta_salida}')
+    st.download_button(
+        'Exportar datos a Excel',
+        data=buffer_individual.getvalue(),
+        file_name='Proyecto.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        key='descargar_individual'
+    )
     y_pred_tail = y_pred.tail(4).round(0).copy()
     etiquetas_tail = etiquetas_anio_semana.iloc[:len(
         y_pred)].tail(len(y_pred_tail)).values
