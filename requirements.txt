@@ -9,4 +9,6 @@ streamlit
 python-multipart
 altair<5
 requests
+anthropic
+python-dotenv
 

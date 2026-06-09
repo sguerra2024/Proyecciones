@@ -2,12 +2,297 @@ from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 import pickle
 import io
+import importlib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import re
 from pathlib import Path
 import streamlit as st
+from dotenv import load_dotenv
+import os
+
+try:
+    anthropic = importlib.import_module('anthropic')
+except ImportError:
+    anthropic = None
+
+load_dotenv()
+
+api_key = os.getenv("ANTHROPIC_API_KEY")
+anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+
+def crear_cliente_anthropic():
+    if anthropic is None:
+        raise RuntimeError(
+            'La libreria anthropic no esta instalada en el entorno actual.'
+        )
+    if not api_key:
+        raise RuntimeError(
+            'No se encontro ANTHROPIC_API_KEY en las variables de entorno.'
+        )
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def consultar_anthropic(prompt_usuario):
+    cliente = crear_cliente_anthropic()
+    modelos_candidatos = []
+    for modelo in [anthropic_model, 'claude-sonnet-4-6', 'claude-haiku-4-5']:
+        if modelo and modelo not in modelos_candidatos:
+            modelos_candidatos.append(modelo)
+
+    ultimo_error = None
+    respuesta = None
+    for modelo in modelos_candidatos:
+        try:
+            respuesta = cliente.messages.create(
+                model=modelo,
+                max_tokens=512,
+                messages=[
+                    {
+                        'role': 'user',
+                        'content': prompt_usuario
+                    }
+                ]
+            )
+            break
+        except Exception as exc:
+            ultimo_error = exc
+            texto_error = str(exc).lower()
+            if 'not_found_error' in texto_error or 'model' in texto_error:
+                continue
+            raise
+
+    if respuesta is None:
+        raise RuntimeError(
+            'No fue posible usar ningun modelo de Anthropic configurado. '
+            f'Ultimo error: {ultimo_error}'
+        )
+
+    textos = []
+    for bloque in respuesta.content:
+        texto = getattr(bloque, 'text', None)
+        if texto:
+            textos.append(texto)
+    return '\n'.join(textos).strip()
+
+
+def subir_archivo_anthropic(archivo_subido):
+    if archivo_subido is None:
+        raise ValueError('Selecciona un archivo antes de cargar a Anthropic.')
+
+    cliente = crear_cliente_anthropic()
+    nombre = getattr(archivo_subido, 'name', None) or 'archivo.bin'
+    media_type = getattr(
+        archivo_subido, 'type', None) or 'application/octet-stream'
+    contenido = archivo_subido.getvalue()
+
+    intentos = [
+        (
+            'beta.files.upload',
+            lambda: cliente.beta.files.upload(
+                file=(nombre, contenido, media_type)
+            )
+        ),
+        (
+            'files.create',
+            lambda: cliente.files.create(
+                file=(nombre, contenido, media_type)
+            )
+        ),
+        (
+            'beta.files.create',
+            lambda: cliente.beta.files.create(
+                file=(nombre, contenido, media_type)
+            )
+        )
+    ]
+
+    ultimo_error = None
+    for metodo, fn in intentos:
+        try:
+            respuesta = fn()
+            file_id = getattr(respuesta, 'id', None)
+            if file_id is None and isinstance(respuesta, dict):
+                file_id = respuesta.get('id')
+            return {
+                'file_id': file_id,
+                'nombre': nombre,
+                'bytes': len(contenido),
+                'metodo': metodo
+            }
+        except Exception as exc:
+            ultimo_error = exc
+
+    raise RuntimeError(
+        'No fue posible cargar el archivo a Anthropic. '
+        f'Ultimo error: {ultimo_error}'
+    )
+
+
+def resumir_proyeccion_individual(var_proy, patron_seleccionado, mse_modelo, mse_patron,
+                                  factor_correccion, df_export):
+    vista = df_export[[
+        'Anio_Semana', 'Produccion_real', 'Proy_patron', 'Estimado_modelo',
+        'Error_abs', 'Error_pct'
+    ]].tail(8).copy()
+    prompt = (
+        'Analiza esta proyeccion agricola y responde en espanol SOLO con el '
+        'desempeno general. Entrega un unico parrafo corto (maximo 3 lineas), '
+        'sin bullets, sin recomendaciones y sin detallar semanas especificas.\n\n'
+        f'Variedad proyectada: {var_proy}\n'
+        f'Patron seleccionado: {patron_seleccionado}\n'
+        f'MSE modelo: {mse_modelo:.4f}\n'
+        f'MSE patron: {mse_patron:.4f}\n'
+        f'Factor de correccion: {factor_correccion:.4f}\n'
+        'Ultimas semanas (tabla):\n'
+        f'{vista.to_csv(index=False)}'
+    )
+    return consultar_anthropic(prompt)
+
+
+def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estimado):
+    resumen_df = pd.DataFrame(resumen)
+    errores_df = pd.DataFrame(errores)
+    total_variedades = len(resumen) + len(errores)
+    promedio_modelo = (
+        float(resumen_df['MSE_modelo'].mean()
+              ) if not resumen_df.empty else None
+    )
+    promedio_patron = (
+        float(resumen_df['MSE_proy_patron'].mean()
+              ) if not resumen_df.empty else None
+    )
+    top_ok = resumen_df.sort_values('MSE_modelo').head(
+        8) if not resumen_df.empty else pd.DataFrame()
+    top_error = errores_df.head(8) if not errores_df.empty else pd.DataFrame()
+    prompt = (
+        'Analiza esta corrida masiva agricola y responde en espanol SOLO con el '
+        'desempeno general. Entrega un unico parrafo corto (maximo 3 lineas), '
+        'sin bullets, sin recomendaciones y sin listar variedades especificas.\n\n'
+        f'Finca: {selected_finca}\n'
+        f'Total variedades evaluadas: {total_variedades}\n'
+        f'Variedades proyectadas: {len(resumen)}\n'
+        f'Variedades con error: {len(errores)}\n'
+        f'MSE promedio modelo: {promedio_modelo}\n'
+        f'MSE promedio patron: {promedio_patron}\n'
+        f'Promedio estimado exportado: {float(df_export_estimado["Estimado_modelo"].mean()):.2f}\n'
+        'Mejores casos por MSE:\n'
+        f'{top_ok.to_csv(index=False) if not top_ok.empty else "Sin datos"}\n'
+        'Errores reportados:\n'
+        f'{top_error.to_csv(index=False) if not top_error.empty else "Sin errores"}'
+    )
+    return consultar_anthropic(prompt)
+
+
+def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
+                                 df_proyeccion=None):
+    pregunta_limpia = str(pregunta_usuario).strip()
+    if not pregunta_limpia:
+        raise ValueError(
+            'Escribe una pregunta antes de consultar a Anthropic.')
+
+    columnas = [str(col) for col in df_base.columns]
+    precio_cols = [
+        col for col in columnas
+        if re.search(r'precio|price|valor', col, flags=re.IGNORECASE)
+    ]
+    ocasion_cols = [
+        col for col in columnas
+        if re.search(r'ocasi|occasion|evento|uso|segmento|canal|cliente', col, flags=re.IGNORECASE)
+    ]
+
+    col_variedad = 'Bloque&Varid' if 'Bloque&Varid' in df_base.columns else (
+        'Variedad' if 'Variedad' in df_base.columns else None
+    )
+    col_finca = 'Finca' if 'Finca' in df_base.columns else None
+
+    contexto_df = df_base.copy()
+    if finca_contexto is not None and col_finca is not None:
+        contexto_df = contexto_df[
+            contexto_df[col_finca].astype(str) == str(finca_contexto)
+        ].copy()
+
+    if contexto_df.empty:
+        raise ValueError(
+            'No hay datos en el contexto seleccionado para responder.')
+
+    fincas_disponibles = []
+    if col_finca is not None:
+        fincas_disponibles = sorted(
+            contexto_df[col_finca].dropna().astype(str).unique().tolist()
+        )
+
+    top_variedades_csv = 'No disponible'
+    if col_variedad is not None:
+        top_variedades = (
+            contexto_df[col_variedad]
+            .dropna()
+            .astype(str)
+            .value_counts()
+            .head(20)
+            .reset_index()
+        )
+        top_variedades.columns = ['Variedad', 'Registros']
+        top_variedades_csv = top_variedades.to_csv(index=False)
+
+    proyeccion_info = 'No disponible en esta sesion.'
+    if df_proyeccion is not None and not df_proyeccion.empty:
+        proy_ctx = df_proyeccion.copy()
+        if 'Finca_proyectada' in proy_ctx.columns and finca_contexto is not None:
+            proy_ctx = proy_ctx[
+                proy_ctx['Finca_proyectada'].astype(str) == str(finca_contexto)
+            ].copy()
+
+        if not proy_ctx.empty and all(
+            col in proy_ctx.columns
+            for col in ['Variedad_proyectada', 'Estimado_modelo']
+        ):
+            resumen_proy = (
+                proy_ctx
+                .groupby('Variedad_proyectada', as_index=False)
+                .agg(
+                    semanas=('Estimado_modelo', 'count'),
+                    estimado_promedio=('Estimado_modelo', 'mean')
+                )
+                .sort_values('estimado_promedio', ascending=False)
+                .head(50)
+            )
+            muestra_cols = [
+                col for col in ['Finca_proyectada', 'Variedad_proyectada',
+                                'Anio_Semana', 'Estimado_modelo']
+                if col in proy_ctx.columns
+            ]
+            muestra_proy = proy_ctx[muestra_cols].head(150)
+            proyeccion_info = (
+                f'Filas proyeccion en contexto: {len(proy_ctx)}\n'
+                'Resumen proyeccion por variedad (csv):\n'
+                f'{resumen_proy.to_csv(index=False)}\n'
+                'Muestra de base proyectada (csv):\n'
+                f'{muestra_proy.to_csv(index=False)}'
+            )
+
+    prompt = (
+        'Eres un analista de datos del negocio floricola. '
+        'Responde SOLO con informacion disponible en la base cargada. '
+        'Si un dato no existe (por ejemplo precio u ocasion), di exactamente: '
+        '"No disponible en esta base". No inventes datos ni supuestos. '
+        'Responde en espanol, claro y en bullets cuando aplique.\n\n'
+        f'Finca en contexto: {finca_contexto}\n'
+        f'Filas en contexto: {len(contexto_df)}\n'
+        f'Columnas disponibles: {", ".join(columnas)}\n'
+        f'Columnas de precio detectadas: {precio_cols if precio_cols else "Ninguna"}\n'
+        f'Columnas de ocasion/uso detectadas: {ocasion_cols if ocasion_cols else "Ninguna"}\n'
+        f'Fincas detectadas en contexto: {fincas_disponibles[:20]}\n'
+        'Top variedades por registros (csv):\n'
+        f'{top_variedades_csv}\n'
+        'Base de proyeccion del modelo:\n'
+        f'{proyeccion_info}\n'
+        'Pregunta del usuario:\n'
+        f'{pregunta_limpia}'
+    )
+    return consultar_anthropic(prompt)
 
 
 models_dir = Path(__file__).with_name("modelos")
@@ -24,6 +309,38 @@ if readme_path.exists():
             st.markdown(readme_path.read_text(encoding="utf-8"))
         except Exception:
             st.code(readme_path.read_text(errors="ignore"))
+
+if 'base_proyeccion_anthropic' not in st.session_state:
+    st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
+if 'anthropic_archivos_subidos' not in st.session_state:
+    st.session_state['anthropic_archivos_subidos'] = []
+
+with st.expander('Cargar archivos a Anthropic'):
+    st.caption(
+        'Sube un archivo para registrarlo directamente en Anthropic.'
+    )
+    archivo_anthropic = st.file_uploader(
+        'Selecciona archivo para Anthropic',
+        type=['xlsx', 'csv', 'txt', 'json', 'pdf'],
+        key='archivo_uploader_anthropic'
+    )
+    if st.button('Cargar archivo a Anthropic', key='btn_cargar_archivo_anthropic'):
+        try:
+            info_carga = subir_archivo_anthropic(archivo_anthropic)
+            st.session_state['anthropic_archivos_subidos'].append(info_carga)
+            st.success(
+                f"Archivo cargado. file_id: {info_carga.get('file_id')}"
+            )
+            st.write(info_carga)
+        except Exception as exc:
+            st.error(f'No se pudo cargar el archivo a Anthropic: {exc}')
+
+    if st.session_state['anthropic_archivos_subidos']:
+        st.write('Historial de archivos cargados en esta sesion:')
+        st.dataframe(
+            pd.DataFrame(st.session_state['anthropic_archivos_subidos']),
+            width='stretch'
+        )
 
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
@@ -45,6 +362,35 @@ if file_path is not None:
     variedades = sorted(
         df_finca["Bloque&Varid"].dropna().astype(str).unique().tolist())
     selected_var = st.selectbox("Bloque&Variedad", variedades)
+
+    with st.expander('Preguntas a Anthropic sobre la base'):
+        st.caption(
+            'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
+        )
+        st.write(
+            'Ejemplos: "Que fincas ofrecen la variedad LIGHT HOUSE?", '
+            '"Hay columna de precios para esta variedad?", '
+            '"En que ocasiones se uso FREEDOM?"'
+        )
+        with st.form('form_pregunta_anthropic', clear_on_submit=True):
+            pregunta_negocio = st.text_area(
+                'Escribe tu pregunta',
+                key='pregunta_negocio_anthropic'
+            )
+            enviar_pregunta = st.form_submit_button('Preguntar a Anthropic')
+
+        if enviar_pregunta:
+            try:
+                respuesta_negocio = responder_pregunta_anthropic(
+                    df,
+                    pregunta_negocio,
+                    selected_finca,
+                    st.session_state.get('base_proyeccion_anthropic')
+                )
+                st.success('Respuesta generada.')
+                st.write(respuesta_negocio)
+            except Exception as exc:
+                st.error(f'No se pudo responder la pregunta: {exc}')
 
     def nombre_base_variedad(valor):
         txt = str(valor).strip().upper()
@@ -77,33 +423,43 @@ if file_path is not None:
         raise ValueError(
             'No hay un patron distinto de la variedad proyectada.')
 
-    def proyectar_variedad_masiva(df_base, var_proy):
-        df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
-        if df_filtered_.empty:
-            raise ValueError('Sin datos para la variedad seleccionada.')
-
-        pivot_table_ = df_filtered_.pivot_table(values=['Tallos/m2'],
-                                                columns=['Bloque&Varid'],
-                                                index=['Anio', 'Semana'],
-                                                aggfunc='sum')
-        arr_2 = np.array(pivot_table_).reshape(-1)
+    def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy):
+        # Replica exacta de la comparacion del flujo individual para mantener
+        # el mismo patron seleccionado en la corrida masiva.
+        pivot_table_obj = df_variedad_objetivo.pivot_table(
+            values=['Tallos/m2'],
+            columns=['Bloque&Varid'],
+            index=['Anio', 'Semana'],
+            aggfunc='sum'
+        )
+        arr_2 = np.array(pivot_table_obj)
 
         arr_list = []
-        for name, group in df_base.groupby(['Bloque&Varid']):
-            vals = group['Tallos/m2'].to_numpy()
-            n_cmp = min(len(vals), len(arr_2))
-            if n_cmp == 0:
+        for name, group in df_patrones.groupby(['Bloque&Varid']):
+            try:
+                mse = np.mean(abs(group['Tallos/m2'].to_numpy() - arr_2))
+                arr_list.append((name, mse))
+            except Exception:
                 continue
-            mse = np.mean(abs(vals[:n_cmp] - arr_2[:n_cmp]))
-            arr_list.append((name, mse))
 
         if len(arr_list) < 2:
             raise ValueError('No hay suficientes patrones para comparar.')
 
         arr_list.sort(key=lambda x: x[1])
-        patron_seleccionado = seleccionar_patron(arr_list, var_proy)
+        return seleccionar_patron(arr_list, var_proy)
 
-        df_patron = df_base[df_base['Bloque&Varid'].isin(
+    def proyectar_variedad_masiva(df_base, var_proy):
+        df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
+        if df_filtered_.empty:
+            raise ValueError('Sin datos para la variedad seleccionada.')
+
+        patron_seleccionado = calcular_patron_compatible_individual(
+            df,
+            df_filtered_,
+            var_proy
+        )
+
+        df_patron = df[df['Bloque&Varid'].isin(
             [patron_seleccionado])]
         if df_patron.empty:
             raise ValueError('No hay datos del patron seleccionado.')
@@ -121,7 +477,7 @@ if file_path is not None:
         proy = pd.Series(np.float64(np.array(df_patron['Tallos/m2'])) * m2_1)
 
         y_actual = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
-        patron_actual = df_base[df_base['Bloque&Varid'].isin(
+        patron_actual = df[df['Bloque&Varid'].isin(
             [patron_seleccionado])].copy()
 
         patron_weekly = patron_actual[[
@@ -378,6 +734,29 @@ if file_path is not None:
             how='left'
         ).sort_values('_orden_original')
 
+        # Exportar solo las 4 ultimas semanas por cada Bloque&Varid.
+        df_estimado_ordenado['__anio'] = pd.to_numeric(
+            df_estimado_ordenado['Anio'], errors='coerce')
+        df_estimado_ordenado['__semana'] = pd.to_numeric(
+            df_estimado_ordenado['Semana'], errors='coerce')
+        df_estimado_ordenado = df_estimado_ordenado.sort_values(
+            ['Variedad_proyectada', '__anio', '__semana', '_orden_original'],
+            ascending=[True, False, False, False]
+        )
+        df_estimado_ordenado['__rank_ultimas'] = (
+            df_estimado_ordenado
+            .groupby('Variedad_proyectada')
+            .cumcount() + 1
+        )
+        df_estimado_ordenado = df_estimado_ordenado[
+            df_estimado_ordenado['__rank_ultimas'] <= 4
+        ].copy()
+        df_estimado_ordenado = df_estimado_ordenado.sort_values(
+            '_orden_original')
+        df_estimado_ordenado = df_estimado_ordenado.drop(
+            columns=['__anio', '__semana', '__rank_ultimas']
+        )
+
         # Si no se pudo proyectar una variedad/semana, exportar 0.
         df_estimado_ordenado['Estimado_modelo'] = df_estimado_ordenado[
             'Estimado_modelo'
@@ -385,8 +764,22 @@ if file_path is not None:
         df_estimado_ordenado['Estimado_modelo'] = np.rint(
             df_estimado_ordenado['Estimado_modelo']
         ).astype(np.int64)
-        df_export_estimado = df_estimado_ordenado[[
-            'Estimado_modelo']].reset_index(drop=True)
+        columnas_base_export = [
+            'Anio', 'Semana', 'Producto', 'Finca',
+            'Bloque', 'Variedad', 'Bloque&Varid'
+        ]
+        columnas_export = [
+            col for col in columnas_base_export if col in df_estimado_ordenado.columns
+        ] + ['Estimado_modelo']
+        df_export_estimado = df_estimado_ordenado[
+            columnas_export
+        ].reset_index(drop=True)
+
+        base_proy_masiva = df_estimado_ordenado[[
+            'Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'
+        ]].copy()
+        base_proy_masiva['Finca_proyectada'] = str(selected_finca)
+        st.session_state['base_proyeccion_anthropic'] = base_proy_masiva
 
         if len(errores) == 0:
             st.success('Proyeccion masiva completada.')
@@ -408,7 +801,7 @@ if file_path is not None:
 
         buffer_masivo = io.BytesIO()
         with pd.ExcelWriter(buffer_masivo, engine='openpyxl') as writer:
-            # Exportar unicamente la columna Estimado_modelo.
+            # Exportar columnas base mas Estimado_modelo.
             df_export_estimado.to_excel(
                 writer, sheet_name='Estimado_modelo', index=False)
         st.download_button(
@@ -451,29 +844,15 @@ if file_path is not None:
 
     print(df_filtered_)
     y = df_filtered_['Produccion']
-    pivot_table_ = df_filtered_.pivot_table(values=['Tallos/m2'],
-                                            columns=['Bloque&Varid'],
-                                            index=['Anio', 'Semana'],
-                                            aggfunc='sum')
-# pivot_table_.plot(kind='line')
-    df_2 = pivot_table_
-    arr_2 = np.array(df_2)
-    arr_list = arr_2.tolist()
-
-    arr_list = []
-
-    for name, group in df.groupby(['Bloque&Varid']):
-        mse = np.mean(abs(group['Tallos/m2'].to_numpy() - arr_2))
-        arr_list.append((name, mse))
-        arr_list.sort(key=lambda x: x[1])
-
-    print(arr_list)
+    patron_seleccionado = calcular_patron_compatible_individual(
+        df,
+        df_filtered_,
+        var_proy
+    )
 
 # 3.- IMPORTAR BASE DE VARIEDADES A PROYECTAR Y COMPARAR CURVA CON PATRON SELECCIONADO\n",
 
     df_3 = pd.read_excel(file_path)
-    patron_seleccionado = seleccionar_patron(arr_list, var_proy)
-
     combined_varieties = [var_proy, patron_seleccionado]
 
     df_filtered = df_3[df_3['Bloque&Varid'].isin(combined_varieties)]
@@ -834,6 +1213,24 @@ if file_path is not None:
         'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
         'Factor_correccion': [factor_correccion] * n_export,
     })
+
+    base_proy_individual = df_export[[
+        'Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'
+    ]].copy()
+    base_proy_individual['Finca_proyectada'] = str(selected_finca)
+    base_actual = st.session_state.get('base_proyeccion_anthropic')
+    if base_actual is None or base_actual.empty:
+        st.session_state['base_proyeccion_anthropic'] = base_proy_individual
+    else:
+        base_merge = pd.concat(
+            [base_actual, base_proy_individual],
+            ignore_index=True
+        )
+        base_merge = base_merge.drop_duplicates(
+            subset=['Finca_proyectada', 'Variedad_proyectada', 'Anio_Semana'],
+            keep='last'
+        )
+        st.session_state['base_proyeccion_anthropic'] = base_merge
     df_export['Error'] = (
         df_export['Produccion_real'] - df_export['Estimado_modelo']
     )
@@ -884,5 +1281,6 @@ if file_path is not None:
         y_pred)].tail(len(y_pred_tail)).values
     y_pred_tail.index = etiquetas_tail
     st.write(y_pred_tail)
+
 else:
     st.info("Por favor, sube el archivo Excel.")
