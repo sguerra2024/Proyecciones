@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import re
 from pathlib import Path
 import streamlit as st
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 import os
 import sys
 
@@ -29,11 +29,25 @@ anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 
 
 def obtener_api_key_anthropic():
-    return (
+    key = (
         os.getenv("ANTHROPIC_API_KEY")
         or os.getenv("ANTHROPIC_KEY")
         or ""
     ).strip()
+    if key:
+        return key
+
+    for ruta_env in [Path(__file__).with_name('.env'), Path.cwd() / '.env']:
+        if not ruta_env.exists():
+            continue
+        valores = dotenv_values(ruta_env)
+        key = (
+            (valores.get('ANTHROPIC_API_KEY') or "")
+            or (valores.get('ANTHROPIC_KEY') or "")
+        ).strip()
+        if key:
+            return key
+    return ""
 
 
 def modelos_anthropic_candidatos():
