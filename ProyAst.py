@@ -22,13 +22,18 @@ try:
 except ImportError:
     anthropic = None
 
-load_dotenv()
+dotenv_path = Path(__file__).with_name('.env')
+load_dotenv(dotenv_path=dotenv_path if dotenv_path.exists() else None)
 
 anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 
 
 def obtener_api_key_anthropic():
-    return (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    return (
+        os.getenv("ANTHROPIC_API_KEY")
+        or os.getenv("ANTHROPIC_KEY")
+        or ""
+    ).strip()
 
 
 def modelos_anthropic_candidatos():
