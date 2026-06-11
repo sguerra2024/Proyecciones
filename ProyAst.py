@@ -11,6 +11,11 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 import os
+import sys
+
+agents_dir = Path(__file__).with_name("agents")
+if agents_dir.exists():
+    sys.path.insert(0, str(agents_dir))
 
 try:
     anthropic = importlib.import_module('anthropic')
@@ -19,8 +24,26 @@ except ImportError:
 
 load_dotenv()
 
-api_key = os.getenv("ANTHROPIC_API_KEY")
-anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+
+
+def obtener_api_key_anthropic():
+    return (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+
+
+def modelos_anthropic_candidatos():
+    candidatos = []
+    for modelo in [
+        anthropic_model,
+        'claude-3-5-sonnet-latest',
+        'claude-3-5-haiku-latest',
+        'claude-3-opus-latest',
+        'claude-sonnet-4-6',
+        'claude-haiku-4-5'
+    ]:
+        if modelo and modelo not in candidatos:
+            candidatos.append(modelo)
+    return candidatos
 
 
 def crear_cliente_anthropic():
@@ -28,6 +51,7 @@ def crear_cliente_anthropic():
         raise RuntimeError(
             'La libreria anthropic no esta instalada en el entorno actual.'
         )
+    api_key = obtener_api_key_anthropic()
     if not api_key:
         raise RuntimeError(
             'No se encontro ANTHROPIC_API_KEY en las variables de entorno.'
@@ -37,10 +61,7 @@ def crear_cliente_anthropic():
 
 def consultar_anthropic(prompt_usuario):
     cliente = crear_cliente_anthropic()
-    modelos_candidatos = []
-    for modelo in [anthropic_model, 'claude-sonnet-4-6', 'claude-haiku-4-5']:
-        if modelo and modelo not in modelos_candidatos:
-            modelos_candidatos.append(modelo)
+    modelos_candidatos = modelos_anthropic_candidatos()
 
     ultimo_error = None
     respuesta = None
@@ -60,7 +81,16 @@ def consultar_anthropic(prompt_usuario):
         except Exception as exc:
             ultimo_error = exc
             texto_error = str(exc).lower()
-            if 'not_found_error' in texto_error or 'model' in texto_error:
+            es_error_modelo = any(
+                frag in texto_error for frag in [
+                    'not_found_error',
+                    'model not found',
+                    'invalid model',
+                    'unknown model',
+                    'is not available for your account'
+                ]
+            )
+            if es_error_modelo:
                 continue
             raise
 
@@ -80,7 +110,7 @@ def consultar_anthropic(prompt_usuario):
 
 def subir_archivo_anthropic(archivo_subido):
     if archivo_subido is None:
-        raise ValueError('Selecciona un archivo antes de cargar a Anthropic.')
+        raise ValueError('Selecciona un archivo antes de cargar a claude')
 
     cliente = crear_cliente_anthropic()
     nombre = getattr(archivo_subido, 'name', None) or 'archivo.bin'
@@ -312,39 +342,194 @@ if readme_path.exists():
 
 if 'base_proyeccion_anthropic' not in st.session_state:
     st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
-if 'anthropic_archivos_subidos' not in st.session_state:
-    st.session_state['anthropic_archivos_subidos'] = []
+if 'respuesta_pregunta_claude' not in st.session_state:
+    st.session_state['respuesta_pregunta_claude'] = ''
+if 'error_pregunta_claude' not in st.session_state:
+    st.session_state['error_pregunta_claude'] = ''
+if 'respuesta_analista_mercados' not in st.session_state:
+    st.session_state['respuesta_analista_mercados'] = ''
+if 'error_analista_mercados' not in st.session_state:
+    st.session_state['error_analista_mercados'] = ''
 
-with st.expander('Cargar archivos a Anthropic'):
-    st.caption(
-        'Sube un archivo para registrarlo directamente en Anthropic.'
-    )
-    archivo_anthropic = st.file_uploader(
-        'Selecciona archivo para Anthropic',
-        type=['xlsx', 'csv', 'txt', 'json', 'pdf'],
-        key='archivo_uploader_anthropic'
-    )
-    if st.button('Cargar archivo a Anthropic', key='btn_cargar_archivo_anthropic'):
-        try:
-            info_carga = subir_archivo_anthropic(archivo_anthropic)
-            st.session_state['anthropic_archivos_subidos'].append(info_carga)
-            st.success(
-                f"Archivo cargado. file_id: {info_carga.get('file_id')}"
-            )
-            st.write(info_carga)
-        except Exception as exc:
-            st.error(f'No se pudo cargar el archivo a Anthropic: {exc}')
 
-    if st.session_state['anthropic_archivos_subidos']:
-        st.write('Historial de archivos cargados en esta sesion:')
-        st.dataframe(
-            pd.DataFrame(st.session_state['anthropic_archivos_subidos']),
-            width='stretch'
+@st.cache_data(show_spinner=False)
+def leer_excel_subido(archivo_excel):
+    return pd.read_excel(archivo_excel)
+
+
+@st.fragment
+def render_preguntas_claude(df_base, selected_finca):
+    with st.expander('Preguntas a Claude'):
+        st.caption(
+            'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
+        st.write(
+            'Ejemplos: "Que fincas ofrecen la variedad LIGHT HOUSE?", '
+            '"Hay columna de precios para esta variedad?", '
+            '"En que ocasiones se uso FREEDOM?"'
+        )
+        with st.form('form_pregunta_anthropic', clear_on_submit=True):
+            pregunta_negocio = st.text_area(
+                'Escribe tu pregunta',
+                key='pregunta_negocio_anthropic'
+            )
+            enviar_pregunta = st.form_submit_button('Preguntale a Claude')
+
+        if enviar_pregunta:
+            try:
+                respuesta_negocio = responder_pregunta_anthropic(
+                    df_base,
+                    pregunta_negocio,
+                    selected_finca,
+                    st.session_state.get('base_proyeccion_anthropic')
+                )
+                st.session_state['respuesta_pregunta_claude'] = respuesta_negocio
+                st.session_state['error_pregunta_claude'] = ''
+            except Exception as exc:
+                st.session_state['error_pregunta_claude'] = str(exc)
+                st.session_state['respuesta_pregunta_claude'] = ''
+
+        if st.session_state.get('error_pregunta_claude'):
+            st.error(
+                f"No se pudo responder la pregunta: {st.session_state['error_pregunta_claude']}"
+            )
+        elif st.session_state.get('respuesta_pregunta_claude'):
+            st.success('Respuesta generada.')
+            st.write(st.session_state['respuesta_pregunta_claude'])
+
+
+@st.fragment
+def render_analista_mercados():
+    with st.expander('Analista de Datos y Mercados'):
+        st.caption(
+            'Consulta especializada en análisis de rentabilidad, mercados, '
+            'gestión de cambios y errores de estimados.'
+        )
+
+        analisis_tipo = st.radio(
+            'Tipo de análisis',
+            ['Cambio del Cliente', 'Error en Estimado',
+                'Investigación de Mercado', 'Optimizar Beneficios'],
+            key='tipo_analisis_mercados'
+        )
+
+        with st.form('form_analista_mercados', clear_on_submit=True):
+            if analisis_tipo == 'Cambio del Cliente':
+                cambio_desc = st.text_area(
+                    'Describe el cambio solicitado',
+                    key='cambio_descripcion'
+                )
+                cambio_costo = st.number_input(
+                    'Costo estimado inicial (opcional)',
+                    value=0.0,
+                    key='cambio_costo'
+                )
+                enviar = st.form_submit_button('Analizar Cambio')
+                if enviar:
+                    try:
+                        from agent_manager import AgenteAnalistasMercados
+                        agente = AgenteAnalistasMercados()
+                        impacto = {
+                            'costo_estimado': cambio_costo} if cambio_costo > 0 else None
+                        respuesta = agente.analizar_cambio_cliente(
+                            cambio_desc, impacto)
+                        st.session_state['respuesta_analista_mercados'] = respuesta
+                        st.session_state['error_analista_mercados'] = ''
+                    except Exception as exc:
+                        st.session_state['error_analista_mercados'] = str(exc)
+                        st.session_state['respuesta_analista_mercados'] = ''
+
+            elif analisis_tipo == 'Error en Estimado':
+                error_desc = st.text_area(
+                    'Describe el error',
+                    key='error_descripcion'
+                )
+                desviacion = st.number_input(
+                    'Desviación (monto o porcentaje)',
+                    key='error_desviacion'
+                )
+                enviar = st.form_submit_button('Analizar Error')
+                if enviar:
+                    try:
+                        from agent_manager import AgenteAnalistasMercados
+                        agente = AgenteAnalistasMercados()
+                        respuesta = agente.analizar_error_estimado(
+                            error_desc, desviacion)
+                        st.session_state['respuesta_analista_mercados'] = respuesta
+                        st.session_state['error_analista_mercados'] = ''
+                    except Exception as exc:
+                        st.session_state['error_analista_mercados'] = str(exc)
+                        st.session_state['respuesta_analista_mercados'] = ''
+
+            elif analisis_tipo == 'Investigación de Mercado':
+                producto = st.text_input(
+                    'Producto o servicio',
+                    key='mercado_producto'
+                )
+                region = st.text_input(
+                    'Región (opcional)',
+                    key='mercado_region'
+                )
+                enviar = st.form_submit_button('Investigar Mercado')
+                if enviar:
+                    try:
+                        from agent_manager import AgenteAnalistasMercados
+                        agente = AgenteAnalistasMercados()
+                        respuesta = agente.investigar_mercado(producto, region)
+                        st.session_state['respuesta_analista_mercados'] = respuesta
+                        st.session_state['error_analista_mercados'] = ''
+                    except Exception as exc:
+                        st.session_state['error_analista_mercados'] = str(exc)
+                        st.session_state['respuesta_analista_mercados'] = ''
+
+            elif analisis_tipo == 'Optimizar Beneficios':
+                datos_json = st.text_area(
+                    'Datos del negocio (JSON o texto descriptivo)',
+                    key='datos_negocio'
+                )
+                enviar = st.form_submit_button('Optimizar')
+                if enviar:
+                    try:
+                        from agent_manager import AgenteAnalistasMercados
+                        agente = AgenteAnalistasMercados()
+                        respuesta = agente.optimizar_beneficios(datos_json)
+                        st.session_state['respuesta_analista_mercados'] = respuesta
+                        st.session_state['error_analista_mercados'] = ''
+                    except Exception as exc:
+                        st.session_state['error_analista_mercados'] = str(exc)
+                        st.session_state['respuesta_analista_mercados'] = ''
+
+        if st.session_state.get('error_analista_mercados'):
+            st.error(
+                f"Error en análisis: {st.session_state['error_analista_mercados']}"
+            )
+        elif st.session_state.get('respuesta_analista_mercados'):
+            st.success('Análisis completado.')
+            st.write(st.session_state['respuesta_analista_mercados'])
+
 
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
-    df = pd.read_excel(file_path)
+    df = leer_excel_subido(file_path)
+
+    # Cargar automáticamente archivo a Anthropic
+    if 'archivo_anthropic_cargado' not in st.session_state:
+        st.session_state['archivo_anthropic_cargado'] = None
+
+    archivo_actual_id = getattr(
+        file_path, 'name', '') + str(file_path.size if hasattr(file_path, 'size') else '')
+
+    if st.session_state['archivo_anthropic_cargado'] != archivo_actual_id:
+        try:
+            info_carga = subir_archivo_anthropic(file_path)
+            st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
+            st.session_state['archivo_anthropic_id'] = info_carga.get(
+                'file_id')
+            st.caption(
+                f"✓ Archivo sincronizado con Anthropic (ID: {info_carga.get('file_id')[:8]}...)")
+        except Exception as exc:
+            st.caption(f"⚠ No se pudo sincronizar con Anthropic: {exc}")
+
     # st.write(df.head())
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
     fincas = sorted(df["Finca"].dropna().astype(str).unique().tolist())
@@ -362,35 +547,6 @@ if file_path is not None:
     variedades = sorted(
         df_finca["Bloque&Varid"].dropna().astype(str).unique().tolist())
     selected_var = st.selectbox("Bloque&Variedad", variedades)
-
-    with st.expander('Preguntas a Anthropic sobre la base'):
-        st.caption(
-            'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
-        )
-        st.write(
-            'Ejemplos: "Que fincas ofrecen la variedad LIGHT HOUSE?", '
-            '"Hay columna de precios para esta variedad?", '
-            '"En que ocasiones se uso FREEDOM?"'
-        )
-        with st.form('form_pregunta_anthropic', clear_on_submit=True):
-            pregunta_negocio = st.text_area(
-                'Escribe tu pregunta',
-                key='pregunta_negocio_anthropic'
-            )
-            enviar_pregunta = st.form_submit_button('Preguntar a Anthropic')
-
-        if enviar_pregunta:
-            try:
-                respuesta_negocio = responder_pregunta_anthropic(
-                    df,
-                    pregunta_negocio,
-                    selected_finca,
-                    st.session_state.get('base_proyeccion_anthropic')
-                )
-                st.success('Respuesta generada.')
-                st.write(respuesta_negocio)
-            except Exception as exc:
-                st.error(f'No se pudo responder la pregunta: {exc}')
 
     def nombre_base_variedad(valor):
         txt = str(valor).strip().upper()
@@ -1281,6 +1437,16 @@ if file_path is not None:
         y_pred)].tail(len(y_pred_tail)).values
     y_pred_tail.index = etiquetas_tail
     st.write(y_pred_tail)
+
+    st.divider()
+    st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        render_preguntas_claude(df, selected_finca)
+    with col2:
+        render_analista_mercados()
 
 else:
     st.info("Por favor, sube el archivo Excel.")
