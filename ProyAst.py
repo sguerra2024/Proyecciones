@@ -425,7 +425,16 @@ def render_subida_archivo_anthropic(file_path):
 
 @st.cache_data(show_spinner=False)
 def leer_excel_subido(archivo_excel):
-    return pd.read_excel(archivo_excel)
+    df = pd.read_excel(archivo_excel)
+    # Optimización: convertir columnas numéricas a tipos más eficientes
+    for col in df.columns:
+        if df[col].dtype == 'int64':
+            df[col] = df[col].astype('int32')
+        elif df[col].dtype == 'float64':
+            # Solo convertir si no hay NaN
+            if df[col].notna().all():
+                df[col] = df[col].astype('float32')
+    return df
 
 
 @st.fragment
@@ -1023,62 +1032,20 @@ if file_path is not None:
 
         st.stop()
 
-    df = pd.read_excel(file_path)
-    df_info = pd.DataFrame(df)
-    # st.write(df.head())
-    var_interes = df['Bloque&Varid'].unique()
-    # st.write(var_interes)
-    df_filtered = df[df['Bloque&Varid'].isin(var_interes)]
-    pd.pivot_table = df_filtered.pivot_table(values=['Tallos/m2'],
-                                             columns=['Bloque', 'Variedad'],
-                                             index=['Anio', 'Semana'],
-                                             aggfunc='sum')
-    # pd.pivot_table.plot(kind='lintch")e')
-# CARACTERISTICAS DEL PATRON"
+    # Una sola lectura reutilizada para todo el flujo individual
+    df = leer_excel_subido(file_path)
 
-    # st.write('CARACTERISTICAS DE LA BASE PATRON')
-    # st.write('Prom Tallos/m2', df['Tallos/m2'].max())
-
-
-# 2. CALCULAR EL MENOR MSE
-
-# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
-
-    df_1 = pd.read_excel(file_path)
-    # st.write(df_1)
     var_proy = selected_var
-    # st.write(var_proy)
+    df_filtered_ = df[df['Bloque&Varid'].isin([var_proy])]
 
-    df_filtered_ = df_1[df_1['Bloque&Varid'].isin([var_proy])]
-
-    print(df_filtered_)
-    y = df_filtered_['Produccion']
+    # Seleccionar patrón una sola vez
     patron_seleccionado = calcular_patron_compatible_individual(
         df,
         df_filtered_,
         var_proy
     )
 
-# 3.- IMPORTAR BASE DE VARIEDADES A PROYECTAR Y COMPARAR CURVA CON PATRON SELECCIONADO\n",
-
-    df_3 = pd.read_excel(file_path)
-    combined_varieties = [var_proy, patron_seleccionado]
-
-    df_filtered = df_3[df_3['Bloque&Varid'].isin(combined_varieties)]
-    # st.write(df_filtered.head())
-    pivot_table_3 = df_filtered.pivot_table(values=['Tallos/m2'],
-                                            columns=['Bloque&Varid'],
-                                            index=['Anio', 'Semana'],
-                                            aggfunc='sum')
-    # st.write('pivot_table_3')
-    # st.dataframe(pivot_table_3, width='stretch')
-    # pivot_table_3.plot(kind='line')
-
-# 4. CALCULO DE LA PROYECCION CON PATRON SELECCIONADO Y MODEL0\n"
-
-# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
-
-    df = pd.read_excel(file_path)
+    # Preparar datos para el patrón
     df_filtered = df[df['Bloque&Varid'].isin([patron_seleccionado])]
 # df_filtered_ = df[df['Bloque&Varid'].isin(var_proy)]
     index = np.array(df_filtered['Tallos/m2'])
@@ -1100,13 +1067,9 @@ if file_path is not None:
 
 
 # Entrenamiento modelo
-
-
-# file_path = "C:\\Users\\Personal\\Downloads\\Produccion Astroflores BL25-26-27-28 a la Semana 09.xlsx"
-
-    df_1 = pd.read_excel(file_path)
-    y_actual = df_1[df_1['Bloque&Varid'].isin([var_proy])].copy()
-    patron_actual = df_1[df_1['Bloque&Varid'].isin(
+    # Reutilizar df ya cargado
+    y_actual = df[df['Bloque&Varid'].isin([var_proy])].copy()
+    patron_actual = df[df['Bloque&Varid'].isin(
         [patron_seleccionado])].copy()
 
     if patron_actual.empty:
@@ -1167,20 +1130,12 @@ if file_path is not None:
         entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
     )
 
-    # Ajustar el objetivo de entrenamiento con la regla agronomica
-    # para que el modelo la aprenda, no solo se corrija al final.
+    # Ajustar el objetivo de entrenamiento con la regla agronomica (vectorizado)
     prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
-    running_max_train = -np.inf
-    ajustes_train = 0
-    for i in range(len(prod_train) - 1):
-        if prod_train[i] > running_max_train:
-            running_max_train = prod_train[i]
-            limite_next = prod_train[i] * peak_decay_train
-            if prod_train[i + 1] > limite_next:
-                prod_train[i + 1] = limite_next
-                ajustes_train += 1
-        else:
-            running_max_train = max(running_max_train, prod_train[i])
+    cummax = np.maximum.accumulate(prod_train)
+    limite_siguiente = cummax[:-1] * peak_decay_train
+    exceso = prod_train[1:] > limite_siguiente
+    prod_train[1:][exceso] = (cummax[:-1][exceso] * peak_decay_train)
     entrenamiento_df['Produccion_ajustada'] = prod_train
 
     eval_actual_df = (
@@ -1311,11 +1266,10 @@ if file_path is not None:
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
     y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
 
-    # Regla agronomica estricta: despues de cada nuevo maximo semanal,
-    # la semana siguiente debe quedar por debajo del 57% de ese pico.
+    # Regla agronomica (completamente vectorizada para velocidad)
     pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
 
-    # Mezcla dirigida con la proyeccion del patron para dar mas peso en prediccion.
+    # Mezcla dirigida con la proyeccion del patron (vectorizada)
     proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
     n_blend = min(len(pred_vals), len(proy_vals))
     if n_blend > 0:
@@ -1324,31 +1278,11 @@ if file_path is not None:
             + patron_prediction_weight * proy_vals[:n_blend]
         )
 
-    ajustes_pico = 0
-    running_max = -np.inf
-    for i in range(len(pred_vals) - 1):
-        if pred_vals[i] > running_max:
-            running_max = pred_vals[i]
-            limite_siguiente = pred_vals[i] * peak_decay_pred
-            if pred_vals[i + 1] > limite_siguiente:
-                pred_vals[i + 1] = limite_siguiente
-                ajustes_pico += 1
-        else:
-            running_max = max(running_max, pred_vals[i])
-
-    # Segunda pasada de seguridad para evitar picos consecutivos por redondeos.
-    for i in range(1, len(pred_vals)):
-        max_hasta_prev = pred_vals[:i].max()
-        if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1] * peak_decay_pred
-            ajustes_pico += 1
-
-    # Regla de valores iguales consecutivos: mantener el valor evita caidas artificiales.
-    ajustes_iguales = 0
-    for i in range(1, len(pred_vals)):
-        if pred_vals[i] == pred_vals[i - 1]:
-            pred_vals[i] = pred_vals[i - 1]
-            ajustes_iguales += 1
+    # Aplicar límites de decaimiento de picos (vectorizado)
+    cummax = np.maximum.accumulate(pred_vals)
+    limite_siguiente = cummax[:-1] * peak_decay_pred
+    exceso = pred_vals[1:] > limite_siguiente
+    pred_vals[1:][exceso] = (cummax[:-1][exceso] * peak_decay_pred)
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
     # escalar las predicciones para igualarlas.
