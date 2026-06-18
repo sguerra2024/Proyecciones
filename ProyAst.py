@@ -369,6 +369,58 @@ if 'respuesta_analista_mercados' not in st.session_state:
     st.session_state['respuesta_analista_mercados'] = ''
 if 'error_analista_mercados' not in st.session_state:
     st.session_state['error_analista_mercados'] = ''
+if 'archivo_anthropic_cargado' not in st.session_state:
+    st.session_state['archivo_anthropic_cargado'] = None
+if 'archivo_anthropic_id' not in st.session_state:
+    st.session_state['archivo_anthropic_id'] = ''
+if 'estado_subida_anthropic' not in st.session_state:
+    st.session_state['estado_subida_anthropic'] = ''
+
+
+@st.fragment
+def render_subida_archivo_anthropic(file_path):
+    with st.expander('Subir archivo a Anthropic'):
+        st.caption(
+            'Sincroniza manualmente el Excel cargado con Anthropic para usarlo '
+            'en análisis avanzados.'
+        )
+        archivo_actual_id = (
+            getattr(file_path, 'name', '')
+            + str(file_path.size if hasattr(file_path, 'size') else '')
+        )
+        archivo_ya_subido = (
+            st.session_state.get(
+                'archivo_anthropic_cargado') == archivo_actual_id
+        )
+
+        if archivo_ya_subido and st.session_state.get('archivo_anthropic_id'):
+            st.success(
+                'Archivo ya sincronizado con Anthropic '
+                f"(ID: {st.session_state.get('archivo_anthropic_id')[:8]}...)"
+            )
+
+        if st.button('Subir archivo actual a Anthropic', key='btn_subir_anthropic'):
+            try:
+                info_carga = subir_archivo_anthropic(file_path)
+                st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
+                st.session_state['archivo_anthropic_id'] = info_carga.get(
+                    'file_id') or ''
+                st.session_state['estado_subida_anthropic'] = (
+                    'ok',
+                    info_carga.get('file_id')
+                )
+            except Exception as exc:
+                st.session_state['estado_subida_anthropic'] = (
+                    'error', str(exc))
+
+        estado_subida = st.session_state.get('estado_subida_anthropic')
+        if isinstance(estado_subida, tuple) and len(estado_subida) == 2:
+            tipo, detalle = estado_subida
+            if tipo == 'ok':
+                st.success(
+                    f'Archivo sincronizado con Anthropic (ID: {str(detalle)[:8]}...)')
+            elif tipo == 'error':
+                st.error(f'No se pudo sincronizar con Anthropic: {detalle}')
 
 
 @st.cache_data(show_spinner=False)
@@ -530,24 +582,6 @@ def render_analista_mercados():
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
     df = leer_excel_subido(file_path)
-
-    # Cargar automáticamente archivo a Anthropic
-    if 'archivo_anthropic_cargado' not in st.session_state:
-        st.session_state['archivo_anthropic_cargado'] = None
-
-    archivo_actual_id = getattr(
-        file_path, 'name', '') + str(file_path.size if hasattr(file_path, 'size') else '')
-
-    if st.session_state['archivo_anthropic_cargado'] != archivo_actual_id:
-        try:
-            info_carga = subir_archivo_anthropic(file_path)
-            st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
-            st.session_state['archivo_anthropic_id'] = info_carga.get(
-                'file_id')
-            st.caption(
-                f"✓ Archivo sincronizado con Anthropic (ID: {info_carga.get('file_id')[:8]}...)")
-        except Exception as exc:
-            st.caption(f"⚠ No se pudo sincronizar con Anthropic: {exc}")
 
     # st.write(df.head())
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
@@ -1460,6 +1494,7 @@ if file_path is not None:
     st.divider()
     st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
                 unsafe_allow_html=True)
+    render_subida_archivo_anthropic(file_path)
 
     col1, col2 = st.columns(2)
     with col1:
