@@ -631,8 +631,6 @@ if file_path is not None:
 
         patron_feature_weight = 5
         patron_prediction_weight = 0.45
-        peak_decay_train = 0.75
-        peak_decay_pred = 0.75
 
         entrenamiento_df = (
             y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
@@ -666,15 +664,6 @@ if file_path is not None:
         )
 
         prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
-        running_max_train = -np.inf
-        for i in range(len(prod_train) - 1):
-            if prod_train[i] > running_max_train:
-                running_max_train = prod_train[i]
-                limite_next = prod_train[i] * peak_decay_train
-                if prod_train[i + 1] > limite_next:
-                    prod_train[i + 1] = limite_next
-            else:
-                running_max_train = max(running_max_train, prod_train[i])
         entrenamiento_df['Produccion_ajustada'] = prod_train
 
         eval_actual_df = (
@@ -743,21 +732,6 @@ if file_path is not None:
                 (1 - patron_prediction_weight) * pred_vals[:n_blend]
                 + patron_prediction_weight * proy_vals[:n_blend]
             )
-
-        running_max = -np.inf
-        for i in range(len(pred_vals) - 1):
-            if pred_vals[i] > running_max:
-                running_max = pred_vals[i]
-                limite_siguiente = pred_vals[i] * peak_decay_pred
-                if pred_vals[i + 1] > limite_siguiente:
-                    pred_vals[i + 1] = limite_siguiente
-            else:
-                running_max = max(running_max, pred_vals[i])
-
-        for i in range(1, len(pred_vals)):
-            max_hasta_prev = pred_vals[:i].max()
-            if pred_vals[i - 1] >= max_hasta_prev and pred_vals[i] >= pred_vals[i - 1]:
-                pred_vals[i] = pred_vals[i - 1] * peak_decay_pred
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
         media_real = prod_real_vals.mean()
@@ -1009,10 +983,7 @@ if file_path is not None:
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
     patron_feature_weight = 5
-    patron_prediction_weight = 0.45
-    peak_decay_train = 0.75
-    peak_decay_pred = 0.75
-
+    patron_prediction_weight = 0.5
     entrenamiento_df = (
         y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
         .dropna()
@@ -1045,12 +1016,7 @@ if file_path is not None:
         entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
     )
 
-    # Ajustar el objetivo de entrenamiento con la regla agronomica (vectorizado)
     prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
-    cummax = np.maximum.accumulate(prod_train)
-    limite_siguiente = cummax[:-1] * peak_decay_train
-    exceso = prod_train[1:] > limite_siguiente
-    prod_train[1:][exceso] = (cummax[:-1][exceso] * peak_decay_train)
     entrenamiento_df['Produccion_ajustada'] = prod_train
 
     eval_actual_df = (
@@ -1192,12 +1158,6 @@ if file_path is not None:
             (1 - patron_prediction_weight) * pred_vals[:n_blend]
             + patron_prediction_weight * proy_vals[:n_blend]
         )
-
-    # Aplicar límites de decaimiento de picos (vectorizado)
-    cummax = np.maximum.accumulate(pred_vals)
-    limite_siguiente = cummax[:-1] * peak_decay_pred
-    exceso = pred_vals[1:] > limite_siguiente
-    pred_vals[1:][exceso] = (cummax[:-1][exceso] * peak_decay_pred)
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
     # escalar las predicciones para igualarlas.
