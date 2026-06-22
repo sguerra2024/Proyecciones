@@ -127,6 +127,15 @@ def consultar_anthropic(prompt_usuario):
     return '\n'.join(textos).strip()
 
 
+def es_perfil_analista():
+    """Valida si el usuario actual es Analista"""
+    for clave in ['perfil', 'perfil_usuario', 'perfil_activo', 'rol', 'role', 'user_profile', 'user_role']:
+        valor = st.session_state.get(clave)
+        if valor is not None and str(valor).strip().lower() == 'analista':
+            return True
+    return False
+
+
 def subir_archivo_anthropic(archivo_subido):
     if archivo_subido is None:
         raise ValueError('Selecciona un archivo antes de cargar a claude')
@@ -365,10 +374,6 @@ if 'respuesta_pregunta_claude' not in st.session_state:
     st.session_state['respuesta_pregunta_claude'] = ''
 if 'error_pregunta_claude' not in st.session_state:
     st.session_state['error_pregunta_claude'] = ''
-if 'respuesta_analista_mercados' not in st.session_state:
-    st.session_state['respuesta_analista_mercados'] = ''
-if 'error_analista_mercados' not in st.session_state:
-    st.session_state['error_analista_mercados'] = ''
 if 'archivo_anthropic_cargado' not in st.session_state:
     st.session_state['archivo_anthropic_cargado'] = None
 if 'archivo_anthropic_id' not in st.session_state:
@@ -381,46 +386,66 @@ if 'estado_subida_anthropic' not in st.session_state:
 def render_subida_archivo_anthropic(file_path):
     with st.expander('Subir archivo a Anthropic'):
         st.caption(
-            'Sincroniza manualmente el Excel cargado con Anthropic para usarlo '
-            'en análisis avanzados.'
-        )
-        archivo_actual_id = (
-            getattr(file_path, 'name', '')
-            + str(file_path.size if hasattr(file_path, 'size') else '')
-        )
-        archivo_ya_subido = (
-            st.session_state.get(
-                'archivo_anthropic_cargado') == archivo_actual_id
+            'Sincroniza archivos con Anthropic para usarlos en análisis avanzados.'
         )
 
-        if archivo_ya_subido and st.session_state.get('archivo_anthropic_id'):
-            st.success(
-                'Archivo ya sincronizado con Anthropic '
-                f"(ID: {st.session_state.get('archivo_anthropic_id')[:8]}...)"
+        # Opción 1: Usar el Excel principal
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write('**Excel Principal**')
+            if st.button('Sincronizar Excel principal', key='btn_subir_excel_principal'):
+                try:
+                    info_carga = subir_archivo_anthropic(file_path)
+                    archivo_actual_id = (
+                        getattr(file_path, 'name', '')
+                        + str(file_path.size if hasattr(file_path, 'size') else '')
+                    )
+                    st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
+                    st.session_state['archivo_anthropic_id'] = info_carga.get(
+                        'file_id') or ''
+                    st.session_state['estado_subida_anthropic'] = (
+                        'ok', info_carga.get('file_id'))
+                except Exception as exc:
+                    st.session_state['estado_subida_anthropic'] = (
+                        'error', str(exc))
+
+        # Opción 2: Cargar cualquier archivo
+        with col2:
+            st.write('**Cargar Archivo Personalizado**')
+            archivo_personalizado = st.file_uploader(
+                'Selecciona cualquier archivo',
+                key='archivo_personalizado_anthropic'
             )
+            if archivo_personalizado is not None:
+                st.info(
+                    f'📁 Archivo seleccionado: {archivo_personalizado.name}')
+                if st.button('Sincronizar archivo seleccionado', key='btn_subir_personalizado'):
+                    try:
+                        info_carga = subir_archivo_anthropic(
+                            archivo_personalizado)
+                        archivo_actual_id = (
+                            getattr(archivo_personalizado, 'name', '')
+                            + str(archivo_personalizado.size if hasattr(archivo_personalizado, 'size') else '')
+                        )
+                        st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
+                        st.session_state['archivo_anthropic_id'] = info_carga.get(
+                            'file_id') or ''
+                        st.session_state['estado_subida_anthropic'] = (
+                            'ok', info_carga.get('file_id'))
+                    except Exception as exc:
+                        st.session_state['estado_subida_anthropic'] = (
+                            'error', str(exc))
 
-        if st.button('Subir archivo actual a Anthropic', key='btn_subir_anthropic'):
-            try:
-                info_carga = subir_archivo_anthropic(file_path)
-                st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
-                st.session_state['archivo_anthropic_id'] = info_carga.get(
-                    'file_id') or ''
-                st.session_state['estado_subida_anthropic'] = (
-                    'ok',
-                    info_carga.get('file_id')
-                )
-            except Exception as exc:
-                st.session_state['estado_subida_anthropic'] = (
-                    'error', str(exc))
-
+        # Mostrar estado
+        st.divider()
         estado_subida = st.session_state.get('estado_subida_anthropic')
         if isinstance(estado_subida, tuple) and len(estado_subida) == 2:
             tipo, detalle = estado_subida
             if tipo == 'ok':
                 st.success(
-                    f'Archivo sincronizado con Anthropic (ID: {str(detalle)[:8]}...)')
+                    f'✓ Sincronizado con Anthropic (ID: {str(detalle)[:8]}...)')
             elif tipo == 'error':
-                st.error(f'No se pudo sincronizar con Anthropic: {detalle}')
+                st.error(f'✗ Error: {detalle}')
 
 
 @st.cache_data(show_spinner=False)
@@ -476,116 +501,6 @@ def render_preguntas_claude(df_base, selected_finca):
         elif st.session_state.get('respuesta_pregunta_claude'):
             st.success('Respuesta generada.')
             st.write(st.session_state['respuesta_pregunta_claude'])
-
-
-@st.fragment
-def render_analista_mercados():
-    with st.expander('Analista de Datos y Mercados'):
-        st.caption(
-            'Consulta especializada en análisis de rentabilidad, mercados, '
-            'gestión de cambios y errores de estimados.'
-        )
-
-        analisis_tipo = st.radio(
-            'Tipo de análisis',
-            ['Cambio del Cliente', 'Error en Estimado',
-                'Investigación de Mercado', 'Optimizar Beneficios'],
-            key='tipo_analisis_mercados'
-        )
-
-        with st.form('form_analista_mercados', clear_on_submit=True):
-            if analisis_tipo == 'Cambio del Cliente':
-                cambio_desc = st.text_area(
-                    'Describe el cambio solicitado',
-                    key='cambio_descripcion'
-                )
-                cambio_costo = st.number_input(
-                    'Costo estimado inicial (opcional)',
-                    value=0.0,
-                    key='cambio_costo'
-                )
-                enviar = st.form_submit_button('Analizar Cambio')
-                if enviar:
-                    try:
-                        from agent_manager import AgenteAnalistasMercados
-                        agente = AgenteAnalistasMercados()
-                        impacto = {
-                            'costo_estimado': cambio_costo} if cambio_costo > 0 else None
-                        respuesta = agente.analizar_cambio_cliente(
-                            cambio_desc, impacto)
-                        st.session_state['respuesta_analista_mercados'] = respuesta
-                        st.session_state['error_analista_mercados'] = ''
-                    except Exception as exc:
-                        st.session_state['error_analista_mercados'] = str(exc)
-                        st.session_state['respuesta_analista_mercados'] = ''
-
-            elif analisis_tipo == 'Error en Estimado':
-                error_desc = st.text_area(
-                    'Describe el error',
-                    key='error_descripcion'
-                )
-                desviacion = st.number_input(
-                    'Desviación (monto o porcentaje)',
-                    key='error_desviacion'
-                )
-                enviar = st.form_submit_button('Analizar Error')
-                if enviar:
-                    try:
-                        from agent_manager import AgenteAnalistasMercados
-                        agente = AgenteAnalistasMercados()
-                        respuesta = agente.analizar_error_estimado(
-                            error_desc, desviacion)
-                        st.session_state['respuesta_analista_mercados'] = respuesta
-                        st.session_state['error_analista_mercados'] = ''
-                    except Exception as exc:
-                        st.session_state['error_analista_mercados'] = str(exc)
-                        st.session_state['respuesta_analista_mercados'] = ''
-
-            elif analisis_tipo == 'Investigación de Mercado':
-                producto = st.text_input(
-                    'Producto o servicio',
-                    key='mercado_producto'
-                )
-                region = st.text_input(
-                    'Región (opcional)',
-                    key='mercado_region'
-                )
-                enviar = st.form_submit_button('Investigar Mercado')
-                if enviar:
-                    try:
-                        from agent_manager import AgenteAnalistasMercados
-                        agente = AgenteAnalistasMercados()
-                        respuesta = agente.investigar_mercado(producto, region)
-                        st.session_state['respuesta_analista_mercados'] = respuesta
-                        st.session_state['error_analista_mercados'] = ''
-                    except Exception as exc:
-                        st.session_state['error_analista_mercados'] = str(exc)
-                        st.session_state['respuesta_analista_mercados'] = ''
-
-            elif analisis_tipo == 'Optimizar Beneficios':
-                datos_json = st.text_area(
-                    'Datos del negocio (JSON o texto descriptivo)',
-                    key='datos_negocio'
-                )
-                enviar = st.form_submit_button('Optimizar')
-                if enviar:
-                    try:
-                        from agent_manager import AgenteAnalistasMercados
-                        agente = AgenteAnalistasMercados()
-                        respuesta = agente.optimizar_beneficios(datos_json)
-                        st.session_state['respuesta_analista_mercados'] = respuesta
-                        st.session_state['error_analista_mercados'] = ''
-                    except Exception as exc:
-                        st.session_state['error_analista_mercados'] = str(exc)
-                        st.session_state['respuesta_analista_mercados'] = ''
-
-        if st.session_state.get('error_analista_mercados'):
-            st.error(
-                f"Error en análisis: {st.session_state['error_analista_mercados']}"
-            )
-        elif st.session_state.get('respuesta_analista_mercados'):
-            st.success('Análisis completado.')
-            st.write(st.session_state['respuesta_analista_mercados'])
 
 
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
@@ -1429,12 +1344,7 @@ if file_path is not None:
     st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
                 unsafe_allow_html=True)
     render_subida_archivo_anthropic(file_path)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        render_preguntas_claude(df, selected_finca)
-    with col2:
-        render_analista_mercados()
+    render_preguntas_claude(df, selected_finca)
 
 else:
     st.info("Por favor, sube el archivo Excel.")
