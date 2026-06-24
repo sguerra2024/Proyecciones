@@ -698,30 +698,11 @@ def render_dashboard_base(df_base):
                 m2.metric('Total Modelo', f"{total_modelo:,.0f}")
                 m3.metric('Brecha Modelo-Real', f"{brecha:,.0f}")
 
-                st.markdown('**Vista dinamica de totales**')
-                vista_cols = st.columns(2)
-                opciones_vista = ['Año', 'Finca', 'Producto', 'Variedad']
-                vista_sel = vista_cols[0].selectbox(
-                    'Ver totales por', opciones_vista, key='dash_vista_dimension'
-                )
-                top_n = vista_cols[1].selectbox(
-                    'Cantidad de barras', [10, 15, 20, 30], index=1, key='dash_top_n'
-                )
-
-                dim_map = {
-                    'Año': 'Anio',
-                    'Finca': col_finca,
-                    'Producto': col_producto,
-                    'Variedad': 'Variedad_mostrar'
-                }
-                columna_dim = dim_map.get(vista_sel)
-
-                if columna_dim is None:
-                    st.info(
-                        f'La dimension {vista_sel} no esta disponible en la base actual.')
-                else:
+                def render_totales_horizontal(df_src, columna_dim, titulo, top_n=15):
+                    if columna_dim is None:
+                        return
                     totales_dim = (
-                        comparativo_filtrado
+                        df_src
                         .dropna(subset=[columna_dim])
                         .groupby(columna_dim, as_index=False)
                         .agg(
@@ -729,8 +710,7 @@ def render_dashboard_base(df_base):
                             Total_modelo=('Estimado_modelo', 'sum')
                         )
                     )
-
-                    if vista_sel == 'Año':
+                    if columna_dim == 'Anio':
                         totales_dim = totales_dim.sort_values(columna_dim)
                     else:
                         totales_dim['Diferencia_abs'] = (
@@ -740,44 +720,47 @@ def render_dashboard_base(df_base):
                         totales_dim = totales_dim.sort_values(
                             'Diferencia_abs', ascending=False
                         ).head(top_n)
-
                     if totales_dim.empty:
-                        st.warning(
-                            'No hay datos para construir la grafica seleccionada.')
-                    else:
-                        fig, ax = plt.subplots(figsize=(12, 5))
-                        x_pos = np.arange(len(totales_dim))
-                        width = 0.20
-                        ax.bar(
-                            x_pos - width / 2,
-                            totales_dim['Total_produccion'],
-                            width,
-                            label='Produccion Real',
-                            color='blue',
-                            alpha=0.8
-                        )
-                        ax.bar(
-                            x_pos + width / 2,
-                            totales_dim['Total_modelo'],
-                            width,
-                            label='Estimado Modelo',
-                            color='red',
-                            alpha=0.8
-                        )
-                        ax.set_xlabel(vista_sel, fontsize=11,
-                                      fontweight='bold')
-                        ax.set_ylabel('Total', fontsize=11, fontweight='bold')
-                        ax.set_xticks(x_pos)
-                        rot = 0 if vista_sel == 'Año' else 45
-                        ax.set_xticklabels(
-                            totales_dim[columna_dim].astype(str),
-                            rotation=rot,
-                            ha='right' if rot else 'center'
-                        )
-                        ax.legend(fontsize=10)
-                        ax.grid(True, alpha=0.3, axis='y')
-                        plt.tight_layout()
-                        st.pyplot(fig, use_container_width=True)
+                        return
+
+                    st.markdown(f'**{titulo}**')
+                    fig_h = max(4, min(10, len(totales_dim) * 0.42))
+                    fig, ax = plt.subplots(figsize=(12, fig_h))
+                    y_pos = np.arange(len(totales_dim))
+                    bar_h = 0.08
+                    ax.barh(
+                        y_pos - bar_h / 2,
+                        totales_dim['Total_produccion'],
+                        bar_h,
+                        label='Produccion Real',
+                        color='blue',
+                        alpha=0.85
+                    )
+                    ax.barh(
+                        y_pos + bar_h / 2,
+                        totales_dim['Total_modelo'],
+                        bar_h,
+                        label='Estimado Modelo',
+                        color='red',
+                        alpha=0.85
+                    )
+                    ax.set_xlabel('Total', fontsize=11, fontweight='bold')
+                    ax.set_ylabel(titulo, fontsize=11, fontweight='bold')
+                    ax.set_yticks(y_pos)
+                    ax.set_yticklabels(totales_dim[columna_dim].astype(str))
+                    ax.legend(fontsize=10)
+                    ax.grid(True, alpha=0.3, axis='x')
+                    plt.tight_layout()
+                    st.pyplot(fig, use_container_width=True)
+
+                render_totales_horizontal(
+                    comparativo_filtrado, 'Anio', 'Totales por Año', top_n=50)
+                render_totales_horizontal(
+                    comparativo_filtrado, col_finca, 'Totales por Finca')
+                render_totales_horizontal(
+                    comparativo_filtrado, col_producto, 'Totales por Producto')
+                render_totales_horizontal(
+                    comparativo_filtrado, 'Variedad_mostrar', 'Totales por Variedad')
         else:
             st.info(
                 'Corre PROYECTAR FINCA para visualizar graficos comparativos del modelo.')
@@ -850,15 +833,12 @@ if file_path is not None:
         unsafe_allow_html=True
     )
     run_masiva = st.button('PROYECTAR FINCA')
+    progreso_placeholder = st.empty()
 
-    if st.session_state.get('dashboard_finca_activo'):
+    if st.session_state.get('dashboard_finca_activo') and not run_masiva:
         render_dashboard_base(df)
 
     df_finca = df[df["Finca"].astype(str) == selected_finca].copy()
-
-    variedades = sorted(
-        df_finca["Bloque&Varid"].dropna().astype(str).unique().tolist())
-    selected_var = st.selectbox("Bloque&Variedad", variedades)
 
     def nombre_base_variedad(valor):
         txt = str(valor).strip().upper()
@@ -1128,7 +1108,7 @@ if file_path is not None:
         resultados_export = []
         resumen = []
         errores = []
-        progreso = st.progress(0)
+        progreso = progreso_placeholder.progress(0)
 
         for i, var_item in enumerate(variedades_todas, start=1):
             try:
@@ -1261,6 +1241,16 @@ if file_path is not None:
 
     # Una sola lectura reutilizada para todo el flujo individual
     df = leer_excel_subido(file_path)
+
+    # Seleccion individual ubicada despues del reporte Dashboard.
+    df_finca_ind = df[df["Finca"].astype(str) == selected_finca].copy()
+    variedades = sorted(
+        df_finca_ind["Bloque&Varid"].dropna().astype(str).unique().tolist()
+    )
+    if len(variedades) == 0:
+        st.warning('No hay Bloque&Varid disponibles para la finca seleccionada.')
+        st.stop()
+    selected_var = st.selectbox("Bloque&Variedad", variedades)
 
     var_proy = selected_var
     df_filtered_ = df[df['Bloque&Varid'].isin([var_proy])]
