@@ -374,6 +374,10 @@ if 'respuesta_pregunta_claude' not in st.session_state:
     st.session_state['respuesta_pregunta_claude'] = ''
 if 'error_pregunta_claude' not in st.session_state:
     st.session_state['error_pregunta_claude'] = ''
+if 'dashboard_finca_activo' not in st.session_state:
+    st.session_state['dashboard_finca_activo'] = False
+if 'dashboard_archivo_id' not in st.session_state:
+    st.session_state['dashboard_archivo_id'] = ''
 if 'archivo_anthropic_cargado' not in st.session_state:
     st.session_state['archivo_anthropic_cargado'] = None
 if 'archivo_anthropic_id' not in st.session_state:
@@ -462,6 +466,325 @@ def leer_excel_subido(archivo_excel):
     return df
 
 
+def construir_prompt_dashboard_anthropic(df_base, base_modelo, instruccion_extra=''):
+    def top_resumen(df_origen, columna, valor_col='Produccion', top_n=5):
+        if columna is None or columna not in df_origen.columns:
+            return 'N/D'
+        trabajo = df_origen.copy()
+        trabajo[columna] = trabajo[columna].astype(str)
+        if valor_col in trabajo.columns:
+            out = (
+                trabajo.groupby(columna, as_index=False)
+                .agg(Valor=(valor_col, lambda s: pd.to_numeric(s, errors='coerce').sum(skipna=True)))
+                .sort_values('Valor', ascending=False)
+                .head(top_n)
+            )
+        else:
+            out = trabajo[columna].value_counts().head(top_n).reset_index()
+            out.columns = [columna, 'Valor']
+        return out.to_csv(index=False)
+
+    resumen = [
+        'Genera un resumen ejecutivo corto del dashboard agricola.',
+        'Separa la respuesta por: ANIO, SEMANAS, FINCA, PRODUCTO, VARIEDAD y DESVIACIONES.',
+        'Responde en espanol, directo y accionable.'
+    ]
+
+    if instruccion_extra and instruccion_extra.strip():
+        resumen.append(f'Instruccion adicional: {instruccion_extra.strip()}')
+
+    resumen.append(
+        f'GENERAL: registros={len(df_base)}, fincas={int(df_base["Finca"].nunique()) if "Finca" in df_base.columns else 0}, '
+        f'variedades={int(df_base["Bloque&Varid"].nunique()) if "Bloque&Varid" in df_base.columns else 0}'
+    )
+
+    if {'Anio', 'Semana'}.issubset(df_base.columns):
+        serie = df_base.copy()
+        serie['Anio'] = pd.to_numeric(serie['Anio'], errors='coerce')
+        serie['Semana'] = pd.to_numeric(serie['Semana'], errors='coerce')
+        serie = serie.dropna(subset=['Anio', 'Semana'])
+        if not serie.empty:
+            resumen.append('ANIO:')
+            resumen.append(
+                serie.groupby('Anio', as_index=False)
+                .agg(Produccion=('Produccion', lambda s: pd.to_numeric(s, errors='coerce').sum(skipna=True))
+                     if 'Produccion' in serie.columns else ('Anio', 'size'))
+                .sort_values('Anio')
+                .tail(8)
+                .to_csv(index=False)
+            )
+            serie['Anio_Semana'] = serie.apply(
+                lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1
+            )
+            resumen.append('SEMANAS:')
+            resumen.append(
+                serie.groupby('Anio_Semana', as_index=False)
+                .agg(Produccion=('Produccion', lambda s: pd.to_numeric(s, errors='coerce').sum(skipna=True))
+                     if 'Produccion' in serie.columns else ('Anio_Semana', 'size'))
+                .sort_values('Anio_Semana')
+                .tail(12)
+                .to_csv(index=False)
+            )
+
+    resumen.append('FINCA:')
+    resumen.append(top_resumen(df_base, 'Finca'))
+    resumen.append('PRODUCTO:')
+    resumen.append(top_resumen(df_base, 'Producto'))
+    col_var = 'Bloque&Varid' if 'Bloque&Varid' in df_base.columns else (
+        'Variedad' if 'Variedad' in df_base.columns else None)
+    resumen.append('VARIEDAD:')
+    resumen.append(top_resumen(df_base, col_var))
+
+    if base_modelo is not None and not base_modelo.empty:
+        resumen.append(f'PROYECCION: filas={len(base_modelo)}')
+
+    resumen.append(
+        'DESVIACIONES: indica si el modelo sobreestima o subestima y en que frentes.')
+    return '\n'.join(resumen)
+
+
+def render_dashboard_base(df_base):
+    with st.expander('Dashboard de la base', expanded=True):
+        if 'Anio' not in df_base.columns:
+            st.info('No hay columna Anio para separar acumulados.')
+            return
+
+        trabajo = df_base.copy()
+        trabajo['Anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
+        trabajo = trabajo.dropna(subset=['Anio']).copy()
+        trabajo['Anio'] = trabajo['Anio'].astype(int)
+
+        st.subheader('Totales del modelo vs produccion')
+        col_finca = 'Finca' if 'Finca' in trabajo.columns else None
+        col_producto = 'Producto' if 'Producto' in trabajo.columns else None
+        col_var = 'Bloque&Varid' if 'Bloque&Varid' in trabajo.columns else (
+            'Variedad' if 'Variedad' in trabajo.columns else None)
+
+        base_modelo = st.session_state.get('base_proyeccion_anthropic')
+        col_var = 'Bloque&Varid' if 'Bloque&Varid' in trabajo.columns else (
+            'Variedad' if 'Variedad' in trabajo.columns else None
+        )
+        if (
+            base_modelo is not None
+            and not base_modelo.empty
+            and col_var is not None
+            and 'Produccion' in trabajo.columns
+            and {'Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'}.issubset(base_modelo.columns)
+            and {'Anio', 'Semana'}.issubset(trabajo.columns)
+        ):
+            columnas_real = [col_var, 'Anio', 'Semana', 'Produccion']
+            if col_finca is not None:
+                columnas_real.append(col_finca)
+            if col_producto is not None:
+                columnas_real.append(col_producto)
+
+            real_tmp = trabajo[columnas_real].copy()
+            real_tmp['Anio'] = pd.to_numeric(real_tmp['Anio'], errors='coerce')
+            real_tmp['Semana'] = pd.to_numeric(
+                real_tmp['Semana'], errors='coerce')
+            real_tmp = real_tmp.dropna(subset=['Anio', 'Semana'])
+            real_tmp['Anio'] = real_tmp['Anio'].astype(int)
+            real_tmp['Semana'] = real_tmp['Semana'].astype(int)
+            real_tmp['Anio_Semana'] = real_tmp.apply(
+                lambda r: f"{int(r['Anio'])}-{int(r['Semana']):02d}", axis=1
+            )
+            real_tmp = real_tmp.rename(
+                columns={col_var: 'Variedad_proyectada'})
+            real_tmp['Variedad_proyectada'] = real_tmp['Variedad_proyectada'].astype(
+                str)
+
+            modelo_tmp = base_modelo[[
+                'Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'
+            ]].copy()
+            modelo_tmp['Variedad_proyectada'] = modelo_tmp['Variedad_proyectada'].astype(
+                str)
+
+            columnas_merge = ['Variedad_proyectada',
+                              'Anio_Semana', 'Produccion', 'Anio']
+            if col_finca is not None:
+                columnas_merge.append(col_finca)
+            if col_producto is not None:
+                columnas_merge.append(col_producto)
+
+            comparativo = modelo_tmp.merge(
+                real_tmp[columnas_merge],
+                on=['Variedad_proyectada', 'Anio_Semana'],
+                how='left'
+            )
+            comparativo['Estimado_modelo'] = pd.to_numeric(
+                comparativo['Estimado_modelo'], errors='coerce'
+            ).fillna(0)
+            comparativo['Produccion'] = pd.to_numeric(
+                comparativo['Produccion'], errors='coerce'
+            ).fillna(0)
+
+            comparativo['Variedad_mostrar'] = comparativo['Variedad_proyectada'].astype(
+                str
+            )
+
+            st.markdown('**Filtros dinamicos (pop menu)**')
+            filtro_cols = st.columns(4)
+
+            opciones_anio = ['Todos'] + [
+                str(x) for x in sorted(
+                    comparativo['Anio'].dropna().astype(int).unique().tolist()
+                )
+            ]
+            anio_sel = filtro_cols[0].selectbox(
+                'Año', opciones_anio, key='dash_filtro_anio'
+            )
+
+            if col_finca is not None:
+                opciones_finca = ['Todos'] + sorted(
+                    comparativo[col_finca].dropna().astype(
+                        str).unique().tolist()
+                )
+                finca_sel = filtro_cols[1].selectbox(
+                    'Finca', opciones_finca, key='dash_filtro_finca'
+                )
+            else:
+                filtro_cols[1].caption('Finca no disponible')
+                finca_sel = 'Todos'
+
+            if col_producto is not None:
+                opciones_producto = ['Todos'] + sorted(
+                    comparativo[col_producto].dropna().astype(
+                        str).unique().tolist()
+                )
+                producto_sel = filtro_cols[2].selectbox(
+                    'Producto', opciones_producto, key='dash_filtro_producto'
+                )
+            else:
+                filtro_cols[2].caption('Producto no disponible')
+                producto_sel = 'Todos'
+
+            opciones_variedad = ['Todos'] + sorted(
+                comparativo['Variedad_mostrar'].dropna().astype(
+                    str).unique().tolist()
+            )
+            variedad_sel = filtro_cols[3].selectbox(
+                'Variedad', opciones_variedad, key='dash_filtro_variedad'
+            )
+
+            comparativo_filtrado = comparativo.copy()
+            if anio_sel != 'Todos':
+                comparativo_filtrado = comparativo_filtrado[
+                    comparativo_filtrado['Anio'].astype(int) == int(anio_sel)
+                ]
+            if col_finca is not None and finca_sel != 'Todos':
+                comparativo_filtrado = comparativo_filtrado[
+                    comparativo_filtrado[col_finca].astype(str) == finca_sel
+                ]
+            if col_producto is not None and producto_sel != 'Todos':
+                comparativo_filtrado = comparativo_filtrado[
+                    comparativo_filtrado[col_producto].astype(
+                        str) == producto_sel
+                ]
+            if variedad_sel != 'Todos':
+                comparativo_filtrado = comparativo_filtrado[
+                    comparativo_filtrado['Variedad_mostrar'].astype(
+                        str) == variedad_sel
+                ]
+
+            if comparativo_filtrado.empty:
+                st.warning('No hay datos para los filtros seleccionados.')
+            else:
+                total_real = float(comparativo_filtrado['Produccion'].sum())
+                total_modelo = float(
+                    comparativo_filtrado['Estimado_modelo'].sum())
+                brecha = total_modelo - total_real
+                m1, m2, m3 = st.columns(3)
+                m1.metric('Total Produccion', f"{total_real:,.0f}")
+                m2.metric('Total Modelo', f"{total_modelo:,.0f}")
+                m3.metric('Brecha Modelo-Real', f"{brecha:,.0f}")
+
+                st.markdown('**Vista dinamica de totales**')
+                vista_cols = st.columns(2)
+                opciones_vista = ['Año', 'Finca', 'Producto', 'Variedad']
+                vista_sel = vista_cols[0].selectbox(
+                    'Ver totales por', opciones_vista, key='dash_vista_dimension'
+                )
+                top_n = vista_cols[1].selectbox(
+                    'Cantidad de barras', [10, 15, 20, 30], index=1, key='dash_top_n'
+                )
+
+                dim_map = {
+                    'Año': 'Anio',
+                    'Finca': col_finca,
+                    'Producto': col_producto,
+                    'Variedad': 'Variedad_mostrar'
+                }
+                columna_dim = dim_map.get(vista_sel)
+
+                if columna_dim is None:
+                    st.info(
+                        f'La dimension {vista_sel} no esta disponible en la base actual.')
+                else:
+                    totales_dim = (
+                        comparativo_filtrado
+                        .dropna(subset=[columna_dim])
+                        .groupby(columna_dim, as_index=False)
+                        .agg(
+                            Total_produccion=('Produccion', 'sum'),
+                            Total_modelo=('Estimado_modelo', 'sum')
+                        )
+                    )
+
+                    if vista_sel == 'Año':
+                        totales_dim = totales_dim.sort_values(columna_dim)
+                    else:
+                        totales_dim['Diferencia_abs'] = (
+                            totales_dim['Total_modelo'] -
+                            totales_dim['Total_produccion']
+                        ).abs()
+                        totales_dim = totales_dim.sort_values(
+                            'Diferencia_abs', ascending=False
+                        ).head(top_n)
+
+                    if totales_dim.empty:
+                        st.warning(
+                            'No hay datos para construir la grafica seleccionada.')
+                    else:
+                        fig, ax = plt.subplots(figsize=(12, 5))
+                        x_pos = np.arange(len(totales_dim))
+                        width = 0.20
+                        ax.bar(
+                            x_pos - width / 2,
+                            totales_dim['Total_produccion'],
+                            width,
+                            label='Produccion Real',
+                            color='blue',
+                            alpha=0.8
+                        )
+                        ax.bar(
+                            x_pos + width / 2,
+                            totales_dim['Total_modelo'],
+                            width,
+                            label='Estimado Modelo',
+                            color='red',
+                            alpha=0.8
+                        )
+                        ax.set_xlabel(vista_sel, fontsize=11,
+                                      fontweight='bold')
+                        ax.set_ylabel('Total', fontsize=11, fontweight='bold')
+                        ax.set_xticks(x_pos)
+                        rot = 0 if vista_sel == 'Año' else 45
+                        ax.set_xticklabels(
+                            totales_dim[columna_dim].astype(str),
+                            rotation=rot,
+                            ha='right' if rot else 'center'
+                        )
+                        ax.legend(fontsize=10)
+                        ax.grid(True, alpha=0.3, axis='y')
+                        plt.tight_layout()
+                        st.pyplot(fig, use_container_width=True)
+        else:
+            st.info(
+                'Corre PROYECTAR FINCA para visualizar graficos comparativos del modelo.')
+
+        st.divider()
+
+
 @st.fragment
 def render_preguntas_claude(df_base, selected_finca):
     with st.expander('Preguntas a Claude'):
@@ -506,6 +829,15 @@ def render_preguntas_claude(df_base, selected_finca):
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
     df = leer_excel_subido(file_path)
+    archivo_actual_id = (
+        getattr(file_path, 'name', '')
+        + str(file_path.size if hasattr(file_path, 'size') else '')
+    )
+
+    if st.session_state.get('dashboard_archivo_id') != archivo_actual_id:
+        st.session_state['dashboard_archivo_id'] = archivo_actual_id
+        st.session_state['dashboard_finca_activo'] = False
+        st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
 
     # st.write(df.head())
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
@@ -518,6 +850,9 @@ if file_path is not None:
         unsafe_allow_html=True
     )
     run_masiva = st.button('PROYECTAR FINCA')
+
+    if st.session_state.get('dashboard_finca_activo'):
+        render_dashboard_base(df)
 
     df_finca = df[df["Finca"].astype(str) == selected_finca].copy()
 
@@ -887,6 +1222,7 @@ if file_path is not None:
         ]].copy()
         base_proy_masiva['Finca_proyectada'] = str(selected_finca)
         st.session_state['base_proyeccion_anthropic'] = base_proy_masiva
+        st.session_state['dashboard_finca_activo'] = True
 
         if len(errores) == 0:
             st.success('Proyeccion masiva completada.')
@@ -918,6 +1254,8 @@ if file_path is not None:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             key='descargar_masivo'
         )
+
+        render_dashboard_base(df)
 
         st.stop()
 
