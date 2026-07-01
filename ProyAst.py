@@ -1161,6 +1161,10 @@ if file_path is not None:
             df_estimado_ordenado['Anio'], errors='coerce')
         df_estimado_ordenado['__semana'] = pd.to_numeric(
             df_estimado_ordenado['Semana'], errors='coerce')
+        # Exportar solo registros del 2026.
+        df_estimado_ordenado = df_estimado_ordenado[
+            df_estimado_ordenado['__anio'] == 2026
+        ].copy()
         df_estimado_ordenado = df_estimado_ordenado.sort_values(
             ['Variedad_proyectada', '__anio', '__semana', '_orden_original'],
             ascending=[True, False, False, False]
@@ -1179,10 +1183,13 @@ if file_path is not None:
             columns=['__anio', '__semana', '__rank_ultimas']
         )
 
-        # Si no se pudo proyectar una variedad/semana, exportar 0.
-        df_estimado_ordenado['Estimado_modelo'] = df_estimado_ordenado[
-            'Estimado_modelo'
-        ].fillna(0)
+        # No exportar filas sin estimado o con estimado igual a 0.
+        df_estimado_ordenado['Estimado_modelo'] = pd.to_numeric(
+            df_estimado_ordenado['Estimado_modelo'], errors='coerce')
+        df_estimado_ordenado = df_estimado_ordenado[
+            df_estimado_ordenado['Estimado_modelo'].notna()
+            & (df_estimado_ordenado['Estimado_modelo'] > 0)
+        ].copy()
         df_estimado_ordenado['Estimado_modelo'] = np.rint(
             df_estimado_ordenado['Estimado_modelo']
         ).astype(np.int64)
