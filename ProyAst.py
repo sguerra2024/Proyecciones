@@ -1521,13 +1521,41 @@ if file_path is not None:
             cambios_anio.append(i)
         anio_prev = anio_actual
 
+    y_modelo_plot = y_pred['Estimado_modelo'].reset_index(drop=True).to_numpy()
+    y_produccion_plot = y_frame.iloc[:n_puntos,
+                                     0].reset_index(drop=True).to_numpy()
+    y_patron_plot = proy.iloc[:n_puntos].reset_index(drop=True).to_numpy()
+
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(x_pos, y_pred['Estimado_modelo'].reset_index(drop=True),
-            label='Modelo', color='orange', linewidth=2)
-    ax.plot(x_pos, y_frame.reset_index(drop=True),
-            label='Produccion', color='red', linestyle='--')
-    ax.plot(x_pos, proy.reset_index(drop=True),
-            label='Proy_patron', color='green', linestyle='-')
+
+    def plot_linea_segura(x_vals, y_vals, **kwargs):
+        x_arr = np.asarray(list(x_vals)).reshape(-1)
+        y_arr = np.asarray(y_vals).reshape(-1)
+        if x_arr.size == 0 or y_arr.size == 0 or x_arr.size != y_arr.size:
+            ax.plot([], [], **kwargs)
+            return False
+        ax.plot(x_arr, y_arr, **kwargs)
+        return True
+
+    hubo_desajuste = False
+    if not plot_linea_segura(
+        x_pos, y_modelo_plot, label='Modelo', color='orange', linewidth=2
+    ):
+        hubo_desajuste = True
+    if not plot_linea_segura(
+        x_pos, y_produccion_plot, label='Produccion', color='red', linestyle='--'
+    ):
+        hubo_desajuste = True
+    if not plot_linea_segura(
+        x_pos, y_patron_plot, label='Proy_patron', color='green', linestyle='-'
+    ):
+        hubo_desajuste = True
+
+    if hubo_desajuste:
+        st.warning(
+            'Se detecto un desajuste entre dimensiones de X/Y. '
+            'Se dibujo linea vacia para evitar error de grafico.'
+        )
 
     for c in cambios_anio:
         ax.axvline(x=c, color='gray', linestyle=':', linewidth=1)
