@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv, dotenv_values
 import os
 import sys
+import mimetypes
 
 agents_dir = Path(__file__).with_name("agents")
 if agents_dir.exists():
@@ -142,51 +143,121 @@ def subir_archivo_anthropic(archivo_subido):
 
     cliente = crear_cliente_anthropic()
     nombre = getattr(archivo_subido, 'name', None) or 'archivo.bin'
-    media_type = getattr(
-        archivo_subido, 'type', None) or 'application/octet-stream'
+    media_type = getattr(archivo_subido, 'type', None)
+    if not media_type:
+        media_type = mimetypes.guess_type(
+            nombre)[0] or 'application/octet-stream'
     contenido = archivo_subido.getvalue()
+    if not contenido:
+        raise ValueError('El archivo seleccionado esta vacio.')
 
-    intentos = [
-        (
-            'beta.files.upload',
-            lambda: cliente.beta.files.upload(
-                file=(nombre, contenido, media_type)
-            )
-        ),
-        (
-            'files.create',
-            lambda: cliente.files.create(
-                file=(nombre, contenido, media_type)
-            )
-        ),
-        (
-            'beta.files.create',
-            lambda: cliente.beta.files.create(
-                file=(nombre, contenido, media_type)
-            )
-        )
-    ]
+    # Anthropic puede variar el formato aceptado segun version del SDK/API.
+    # Probamos variantes comunes del payload antes de reportar error final.
+    def construir_variantes_payload(file_name, file_bytes, mime):
+        return [
+            ('tuple_name_bytes_mime', (file_name, file_bytes, mime)),
+            ('tuple_name_bytes', (file_name, file_bytes)),
+            ('dict_content', {
+                'name': file_name,
+                'content': file_bytes,
+                'media_type': mime
+            }),
+            ('dict_file', {
+                'file_name': file_name,
+                'bytes': file_bytes,
+                'media_type': mime
+            }),
+        ]
+
+    variantes_archivo = []
+
+    # Para Excel, priorizamos CSV porque Anthropic lo reconoce de forma mas estable.
+    nombre_lower = nombre.lower()
+    if nombre_lower.endswith('.xlsx') or nombre_lower.endswith('.xls'):
+        try:
+            df_excel = pd.read_excel(io.BytesIO(contenido), sheet_name=0)
+            csv_bytes = df_excel.to_csv(index=False).encode('utf-8')
+            nombre_csv = str(Path(nombre).with_suffix('.csv'))
+            variantes_archivo.append((nombre_csv, csv_bytes, 'text/csv'))
+        except Exception:
+            # Si falla la conversion, seguimos con el binario original.
+            pass
+
+    # Mantener binario original como respaldo final.
+    variantes_archivo.append((nombre, contenido, media_type))
+
+    def ejecutar_metodo(metodo, payload):
+        if metodo == 'beta.files.upload':
+            return cliente.beta.files.upload(file=payload)
+        if metodo == 'files.create':
+            return cliente.files.create(file=payload)
+        if metodo == 'beta.files.create':
+            return cliente.beta.files.create(file=payload)
+        raise RuntimeError(f'Metodo no soportado: {metodo}')
+
+    metodos = ['beta.files.upload', 'files.create', 'beta.files.create']
 
     ultimo_error = None
-    for metodo, fn in intentos:
-        try:
-            respuesta = fn()
-            file_id = getattr(respuesta, 'id', None)
-            if file_id is None and isinstance(respuesta, dict):
-                file_id = respuesta.get('id')
-            return {
-                'file_id': file_id,
-                'nombre': nombre,
-                'bytes': len(contenido),
-                'metodo': metodo
-            }
-        except Exception as exc:
-            ultimo_error = exc
+    errores = []
+    for file_name, file_bytes, mime in variantes_archivo:
+        for metodo in metodos:
+            for payload_tipo, payload in construir_variantes_payload(file_name, file_bytes, mime):
+                try:
+                    respuesta = ejecutar_metodo(metodo, payload)
+                    file_id = getattr(respuesta, 'id', None)
+                    if file_id is None and isinstance(respuesta, dict):
+                        file_id = respuesta.get('id')
+                    return {
+                        'file_id': file_id,
+                        'nombre': file_name,
+                        'bytes': len(file_bytes),
+                        'metodo': f'{metodo}:{payload_tipo}'
+                    }
+                except Exception as exc:
+                    ultimo_error = exc
+                    errores.append(
+                        f'{metodo}:{payload_tipo}:{file_name} -> {exc}'
+                    )
 
     raise RuntimeError(
         'No fue posible cargar el archivo a Anthropic. '
-        f'Ultimo error: {ultimo_error}'
+        f'Ultimo error: {ultimo_error}. '
+        'Detalle de intentos: '
+        + ' | '.join(errores[-4:])
     )
+
+
+class ArchivoEnMemoria:
+    def __init__(self, name, data, media_type='application/octet-stream'):
+        self.name = name
+        self._data = data
+        self.type = media_type
+        self.size = len(data)
+
+    def getvalue(self):
+        return self._data
+
+
+def cargar_archivo_a_dataframe(archivo_subido):
+    if archivo_subido is None:
+        return pd.DataFrame()
+
+    nombre = str(getattr(archivo_subido, 'name', '') or '').lower()
+    contenido = archivo_subido.getvalue()
+    if not contenido:
+        return pd.DataFrame()
+
+    try:
+        if nombre.endswith('.xlsx') or nombre.endswith('.xls'):
+            return pd.read_excel(io.BytesIO(contenido))
+        if nombre.endswith('.csv'):
+            return pd.read_csv(io.BytesIO(contenido))
+        if nombre.endswith('.txt'):
+            return pd.read_csv(io.BytesIO(contenido), sep=None, engine='python')
+    except Exception:
+        return pd.DataFrame()
+
+    return pd.DataFrame()
 
 
 def resumir_proyeccion_individual(var_proy, patron_seleccionado, mse_modelo, mse_patron,
@@ -245,7 +316,8 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
 
 
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
-                                 df_proyeccion=None):
+                                 df_proyeccion=None, df_archivo_sincronizado=None,
+                                 nombre_archivo_sincronizado=''):
     pregunta_limpia = str(pregunta_usuario).strip()
     if not pregunta_limpia:
         raise ValueError(
@@ -331,9 +403,32 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                 f'{muestra_proy.to_csv(index=False)}'
             )
 
+    archivo_sync_info = 'No hay archivo sincronizado activo en la sesion.'
+    if df_archivo_sincronizado is not None and not df_archivo_sincronizado.empty:
+        sync_df = df_archivo_sincronizado.copy()
+        col_finca_sync = 'Finca' if 'Finca' in sync_df.columns else None
+        if finca_contexto is not None and col_finca_sync is not None:
+            sync_filtrado = sync_df[
+                sync_df[col_finca_sync].astype(str) == str(finca_contexto)
+            ].copy()
+            if sync_filtrado.empty:
+                sync_filtrado = sync_df
+        else:
+            sync_filtrado = sync_df
+
+        sample_sync = sync_filtrado.head(150)
+        archivo_sync_info = (
+            f'Archivo sincronizado activo: {nombre_archivo_sincronizado or "sin nombre"}\n'
+            f'Filas disponibles: {len(sync_filtrado)}\n'
+            f'Columnas disponibles: {", ".join([str(c) for c in sync_filtrado.columns])}\n'
+            'Muestra de archivo sincronizado (csv):\n'
+            f'{sample_sync.to_csv(index=False)}'
+        )
+
     prompt = (
         'Eres un analista de datos del negocio floricola. '
-        'Responde SOLO con informacion disponible en la base cargada. '
+        'Responde SOLO con informacion disponible en la base cargada, '
+        'la base de proyeccion y el archivo sincronizado activo de esta sesion. '
         'Si un dato no existe (por ejemplo precio u ocasion), di exactamente: '
         '"No disponible en esta base". No inventes datos ni supuestos. '
         'Responde en espanol, claro y en bullets cuando aplique.\n\n'
@@ -347,6 +442,8 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'{top_variedades_csv}\n'
         'Base de proyeccion del modelo:\n'
         f'{proyeccion_info}\n'
+        'Archivo sincronizado de la sesion:\n'
+        f'{archivo_sync_info}\n'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
@@ -384,6 +481,16 @@ if 'archivo_anthropic_id' not in st.session_state:
     st.session_state['archivo_anthropic_id'] = ''
 if 'estado_subida_anthropic' not in st.session_state:
     st.session_state['estado_subida_anthropic'] = ''
+if 'dashboard_export_bytes' not in st.session_state:
+    st.session_state['dashboard_export_bytes'] = None
+if 'dashboard_export_name' not in st.session_state:
+    st.session_state['dashboard_export_name'] = ''
+if 'dashboard_export_mime' not in st.session_state:
+    st.session_state['dashboard_export_mime'] = ''
+if 'archivo_sesion_df' not in st.session_state:
+    st.session_state['archivo_sesion_df'] = pd.DataFrame()
+if 'archivo_sesion_nombre' not in st.session_state:
+    st.session_state['archivo_sesion_nombre'] = ''
 
 
 @st.fragment
@@ -409,6 +516,12 @@ def render_subida_archivo_anthropic(file_path):
                         'file_id') or ''
                     st.session_state['estado_subida_anthropic'] = (
                         'ok', info_carga.get('file_id'))
+                    st.session_state['archivo_sesion_df'] = leer_excel_subido(
+                        file_path
+                    )
+                    st.session_state['archivo_sesion_nombre'] = getattr(
+                        file_path, 'name', 'archivo_principal.xlsx'
+                    )
                 except Exception as exc:
                     st.session_state['estado_subida_anthropic'] = (
                         'error', str(exc))
@@ -436,9 +549,52 @@ def render_subida_archivo_anthropic(file_path):
                             'file_id') or ''
                         st.session_state['estado_subida_anthropic'] = (
                             'ok', info_carga.get('file_id'))
+                        st.session_state['archivo_sesion_df'] = cargar_archivo_a_dataframe(
+                            archivo_personalizado
+                        )
+                        st.session_state['archivo_sesion_nombre'] = getattr(
+                            archivo_personalizado, 'name', 'archivo_sincronizado'
+                        )
                     except Exception as exc:
                         st.session_state['estado_subida_anthropic'] = (
                             'error', str(exc))
+
+        # Opción 3: sincronizar archivo generado del dashboard/proyeccion
+        st.divider()
+        st.write('**Archivo Generado del Dashboard/Proyección**')
+        dashboard_bytes = st.session_state.get('dashboard_export_bytes')
+        dashboard_name = st.session_state.get(
+            'dashboard_export_name') or 'dashboard_export.xlsx'
+        dashboard_mime = st.session_state.get(
+            'dashboard_export_mime') or 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        if dashboard_bytes:
+            st.caption(f'Disponible para sincronizar: {dashboard_name}')
+            if st.button('Sincronizar archivo generado', key='btn_subir_dashboard_generado'):
+                try:
+                    archivo_dashboard = ArchivoEnMemoria(
+                        dashboard_name,
+                        dashboard_bytes,
+                        dashboard_mime
+                    )
+                    info_carga = subir_archivo_anthropic(archivo_dashboard)
+                    archivo_actual_id = dashboard_name + \
+                        str(len(dashboard_bytes))
+                    st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
+                    st.session_state['archivo_anthropic_id'] = info_carga.get(
+                        'file_id') or ''
+                    st.session_state['estado_subida_anthropic'] = (
+                        'ok', info_carga.get('file_id'))
+                    st.session_state['archivo_sesion_df'] = pd.read_excel(
+                        io.BytesIO(dashboard_bytes)
+                    )
+                    st.session_state['archivo_sesion_nombre'] = dashboard_name
+                except Exception as exc:
+                    st.session_state['estado_subida_anthropic'] = (
+                        'error', str(exc))
+        else:
+            st.caption(
+                'Aún no hay archivo generado del dashboard/proyección para sincronizar.'
+            )
 
         # Mostrar estado
         st.divider()
@@ -792,7 +948,9 @@ def render_preguntas_claude(df_base, selected_finca):
                     df_base,
                     pregunta_negocio,
                     selected_finca,
-                    st.session_state.get('base_proyeccion_anthropic')
+                    st.session_state.get('base_proyeccion_anthropic'),
+                    st.session_state.get('archivo_sesion_df'),
+                    st.session_state.get('archivo_sesion_nombre', '')
                 )
                 st.session_state['respuesta_pregunta_claude'] = respuesta_negocio
                 st.session_state['error_pregunta_claude'] = ''
@@ -812,6 +970,7 @@ def render_preguntas_claude(df_base, selected_finca):
 file_path = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
 if file_path is not None:
     df = leer_excel_subido(file_path)
+    mostrar_analisis_avanzado = False
     archivo_actual_id = (
         getattr(file_path, 'name', '')
         + str(file_path.size if hasattr(file_path, 'size') else '')
@@ -821,6 +980,56 @@ if file_path is not None:
         st.session_state['dashboard_archivo_id'] = archivo_actual_id
         st.session_state['dashboard_finca_activo'] = False
         st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
+        st.session_state['dashboard_export_bytes'] = None
+        st.session_state['dashboard_export_name'] = ''
+        st.session_state['dashboard_export_mime'] = ''
+        st.session_state['archivo_sesion_df'] = pd.DataFrame()
+        st.session_state['archivo_sesion_nombre'] = ''
+
+    if 'Finca' not in df.columns:
+        st.warning(
+            'La columna requerida "Finca" no existe en este archivo. '
+            'Puedes usar sincronizacion y consultas con Anthropic, '
+            'pero no proyeccion/dashboard con este esquema.'
+        )
+        st.caption('Columnas detectadas: ' + ', '.join(df.columns.tolist()))
+        st.divider()
+        st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                    unsafe_allow_html=True)
+        render_subida_archivo_anthropic(file_path)
+        render_preguntas_claude(df, None)
+        st.stop()
+
+    # Compatibilidad: algunas bases traen la variedad con otro encabezado.
+    if 'Bloque&Varid' not in df.columns:
+        col_alt_var = next(
+            (
+                col for col in ['Bloque&Variedad', 'BloqueVarid', 'Variedad']
+                if col in df.columns
+            ),
+            None
+        )
+        if col_alt_var is not None:
+            df['Bloque&Varid'] = df[col_alt_var].astype(str)
+        elif {'Bloque', 'Variedad'}.issubset(df.columns):
+            df['Bloque&Varid'] = (
+                df['Bloque'].astype(str).str.strip()
+                + ' '
+                + df['Variedad'].astype(str).str.strip()
+            )
+        else:
+            st.error(
+                'No se encontro la columna Bloque&Varid (ni equivalentes) '
+                'requerida para proyectar.'
+            )
+            st.caption('Columnas detectadas: ' +
+                       ', '.join(df.columns.tolist()))
+            st.divider()
+            st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                        unsafe_allow_html=True)
+            render_subida_archivo_anthropic(file_path)
+            render_preguntas_claude(df, None)
+            st.stop()
 
     # st.write(df.head())
 # 1.- SELECCIONAR Y IMPORTAR PATRONES EN BASE A INFORMACION
@@ -837,6 +1046,12 @@ if file_path is not None:
 
     if st.session_state.get('dashboard_finca_activo') and not run_masiva:
         render_dashboard_base(df)
+        mostrar_analisis_avanzado = True
+        st.divider()
+        st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                    unsafe_allow_html=True)
+        render_subida_archivo_anthropic(file_path)
+        render_preguntas_claude(df, selected_finca)
 
     df_finca = df[df["Finca"].astype(str) == selected_finca].copy()
 
@@ -1242,7 +1457,19 @@ if file_path is not None:
             key='descargar_masivo'
         )
 
+        st.session_state['dashboard_export_bytes'] = buffer_masivo.getvalue()
+        st.session_state['dashboard_export_name'] = 'Proyecto_todas_variedades.xlsx'
+        st.session_state['dashboard_export_mime'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        st.session_state['archivo_sesion_df'] = df_export_estimado.copy()
+        st.session_state['archivo_sesion_nombre'] = 'Proyecto_todas_variedades.xlsx'
+
         render_dashboard_base(df)
+
+        st.divider()
+        st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                    unsafe_allow_html=True)
+        render_subida_archivo_anthropic(file_path)
+        render_preguntas_claude(df, selected_finca)
 
         st.stop()
 
@@ -1657,17 +1884,21 @@ if file_path is not None:
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         key='descargar_individual'
     )
+    st.session_state['dashboard_export_bytes'] = buffer_individual.getvalue()
+    st.session_state['dashboard_export_name'] = 'Proyecto.xlsx'
+    st.session_state['dashboard_export_mime'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     y_pred_tail = y_pred.tail(4).round(0).copy()
     etiquetas_tail = etiquetas_anio_semana.iloc[:len(
         y_pred)].tail(len(y_pred_tail)).values
     y_pred_tail.index = etiquetas_tail
     st.write(y_pred_tail)
 
-    st.divider()
-    st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
-                unsafe_allow_html=True)
-    render_subida_archivo_anthropic(file_path)
-    render_preguntas_claude(df, selected_finca)
+    if not mostrar_analisis_avanzado:
+        st.divider()
+        st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
+                    unsafe_allow_html=True)
+        render_subida_archivo_anthropic(file_path)
+        render_preguntas_claude(df, selected_finca)
 
 else:
     st.info("Por favor, sube el archivo Excel.")
