@@ -23,32 +23,59 @@ try:
 except ImportError:
     anthropic = None
 
+try:
+    openai = importlib.import_module('openai')
+except ImportError:
+    openai = None
+
 dotenv_path = Path(__file__).with_name('.env')
 load_dotenv(dotenv_path=dotenv_path if dotenv_path.exists() else None)
 
 anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+github_model = os.getenv("GITHUB_MODEL", openai_model)
 
 
-def obtener_api_key_anthropic():
-    key = (
-        os.getenv("ANTHROPIC_API_KEY")
-        or os.getenv("ANTHROPIC_KEY")
-        or ""
-    ).strip()
-    if key:
-        return key
+def obtener_valor_env(*claves):
+    for clave in claves:
+        valor = (os.getenv(clave) or "").strip()
+        if valor:
+            return valor
 
     for ruta_env in [Path(__file__).with_name('.env'), Path.cwd() / '.env']:
         if not ruta_env.exists():
             continue
         valores = dotenv_values(ruta_env)
-        key = (
-            (valores.get('ANTHROPIC_API_KEY') or "")
-            or (valores.get('ANTHROPIC_KEY') or "")
-        ).strip()
-        if key:
-            return key
+        for clave in claves:
+            valor = (valores.get(clave) or "").strip()
+            if valor:
+                return valor
     return ""
+
+
+def obtener_llm_provider():
+    proveedor = (os.getenv("LLM_PROVIDER")
+                 or llm_provider or "anthropic").strip().lower()
+    alias = {
+        'copilot': 'github',
+        'github_models': 'github',
+        'gh': 'github',
+        'openai_compatible': 'openai'
+    }
+    return alias.get(proveedor, proveedor)
+
+
+def obtener_api_key_anthropic():
+    return obtener_valor_env("ANTHROPIC_API_KEY", "ANTHROPIC_KEY")
+
+
+def obtener_api_key_openai():
+    return obtener_valor_env("OPENAI_API_KEY")
+
+
+def obtener_api_key_github():
+    return obtener_valor_env("GITHUB_MODELS_TOKEN", "GITHUB_TOKEN")
 
 
 def modelos_anthropic_candidatos():
@@ -79,7 +106,172 @@ def crear_cliente_anthropic():
     return anthropic.Anthropic(api_key=api_key)
 
 
+def modelos_openai_candidatos(proveedor):
+    candidatos = []
+    if proveedor == 'github':
+        for modelo in [
+            os.getenv("GITHUB_MODEL", ""),
+            github_model,
+            os.getenv("OPENAI_MODEL", ""),
+            'gpt-4.1-mini',
+            'gpt-4o-mini'
+        ]:
+            if modelo and modelo not in candidatos:
+                candidatos.append(modelo)
+    else:
+        for modelo in [
+            os.getenv("OPENAI_MODEL", ""),
+            openai_model,
+            'gpt-4.1-mini',
+            'gpt-4o-mini'
+        ]:
+            if modelo and modelo not in candidatos:
+                candidatos.append(modelo)
+    return candidatos
+
+
+def crear_cliente_openai_compatible(proveedor):
+    if openai is None:
+        raise RuntimeError(
+            'La libreria openai no esta instalada en el entorno actual.'
+        )
+    if not hasattr(openai, 'OpenAI'):
+        raise RuntimeError(
+            'La version de openai instalada no soporta cliente OpenAI. '
+            'Actualiza el paquete openai.'
+        )
+
+    if proveedor == 'github':
+        api_key = obtener_api_key_github()
+        if not api_key:
+            raise RuntimeError(
+                'No se encontro GITHUB_MODELS_TOKEN (o GITHUB_TOKEN).'
+            )
+        base_url = (
+            os.getenv("GITHUB_MODELS_BASE_URL")
+            or "https://models.inference.ai.azure.com"
+        ).strip()
+        return openai.OpenAI(api_key=api_key, base_url=base_url)
+
+    api_key = obtener_api_key_openai()
+    if not api_key:
+        raise RuntimeError(
+            'No se encontro OPENAI_API_KEY en las variables de entorno.'
+        )
+    base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    if base_url:
+        return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return openai.OpenAI(api_key=api_key)
+
+
+def normalizar_error_github_models(exc):
+    texto_error = str(exc)
+    texto_error_lower = texto_error.lower()
+    if (
+        'models permission is required' in texto_error_lower
+        or ('unauthorized' in texto_error_lower and 'models' in texto_error_lower)
+    ):
+        return RuntimeError(
+            'El token de GitHub no tiene permiso models. '
+            'Los permisos de repositorio como read access to administration '
+            'and metadata no habilitan GitHub Models. '
+            'Actualiza el token con permiso Models y vuelve a intentarlo.'
+        )
+    return exc
+
+
+def consultar_openai_compatible(prompt_usuario, proveedor):
+    cliente = crear_cliente_openai_compatible(proveedor)
+    modelos_candidatos = modelos_openai_candidatos(proveedor)
+
+    ultimo_error = None
+    for modelo in modelos_candidatos:
+        try:
+            respuesta = cliente.chat.completions.create(
+                model=modelo,
+                max_tokens=512,
+                messages=[
+                    {
+                        'role': 'user',
+                        'content': prompt_usuario
+                    }
+                ]
+            )
+            contenido = ''
+            if respuesta and getattr(respuesta, 'choices', None):
+                mensaje = getattr(respuesta.choices[0], 'message', None)
+                contenido = (getattr(mensaje, 'content', None) or '').strip()
+            if contenido:
+                return contenido
+            raise RuntimeError('La respuesta del modelo llego vacia.')
+        except Exception as exc:
+            if proveedor == 'github':
+                exc = normalizar_error_github_models(exc)
+            ultimo_error = exc
+            texto_error = str(exc).lower()
+            es_error_modelo = any(
+                frag in texto_error for frag in [
+                    'model_not_found',
+                    'model not found',
+                    'invalid model',
+                    'unknown model',
+                    'not available for your account'
+                ]
+            )
+            if es_error_modelo:
+                continue
+            raise
+
+    raise RuntimeError(
+        'No fue posible usar ningun modelo OpenAI-compatible configurado. '
+        f'Ultimo error: {ultimo_error}'
+    )
+
+
+def consultar_llm(prompt_usuario):
+    proveedor = obtener_llm_provider()
+    if proveedor == 'anthropic':
+        return consultar_anthropic(prompt_usuario)
+    if proveedor in ['github', 'openai']:
+        return consultar_openai_compatible(prompt_usuario, proveedor)
+    raise RuntimeError(
+        'LLM_PROVIDER no soportado. Usa anthropic, github u openai.'
+    )
+
+
+def estado_configuracion_llm():
+    proveedor = obtener_llm_provider()
+    if proveedor == 'anthropic':
+        if anthropic is None:
+            return False, 'LLM=anthropic, falta instalar libreria anthropic.'
+        if not obtener_api_key_anthropic():
+            return False, 'LLM=anthropic, falta ANTHROPIC_API_KEY.'
+        return True, f'LLM=anthropic ({modelos_anthropic_candidatos()[0]})'
+
+    if proveedor == 'github':
+        if openai is None or not hasattr(openai, 'OpenAI'):
+            return False, 'LLM=github, falta instalar/actualizar libreria openai.'
+        if not obtener_api_key_github():
+            return False, 'LLM=github, falta GITHUB_MODELS_TOKEN o GITHUB_TOKEN.'
+        modelo = modelos_openai_candidatos('github')[0]
+        return True, f'LLM=github ({modelo})'
+
+    if proveedor == 'openai':
+        if openai is None or not hasattr(openai, 'OpenAI'):
+            return False, 'LLM=openai, falta instalar/actualizar libreria openai.'
+        if not obtener_api_key_openai():
+            return False, 'LLM=openai, falta OPENAI_API_KEY.'
+        modelo = modelos_openai_candidatos('openai')[0]
+        return True, f'LLM=openai ({modelo})'
+
+    return False, 'LLM_PROVIDER no soportado. Usa anthropic, github u openai.'
+
+
 def consultar_anthropic(prompt_usuario):
+    proveedor = obtener_llm_provider()
+    if proveedor in ['github', 'openai']:
+        return consultar_openai_compatible(prompt_usuario, proveedor)
+
     cliente = crear_cliente_anthropic()
     modelos_candidatos = modelos_anthropic_candidatos()
 
@@ -138,6 +330,11 @@ def es_perfil_analista():
 
 
 def subir_archivo_anthropic(archivo_subido):
+    if obtener_llm_provider() != 'anthropic':
+        raise RuntimeError(
+            'La carga de archivos solo esta disponible con LLM_PROVIDER=anthropic.'
+        )
+
     if archivo_subido is None:
         raise ValueError('Selecciona un archivo antes de cargar a claude')
 
@@ -227,6 +424,54 @@ def subir_archivo_anthropic(archivo_subido):
     )
 
 
+def sincronizar_archivo_llm(archivo_subido, dataframe=None, nombre_archivo=None):
+    if archivo_subido is None and dataframe is None:
+        raise ValueError('Selecciona un archivo antes de sincronizar.')
+
+    proveedor = obtener_llm_provider()
+    nombre = nombre_archivo or getattr(
+        archivo_subido, 'name', None) or 'archivo'
+
+    if proveedor == 'anthropic':
+        info_carga = subir_archivo_anthropic(archivo_subido)
+        info_carga['modo'] = 'remoto'
+        return info_carga
+
+    if dataframe is None:
+        dataframe = cargar_archivo_a_dataframe(archivo_subido)
+    if dataframe is None or dataframe.empty:
+        raise RuntimeError(
+            'Con GitHub Models/OpenAI el archivo debe poder leerse como tabla '
+            'para usarlo como contexto local en la sesion.'
+        )
+
+    return {
+        'file_id': 'local-session',
+        'nombre': nombre,
+        'bytes': int(len(dataframe.index)),
+        'metodo': 'session-dataframe',
+        'modo': 'local',
+        'filas': int(len(dataframe.index))
+    }
+
+
+def registrar_sincronizacion_en_sesion(info_carga, df_sync, nombre_sync, id_base=''):
+    st.session_state['archivo_anthropic_cargado'] = id_base or nombre_sync
+    st.session_state['archivo_anthropic_id'] = info_carga.get('file_id') or ''
+    if info_carga.get('modo') == 'remoto':
+        st.session_state['estado_subida_anthropic'] = (
+            'ok', f"Anthropic ID: {info_carga.get('file_id')}"
+        )
+    else:
+        st.session_state['estado_subida_anthropic'] = (
+            'ok',
+            f"Contexto local listo: {info_carga.get('nombre')} ({info_carga.get('filas', 0)} filas)"
+        )
+    if df_sync is not None and not df_sync.empty:
+        st.session_state['archivo_sesion_df'] = df_sync
+        st.session_state['archivo_sesion_nombre'] = nombre_sync
+
+
 class ArchivoEnMemoria:
     def __init__(self, name, data, media_type='application/octet-stream'):
         self.name = name
@@ -236,6 +481,33 @@ class ArchivoEnMemoria:
 
     def getvalue(self):
         return self._data
+
+
+def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export):
+    if not bytes_export:
+        return
+    try:
+        df_export = pd.read_excel(io.BytesIO(bytes_export))
+        archivo_export = ArchivoEnMemoria(
+            nombre_export,
+            bytes_export,
+            mime_export
+        )
+        info_carga = sincronizar_archivo_llm(
+            archivo_export,
+            dataframe=df_export,
+            nombre_archivo=nombre_export
+        )
+        registrar_sincronizacion_en_sesion(
+            info_carga,
+            df_export,
+            nombre_export,
+            nombre_export + str(len(bytes_export))
+        )
+    except Exception as exc:
+        st.session_state['estado_subida_anthropic'] = (
+            'error', f'Sincronizacion automatica fallida: {exc}'
+        )
 
 
 def cargar_archivo_a_dataframe(archivo_subido):
@@ -278,7 +550,7 @@ def resumir_proyeccion_individual(var_proy, patron_seleccionado, mse_modelo, mse
         'Ultimas semanas (tabla):\n'
         f'{vista.to_csv(index=False)}'
     )
-    return consultar_anthropic(prompt)
+    return consultar_llm(prompt)
 
 
 def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estimado):
@@ -312,7 +584,7 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
         'Errores reportados:\n'
         f'{top_error.to_csv(index=False) if not top_error.empty else "Sin errores"}'
     )
-    return consultar_anthropic(prompt)
+    return consultar_llm(prompt)
 
 
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
@@ -447,7 +719,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
-    return consultar_anthropic(prompt)
+    return consultar_llm(prompt)
 
 
 models_dir = Path(__file__).with_name("modelos")
@@ -464,6 +736,12 @@ if readme_path.exists():
             st.markdown(readme_path.read_text(encoding="utf-8"))
         except Exception:
             st.code(readme_path.read_text(errors="ignore"))
+
+llm_ok, llm_estado = estado_configuracion_llm()
+if llm_ok:
+    st.caption(f'Conexion IA activa: {llm_estado}')
+else:
+    st.warning(f'Conexion IA pendiente: {llm_estado}')
 
 if 'base_proyeccion_anthropic' not in st.session_state:
     st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
@@ -495,106 +773,64 @@ if 'archivo_sesion_nombre' not in st.session_state:
 
 @st.fragment
 def render_subida_archivo_anthropic(file_path):
-    with st.expander('Subir archivo a Anthropic'):
-        st.caption(
-            'Sincroniza archivos con Anthropic para usarlos en análisis avanzados.'
+    proveedor = obtener_llm_provider()
+    _ = file_path
+    titulo = (
+        'Sincronizar archivo con Anthropic'
+        if proveedor == 'anthropic'
+        else 'Sincronizar archivo con GitHub Models/OpenAI'
+    )
+    mensaje = (
+        'Puedes sincronizar cualquier archivo local o de red para analisis.'
+        if proveedor == 'anthropic'
+        else 'Puedes sincronizar cualquier archivo local o de red como contexto '
+             'para preguntas y resumenes con GitHub Models/OpenAI.'
+    )
+
+    with st.expander(titulo):
+        st.caption(mensaje)
+
+        st.write('**Seleccionar archivo a sincronizar**')
+        archivo_personalizado = st.file_uploader(
+            'Selecciona cualquier archivo',
+            key='archivo_personalizado_anthropic'
         )
-
-        # Opción 1: Usar el Excel principal
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write('**Excel Principal**')
-            if st.button('Sincronizar Excel principal', key='btn_subir_excel_principal'):
+        if archivo_personalizado is not None:
+            st.caption(f'Archivo seleccionado: {archivo_personalizado.name}')
+            if st.button('Sincronizar archivo seleccionado', key='btn_subir_personalizado'):
                 try:
-                    info_carga = subir_archivo_anthropic(file_path)
+                    df_personalizado = cargar_archivo_a_dataframe(
+                        archivo_personalizado
+                    )
+                    info_carga = sincronizar_archivo_llm(
+                        archivo_personalizado,
+                        dataframe=df_personalizado,
+                        nombre_archivo=getattr(
+                            archivo_personalizado,
+                            'name',
+                            'archivo_sincronizado'
+                        )
+                    )
                     archivo_actual_id = (
-                        getattr(file_path, 'name', '')
-                        + str(file_path.size if hasattr(file_path, 'size') else '')
+                        getattr(archivo_personalizado, 'name', '')
+                        + str(archivo_personalizado.size if hasattr(archivo_personalizado, 'size') else '')
                     )
-                    st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
-                    st.session_state['archivo_anthropic_id'] = info_carga.get(
-                        'file_id') or ''
-                    st.session_state['estado_subida_anthropic'] = (
-                        'ok', info_carga.get('file_id'))
-                    st.session_state['archivo_sesion_df'] = leer_excel_subido(
-                        file_path
-                    )
-                    st.session_state['archivo_sesion_nombre'] = getattr(
-                        file_path, 'name', 'archivo_principal.xlsx'
+                    registrar_sincronizacion_en_sesion(
+                        info_carga,
+                        df_personalizado,
+                        getattr(archivo_personalizado, 'name',
+                                'archivo_sincronizado'),
+                        archivo_actual_id
                     )
                 except Exception as exc:
                     st.session_state['estado_subida_anthropic'] = (
                         'error', str(exc))
 
-        # Opción 2: Cargar cualquier archivo
-        with col2:
-            st.write('**Cargar Archivo Personalizado**')
-            archivo_personalizado = st.file_uploader(
-                'Selecciona cualquier archivo',
-                key='archivo_personalizado_anthropic'
-            )
-            if archivo_personalizado is not None:
-                st.info(
-                    f'📁 Archivo seleccionado: {archivo_personalizado.name}')
-                if st.button('Sincronizar archivo seleccionado', key='btn_subir_personalizado'):
-                    try:
-                        info_carga = subir_archivo_anthropic(
-                            archivo_personalizado)
-                        archivo_actual_id = (
-                            getattr(archivo_personalizado, 'name', '')
-                            + str(archivo_personalizado.size if hasattr(archivo_personalizado, 'size') else '')
-                        )
-                        st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
-                        st.session_state['archivo_anthropic_id'] = info_carga.get(
-                            'file_id') or ''
-                        st.session_state['estado_subida_anthropic'] = (
-                            'ok', info_carga.get('file_id'))
-                        st.session_state['archivo_sesion_df'] = cargar_archivo_a_dataframe(
-                            archivo_personalizado
-                        )
-                        st.session_state['archivo_sesion_nombre'] = getattr(
-                            archivo_personalizado, 'name', 'archivo_sincronizado'
-                        )
-                    except Exception as exc:
-                        st.session_state['estado_subida_anthropic'] = (
-                            'error', str(exc))
-
-        # Opción 3: sincronizar archivo generado del dashboard/proyeccion
         st.divider()
-        st.write('**Archivo Generado del Dashboard/Proyección**')
-        dashboard_bytes = st.session_state.get('dashboard_export_bytes')
-        dashboard_name = st.session_state.get(
-            'dashboard_export_name') or 'dashboard_export.xlsx'
-        dashboard_mime = st.session_state.get(
-            'dashboard_export_mime') or 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        if dashboard_bytes:
-            st.caption(f'Disponible para sincronizar: {dashboard_name}')
-            if st.button('Sincronizar archivo generado', key='btn_subir_dashboard_generado'):
-                try:
-                    archivo_dashboard = ArchivoEnMemoria(
-                        dashboard_name,
-                        dashboard_bytes,
-                        dashboard_mime
-                    )
-                    info_carga = subir_archivo_anthropic(archivo_dashboard)
-                    archivo_actual_id = dashboard_name + \
-                        str(len(dashboard_bytes))
-                    st.session_state['archivo_anthropic_cargado'] = archivo_actual_id
-                    st.session_state['archivo_anthropic_id'] = info_carga.get(
-                        'file_id') or ''
-                    st.session_state['estado_subida_anthropic'] = (
-                        'ok', info_carga.get('file_id'))
-                    st.session_state['archivo_sesion_df'] = pd.read_excel(
-                        io.BytesIO(dashboard_bytes)
-                    )
-                    st.session_state['archivo_sesion_nombre'] = dashboard_name
-                except Exception as exc:
-                    st.session_state['estado_subida_anthropic'] = (
-                        'error', str(exc))
-        else:
-            st.caption(
-                'Aún no hay archivo generado del dashboard/proyección para sincronizar.'
-            )
+        st.caption(
+            'La proyeccion individual y la proyeccion masiva se sincronizan '
+            'automaticamente cuando se generan desde el modelo.'
+        )
 
         # Mostrar estado
         st.divider()
@@ -602,8 +838,7 @@ def render_subida_archivo_anthropic(file_path):
         if isinstance(estado_subida, tuple) and len(estado_subida) == 2:
             tipo, detalle = estado_subida
             if tipo == 'ok':
-                st.success(
-                    f'✓ Sincronizado con Anthropic (ID: {str(detalle)[:8]}...)')
+                st.success(f'✓ {detalle}')
             elif tipo == 'error':
                 st.error(f'✗ Error: {detalle}')
 
@@ -926,7 +1161,7 @@ def render_dashboard_base(df_base):
 
 @st.fragment
 def render_preguntas_claude(df_base, selected_finca):
-    with st.expander('Preguntas a Claude'):
+    with st.expander('Preguntas a la IA (Anthropic/GitHub Models/OpenAI)', expanded=True):
         st.caption(
             'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
@@ -940,7 +1175,7 @@ def render_preguntas_claude(df_base, selected_finca):
                 'Escribe tu pregunta',
                 key='pregunta_negocio_anthropic'
             )
-            enviar_pregunta = st.form_submit_button('Preguntale a Claude')
+            enviar_pregunta = st.form_submit_button('Preguntale a la IA')
 
         if enviar_pregunta:
             try:
@@ -989,7 +1224,7 @@ if file_path is not None:
     if 'Finca' not in df.columns:
         st.warning(
             'La columna requerida "Finca" no existe en este archivo. '
-            'Puedes usar sincronizacion y consultas con Anthropic, '
+            'Puedes usar sincronizacion y consultas con la IA, '
             'pero no proyeccion/dashboard con este esquema.'
         )
         st.caption('Columnas detectadas: ' + ', '.join(df.columns.tolist()))
@@ -1460,8 +1695,11 @@ if file_path is not None:
         st.session_state['dashboard_export_bytes'] = buffer_masivo.getvalue()
         st.session_state['dashboard_export_name'] = 'Proyecto_todas_variedades.xlsx'
         st.session_state['dashboard_export_mime'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        st.session_state['archivo_sesion_df'] = df_export_estimado.copy()
-        st.session_state['archivo_sesion_nombre'] = 'Proyecto_todas_variedades.xlsx'
+        sincronizar_export_generado_automatico(
+            st.session_state['dashboard_export_bytes'],
+            st.session_state['dashboard_export_name'],
+            st.session_state['dashboard_export_mime']
+        )
 
         render_dashboard_base(df)
 
@@ -1887,6 +2125,11 @@ if file_path is not None:
     st.session_state['dashboard_export_bytes'] = buffer_individual.getvalue()
     st.session_state['dashboard_export_name'] = 'Proyecto.xlsx'
     st.session_state['dashboard_export_mime'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    sincronizar_export_generado_automatico(
+        st.session_state['dashboard_export_bytes'],
+        st.session_state['dashboard_export_name'],
+        st.session_state['dashboard_export_mime']
+    )
     y_pred_tail = y_pred.tail(4).round(0).copy()
     etiquetas_tail = etiquetas_anio_semana.iloc[:len(
         y_pred)].tail(len(y_pred_tail)).values

@@ -10,5 +10,6 @@ python-multipart
 altair<5
 requests
 anthropic>=0.54.0
+openai>=1.30.0
 python-dotenv
 
