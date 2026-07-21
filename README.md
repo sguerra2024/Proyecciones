@@ -62,29 +62,53 @@ Recomendaciones de calidad de datos:
 
 ### 3.1 Seleccion de Patron
 
-- Se calcula distancia por similitud de `Tallos/m2`.
+- Se calcula una similitud entre la variedad objetivo y los otros patrones disponibles usando `Tallos/m2`.
 - Nunca se permite usar como patron la misma `Bloque&Varid` proyectada.
-- Se prioriza patron de la misma familia de nombre cuando existe (normalizando prefijos numericos).
+- Se prioriza un patron de la misma familia de nombre cuando existe (normalizando prefijos numericos).
+- El flujo usa un solo patron seleccionado por variedad para construir las variables del modelo.
 
 ### 3.2 Variables de Entrenamiento
 
-El entrenamiento usa dos variables:
+El modelo de regresion recibe las siguientes variables de entrada:
 
 - `Tallos/m2`
 - `Tallos_m2_patron_ponderado`
+- `Incremento_tallos_patron`
+- `Incremento_produccion_patron`
+- `Produccion_lag12`
+- `Cambio_produccion_vs_lag12`
+- `Semana_ciclo_12`
+- `Produccion_patron`
 
-### 3.3 Ventana de Entrenamiento
+La variable objetivo es:
 
-Se entrena desde:
+- `Produccion`
 
-- `Anio > 2025`, o
-- `Anio == 2025` y `Semana >= 1`.
+### 3.3 Modelo Utilizado
 
-### 3.4 Ajustes Aplicados
+Se entrena un `RandomForestRegressor` con estos parametros:
 
-- Mezcla del estimado del modelo con proyeccion del patron (`patron_prediction_weight`).
-- Reglas de control de picos (`peak_decay_train`, `peak_decay_pred`).
-- Escalado final para alinear media con produccion real observada.
+- `n_estimators = 100`
+- `random_state = 42`
+- `max_depth = 12`
+- `min_samples_leaf = 2`
+
+### 3.4 Ventana de Entrenamiento
+
+El entrenamiento se realiza usando datos a partir de:
+
+- `Anio >= 2025`
+
+Se construye un dataset con historial semanal de la variedad y caracteristicas del patron seleccionado.
+
+### 3.5 Ajustes Aplicados
+
+- Se construye un dataset con variables de nivel, cambios y ciclo semanal.
+- Se incorpora `Produccion_lag12` para reflejar el ciclo natural de 12 semanas de las rosas.
+- Se añade `Cambio_produccion_vs_lag12` para capturar picos y descensos respecto al ciclo anterior.
+- Se incluye `Semana_ciclo_12` para representar la posicion dentro del ciclo de 12 semanas.
+- Se mezcla la prediccion del modelo con la proyeccion del patron mediante `patron_prediction_weight`.
+- Se ajusta la media final de la prediccion para alinearla con la produccion real observada.
 
 ## 4. Exportaciones
 
@@ -137,7 +161,33 @@ Endpoints principales:
 - `POST /api/v1/predict`
 - `POST /predict`
 
-## 6. Dependencias
+## 6. Conexiones API con IA
+
+El proyecto mantiene conectividad con proveedores de IA para soporte de análisis y carga de archivos. La lógica está implementada en el archivo `ProyAst.py` y soporta los siguientes proveedores:
+
+- `anthropic`
+- `openai`
+- `github` (GitHub Models)
+
+### 6.1 Variables de entorno
+
+Se requieren las siguientes variables de entorno para habilitar las conexiones:
+
+- `LLM_PROVIDER`: proveedor activo (`anthropic`, `openai` o `github`)
+- `ANTHROPIC_API_KEY` o `ANTHROPIC_KEY`: clave para Anthropic
+- `OPENAI_API_KEY`: clave para OpenAI
+- `GITHUB_MODELS_TOKEN` o `GITHUB_TOKEN`: token para GitHub Models
+- `GITHUB_MODELS_BASE_URL`: URL base opcional para GitHub Models
+- `OPENAI_BASE_URL`: URL base opcional para OpenAI compatible
+- `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GITHUB_MODEL`: modelos preferidos por proveedor
+
+### 6.2 Funcionalidad soportada
+
+- Consultas generales a modelos de lenguaje para análisis de contexto.
+- Carga de archivos a Anthropic para procesamiento asistido.
+- Selección automática de modelos alternativos si el principal no está disponible.
+
+### 6.3 Dependencias
 
 Instalar desde:
 

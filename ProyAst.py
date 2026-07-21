@@ -532,7 +532,7 @@ def cargar_archivo_a_dataframe(archivo_subido):
     return pd.DataFrame()
 
 
-def resumir_proyeccion_individual(var_proy, patron_seleccionado, mse_modelo, mse_patron,
+def resumir_proyeccion_individual(var_proy, patron_seleccionado,
                                   factor_correccion, df_export):
     vista = df_export[[
         'Anio_Semana', 'Produccion_real', 'Proy_patron', 'Estimado_modelo',
@@ -571,13 +571,13 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
     prompt = (
         'Analiza esta corrida masiva agricola y responde en espanol SOLO con el '
         'desempeno general. Entrega un unico parrafo corto (maximo 3 lineas), '
-        'sin bullets, sin recomendaciones y sin listar variedades especificas.\n\n'
+        # 'sin bullets, sin recomendaciones y sin listar variedades especificas.\n\n'
         f'Finca: {selected_finca}\n'
         f'Total variedades evaluadas: {total_variedades}\n'
         f'Variedades proyectadas: {len(resumen)}\n'
         f'Variedades con error: {len(errores)}\n'
-        f'MSE promedio modelo: {promedio_modelo}\n'
-        f'MSE promedio patron: {promedio_patron}\n'
+        # f'MSE promedio modelo: {promedio_modelo}\n'
+        # f'MSE promedio patron: {promedio_patron}\n'
         f'Promedio estimado exportado: {float(df_export_estimado["Estimado_modelo"].mean()):.2f}\n'
         'Mejores casos por MSE:\n'
         f'{top_ok.to_csv(index=False) if not top_ok.empty else "Sin datos"}\n'
@@ -1083,11 +1083,12 @@ def render_dashboard_base(df_base):
                 total_real = float(comparativo_filtrado['Produccion'].sum())
                 total_modelo = float(
                     comparativo_filtrado['Estimado_modelo'].sum())
-                brecha = total_modelo - total_real
+                brecha = (total_modelo - total_real) / \
+                    total_real if total_real != 0 else 0
                 m1, m2, m3 = st.columns(3)
                 m1.metric('Total Produccion', f"{total_real:,.0f}")
                 m2.metric('Total Modelo', f"{total_modelo:,.0f}")
-                m3.metric('Brecha Modelo-Real', f"{brecha:,.0f}")
+                m3.metric('Brecha Modelo-Real', f"{brecha:.2%}")
 
                 def render_totales_horizontal(df_src, columna_dim, titulo, top_n=15):
                     if columna_dim is None:
@@ -1165,12 +1166,8 @@ def render_preguntas_claude(df_base, selected_finca):
         st.caption(
             'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
-        st.write(
-            'Ejemplos: "Que fincas ofrecen la variedad LIGHT HOUSE?", '
-            '"Hay columna de precios para esta variedad?", '
-            '"En que ocasiones se uso FREEDOM?"'
-        )
-        with st.form('form_pregunta_anthropic', clear_on_submit=True):
+        st.write()
+        with st.form('form_pregunta_IA', clear_on_submit=True):
             pregunta_negocio = st.text_area(
                 'Escribe tu pregunta',
                 key='pregunta_negocio_anthropic'
@@ -1239,7 +1236,7 @@ if file_path is not None:
     if 'Bloque&Varid' not in df.columns:
         col_alt_var = next(
             (
-                col for col in ['Bloque&Variedad', 'BloqueVarid', 'Variedad']
+                col for col in ['Bloque&Variedad', 'BloqueVarid']
                 if col in df.columns
             ),
             None
@@ -1346,6 +1343,102 @@ if file_path is not None:
         arr_list.sort(key=lambda x: x[1])
         return seleccionar_patron(arr_list, var_proy)
 
+    def construir_patron_semanal(df_patron_base):
+        patron_weekly = df_patron_base[[
+            'Anio', 'Semana', 'Tallos/m2', 'Produccion'
+        ]].dropna(subset=['Anio', 'Semana']).copy()
+        patron_weekly['Anio'] = pd.to_numeric(
+            patron_weekly['Anio'], errors='coerce')
+        patron_weekly['Semana'] = pd.to_numeric(
+            patron_weekly['Semana'], errors='coerce')
+        patron_weekly['Tallos/m2'] = pd.to_numeric(
+            patron_weekly['Tallos/m2'], errors='coerce')
+        patron_weekly['Produccion'] = pd.to_numeric(
+            patron_weekly['Produccion'], errors='coerce')
+        patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
+        patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
+        patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
+        patron_weekly = (
+            patron_weekly
+            .groupby(['Anio', 'Semana'], as_index=False)
+            .agg({
+                'Tallos/m2': 'mean',
+                'Produccion': 'sum'
+            })
+            .rename(columns={
+                'Tallos/m2': 'Tallos_m2_patron',
+                'Produccion': 'Produccion_patron'
+            })
+            .sort_values(['Anio', 'Semana'])
+            .reset_index(drop=True)
+        )
+        patron_weekly['Incremento_tallos_patron'] = (
+            patron_weekly['Tallos_m2_patron'].diff().fillna(0.0)
+        )
+        patron_weekly['Incremento_produccion_patron'] = (
+            patron_weekly['Produccion_patron'].diff().fillna(0.0)
+        )
+        return patron_weekly
+
+    def preparar_dataset_modelo(df_variedad_base, patron_weekly, patron_feature_weight):
+        trabajo = (
+            df_variedad_base[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+            .dropna()
+            .reset_index(drop=True)
+        )
+        trabajo['Anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
+        trabajo['Semana'] = pd.to_numeric(trabajo['Semana'], errors='coerce')
+        trabajo['Tallos/m2'] = pd.to_numeric(
+            trabajo['Tallos/m2'], errors='coerce')
+        trabajo['Produccion'] = pd.to_numeric(
+            trabajo['Produccion'], errors='coerce')
+        trabajo = trabajo.dropna(
+            subset=['Anio', 'Semana', 'Tallos/m2', 'Produccion'])
+        trabajo['Anio'] = trabajo['Anio'].astype(int)
+        trabajo['Semana'] = trabajo['Semana'].astype(int)
+        trabajo = trabajo.sort_values(
+            ['Anio', 'Semana']).reset_index(drop=True)
+        trabajo = trabajo.merge(
+            patron_weekly,
+            on=['Anio', 'Semana'],
+            how='left'
+        )
+        trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
+            trabajo['Tallos/m2']
+        )
+        trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
+            trabajo['Produccion']
+        )
+        trabajo['Incremento_tallos_patron'] = trabajo[
+            'Incremento_tallos_patron'
+        ].fillna(0.0)
+        trabajo['Incremento_produccion_patron'] = trabajo[
+            'Incremento_produccion_patron'
+        ].fillna(0.0)
+        trabajo['Tallos_m2_patron_ponderado'] = (
+            trabajo['Tallos_m2_patron'] * patron_feature_weight
+        )
+        trabajo['Produccion_lag12'] = trabajo['Produccion'].shift(12)
+        trabajo['Produccion_lag12'] = trabajo['Produccion_lag12'].fillna(
+            trabajo['Produccion'].median()
+        )
+        trabajo['Cambio_produccion_vs_lag12'] = (
+            trabajo['Produccion'] - trabajo['Produccion_lag12']
+        ).fillna(0.0)
+        trabajo['Semana_ciclo_12'] = ((trabajo['Semana'] - 1) % 12) + 1
+        return trabajo
+
+    columnas_modelo = [
+        'Tallos/m2',
+        'Tallos_m2_patron_ponderado',
+        'Incremento_tallos_patron',
+        'Incremento_produccion_patron',
+        'Produccion_lag12',
+        'Cambio_produccion_vs_lag12',
+        'Semana_ciclo_12',
+        'Produccion_patron'
+    ]
+
     def proyectar_variedad_masiva(df_base, var_proy):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
@@ -1378,91 +1471,40 @@ if file_path is not None:
         patron_actual = df[df['Bloque&Varid'].isin(
             [patron_seleccionado])].copy()
 
-        patron_weekly = patron_actual[[
-            'Anio', 'Semana', 'Tallos/m2']].dropna().copy()
-        patron_weekly['Anio'] = pd.to_numeric(
-            patron_weekly['Anio'], errors='coerce')
-        patron_weekly['Semana'] = pd.to_numeric(
-            patron_weekly['Semana'], errors='coerce')
-        patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
-        patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
-        patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
-        patron_weekly = (
-            patron_weekly
-            .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
-            .mean()
-            .rename(columns={'Tallos/m2': 'Tallos_m2_patron'})
-        )
+        patron_weekly = construir_patron_semanal(patron_actual)
 
         patron_feature_weight = 5
         patron_prediction_weight = 0.45
 
-        entrenamiento_df = (
-            y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-            .dropna()
-            .reset_index(drop=True)
-        )
-        entrenamiento_df['Anio'] = pd.to_numeric(
-            entrenamiento_df['Anio'], errors='coerce')
-        entrenamiento_df['Semana'] = pd.to_numeric(
-            entrenamiento_df['Semana'], errors='coerce')
-        entrenamiento_df = entrenamiento_df.dropna(subset=['Anio', 'Semana'])
-        entrenamiento_df['Anio'] = entrenamiento_df['Anio'].astype(int)
-        entrenamiento_df['Semana'] = entrenamiento_df['Semana'].astype(int)
-        entrenamiento_df = entrenamiento_df.sort_values(
-            ['Anio', 'Semana']).reset_index(drop=True)
-        entrenamiento_df = entrenamiento_df[
-            (entrenamiento_df['Anio'] > 2025) |
-            ((entrenamiento_df['Anio'] == 2025)
-             & (entrenamiento_df['Semana'] >= 1))
-        ].reset_index(drop=True)
-        entrenamiento_df = entrenamiento_df.merge(
+        entrenamiento_df = preparar_dataset_modelo(
+            y_actual,
             patron_weekly,
-            on=['Anio', 'Semana'],
-            how='left'
+            patron_feature_weight
         )
-        entrenamiento_df['Tallos_m2_patron'] = entrenamiento_df[
-            'Tallos_m2_patron'
-        ].fillna(entrenamiento_df['Tallos/m2'])
-        entrenamiento_df['Tallos_m2_patron_ponderado'] = (
-            entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
-        )
+        # Entrenar con todo el historial desde 2025 en adelante (incluye 2026+).
+        entrenamiento_df = entrenamiento_df[
+            entrenamiento_df['Anio'] >= 2025
+        ].reset_index(drop=True)
 
         prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
         entrenamiento_df['Produccion_ajustada'] = prod_train
 
-        eval_actual_df = (
-            y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-            .dropna()
-            .sort_values(['Anio', 'Semana'])
-            .reset_index(drop=True)
-        )
-        eval_actual_df = eval_actual_df.merge(
+        eval_actual_df = preparar_dataset_modelo(
+            y_actual,
             patron_weekly,
-            on=['Anio', 'Semana'],
-            how='left'
-        )
-        eval_actual_df['Tallos_m2_patron'] = eval_actual_df[
-            'Tallos_m2_patron'
-        ].fillna(eval_actual_df['Tallos/m2'])
-        eval_actual_df['Tallos_m2_patron_ponderado'] = (
-            eval_actual_df['Tallos_m2_patron'] * patron_feature_weight
+            patron_feature_weight
         )
 
         if len(entrenamiento_df) < 5 or len(eval_actual_df) == 0:
             raise ValueError(
                 'No hay suficientes datos para entrenar/prediccion.')
 
-        x_train_df = entrenamiento_df[
-            ['Tallos/m2', 'Tallos_m2_patron_ponderado']
-        ].reset_index(drop=True)
+        x_train_df = entrenamiento_df[columnas_modelo].reset_index(drop=True)
         x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
         y_train_df = pd.DataFrame(
             entrenamiento_df['Produccion_ajustada']).reset_index(drop=True)
 
-        x_frame = eval_actual_df[
-            ['Tallos/m2', 'Tallos_m2_patron_ponderado']
-        ].reset_index(drop=True)
+        x_frame = eval_actual_df[columnas_modelo].reset_index(drop=True)
         x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
         y_frame = pd.DataFrame(
             eval_actual_df['Produccion']).reset_index(drop=True)
@@ -1765,76 +1807,28 @@ if file_path is not None:
         st.error('No hay datos del patron seleccionado para entrenar/prediccion.')
         st.stop()
 
-    patron_weekly = patron_actual[[
-        'Anio', 'Semana', 'Tallos/m2']].dropna().copy()
-    patron_weekly['Anio'] = pd.to_numeric(
-        patron_weekly['Anio'], errors='coerce')
-    patron_weekly['Semana'] = pd.to_numeric(
-        patron_weekly['Semana'], errors='coerce')
-    patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
-    patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
-    patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
-    patron_weekly = (
-        patron_weekly
-        .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
-        .mean()
-        .rename(columns={'Tallos/m2': 'Tallos_m2_patron'})
-    )
+    patron_weekly = construir_patron_semanal(patron_actual)
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
     patron_feature_weight = 5
-    patron_prediction_weight = 0.5
-    entrenamiento_df = (
-        y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-        .dropna()
-        .reset_index(drop=True)
-    )
-    entrenamiento_df['Anio'] = pd.to_numeric(
-        entrenamiento_df['Anio'], errors='coerce')
-    entrenamiento_df['Semana'] = pd.to_numeric(
-        entrenamiento_df['Semana'], errors='coerce')
-    entrenamiento_df = entrenamiento_df.dropna(subset=['Anio', 'Semana'])
-    entrenamiento_df['Anio'] = entrenamiento_df['Anio'].astype(int)
-    entrenamiento_df['Semana'] = entrenamiento_df['Semana'].astype(int)
-    entrenamiento_df = entrenamiento_df.sort_values(
-        ['Anio', 'Semana']
-    ).reset_index(drop=True)
-    entrenamiento_df = entrenamiento_df[
-        (entrenamiento_df['Anio'] > 2025) |
-        ((entrenamiento_df['Anio'] == 2025)
-         & (entrenamiento_df['Semana'] >= 1))
-    ].reset_index(drop=True)
-    entrenamiento_df = entrenamiento_df.merge(
+    patron_prediction_weight = 0.45
+    entrenamiento_df = preparar_dataset_modelo(
+        y_actual,
         patron_weekly,
-        on=['Anio', 'Semana'],
-        how='left'
+        patron_feature_weight
     )
-    entrenamiento_df['Tallos_m2_patron'] = entrenamiento_df[
-        'Tallos_m2_patron'
-    ].fillna(entrenamiento_df['Tallos/m2'])
-    entrenamiento_df['Tallos_m2_patron_ponderado'] = (
-        entrenamiento_df['Tallos_m2_patron'] * patron_feature_weight
-    )
+    # Entrenar con todo el historial desde 2025 en adelante (incluye 2026+).
+    entrenamiento_df = entrenamiento_df[
+        entrenamiento_df['Anio'] >= 2025
+    ].reset_index(drop=True)
 
     prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
     entrenamiento_df['Produccion_ajustada'] = prod_train
 
-    eval_actual_df = (
-        y_actual[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-        .dropna()
-        .sort_values(['Anio', 'Semana'])
-        .reset_index(drop=True)
-    )
-    eval_actual_df = eval_actual_df.merge(
+    eval_actual_df = preparar_dataset_modelo(
+        y_actual,
         patron_weekly,
-        on=['Anio', 'Semana'],
-        how='left'
-    )
-    eval_actual_df['Tallos_m2_patron'] = eval_actual_df[
-        'Tallos_m2_patron'
-    ].fillna(eval_actual_df['Tallos/m2'])
-    eval_actual_df['Tallos_m2_patron_ponderado'] = (
-        eval_actual_df['Tallos_m2_patron'] * patron_feature_weight
+        patron_feature_weight
     )
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
@@ -1883,9 +1877,7 @@ if file_path is not None:
         st.error('No hay suficientes datos para entrenar/reentrenar el modelo.')
         st.stop()
 
-    x_train_df = entrenamiento_df[
-        ['Tallos/m2', 'Tallos_m2_patron_ponderado']
-    ].reset_index(drop=True)
+    x_train_df = entrenamiento_df[columnas_modelo].reset_index(drop=True)
     x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
     y_train_df = pd.DataFrame(
         entrenamiento_df['Produccion_ajustada']).reset_index(drop=True)
@@ -1895,9 +1887,7 @@ if file_path is not None:
             'No hay suficientes datos actuales validos para generar la evaluacion.')
         st.stop()
 
-    x_frame = eval_actual_df[
-        ['Tallos/m2', 'Tallos_m2_patron_ponderado']
-    ].reset_index(drop=True)
+    x_frame = eval_actual_df[columnas_modelo].reset_index(drop=True)
     x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
