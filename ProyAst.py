@@ -1418,14 +1418,42 @@ if file_path is not None:
         trabajo['Tallos_m2_patron_ponderado'] = (
             trabajo['Tallos_m2_patron'] * patron_feature_weight
         )
+        trabajo['Produccion_lag10'] = trabajo['Produccion'].shift(10)
+        trabajo['Produccion_lag10'] = trabajo['Produccion_lag10'].fillna(
+            trabajo['Produccion'].median()
+        )
         trabajo['Produccion_lag12'] = trabajo['Produccion'].shift(12)
+        trabajo['Produccion_lag13'] = trabajo['Produccion'].shift(13)
         trabajo['Produccion_lag12'] = trabajo['Produccion_lag12'].fillna(
             trabajo['Produccion'].median()
         )
-        trabajo['Cambio_produccion_vs_lag12'] = (
-            trabajo['Produccion'] - trabajo['Produccion_lag12']
+        trabajo['Produccion_lag13'] = trabajo['Produccion_lag13'].fillna(
+            trabajo['Produccion'].median()
+        )
+        trabajo['Cambio_produccion_vs_lag10'] = (
+            trabajo['Produccion'] - trabajo['Produccion_lag10']
         ).fillna(0.0)
-        trabajo['Semana_ciclo_12'] = ((trabajo['Semana'] - 1) % 12) + 1
+        trabajo['Cambio_produccion_ultimas_3'] = (
+            trabajo['Produccion'].diff(3).fillna(0.0)
+        )
+        trabajo['Cambio_relativo_vs_lag10'] = (
+            (trabajo['Produccion'] - trabajo['Produccion_lag10']) /
+            trabajo['Produccion_lag10'].replace(0, np.nan)
+        ).fillna(0.0)
+        trabajo['Pendiente_ultimas_3'] = (
+            trabajo['Produccion'].diff(3).fillna(0.0) / 3.0
+        )
+        trabajo['Promedio_picos_12_13'] = (
+            (trabajo['Produccion_lag12'] + trabajo['Produccion_lag13']) / 2.0
+        )
+        trabajo['Relacion_valle_vs_pico_12_13'] = (
+            trabajo['Produccion'] /
+            trabajo['Promedio_picos_12_13'].replace(0, np.nan)
+        ).fillna(1.0)
+        trabajo['Cambio_vs_promedio_picos_12_13'] = (
+            trabajo['Produccion'] - trabajo['Promedio_picos_12_13']
+        ).fillna(0.0)
+        trabajo['Semana_ciclo_10'] = ((trabajo['Semana'] - 1) % 10) + 1
         return trabajo
 
     columnas_modelo = [
@@ -1433,9 +1461,17 @@ if file_path is not None:
         'Tallos_m2_patron_ponderado',
         'Incremento_tallos_patron',
         'Incremento_produccion_patron',
+        'Produccion_lag10',
         'Produccion_lag12',
-        'Cambio_produccion_vs_lag12',
-        'Semana_ciclo_12',
+        'Produccion_lag13',
+        'Cambio_produccion_vs_lag10',
+        'Cambio_produccion_ultimas_3',
+        'Cambio_relativo_vs_lag10',
+        'Pendiente_ultimas_3',
+        'Promedio_picos_12_13',
+        'Relacion_valle_vs_pico_12_13',
+        'Cambio_vs_promedio_picos_12_13',
+        'Semana_ciclo_10',
         'Produccion_patron'
     ]
 
@@ -1473,8 +1509,8 @@ if file_path is not None:
 
         patron_weekly = construir_patron_semanal(patron_actual)
 
-        patron_feature_weight = 5
-        patron_prediction_weight = 0.45
+        patron_feature_weight = 3
+        patron_prediction_weight = 0.25
 
         entrenamiento_df = preparar_dataset_modelo(
             y_actual,
@@ -1509,8 +1545,8 @@ if file_path is not None:
         y_frame = pd.DataFrame(
             eval_actual_df['Produccion']).reset_index(drop=True)
 
-        split_idx = int(len(x_train_df) * 0.8)
-        split_idx = min(max(split_idx, 1), len(x_train_df) - 1)
+        split_idx = len(x_train_df)
+        split_idx = max(split_idx, 1)
 
         model_name = ''.join(
             ch if ch.isalnum() else '_' for ch in str(var_proy))
@@ -1518,10 +1554,12 @@ if file_path is not None:
 
         if train_key not in st.session_state:
             modelo = RandomForestRegressor(
-                n_estimators=100,
+                n_estimators=400,
                 random_state=42,
-                max_depth=12,
-                min_samples_leaf=2
+                max_depth=16,
+                min_samples_leaf=1,
+                min_samples_split=2,
+                max_features='sqrt'
             )
             modelo.fit(x_train_df.iloc[:split_idx],
                        y_train_df.iloc[:split_idx].values.ravel())
@@ -1539,6 +1577,24 @@ if file_path is not None:
                 (1 - patron_prediction_weight) * pred_vals[:n_blend]
                 + patron_prediction_weight * proy_vals[:n_blend]
             )
+            for i in range(13, n_blend):
+                ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
+                if np.isfinite(ref_peak) and ref_peak > 0:
+                    ratio_ciclo = proy_vals[i] / ref_peak
+                    if ratio_ciclo > 1.05:
+                        blend_ciclo = np.clip(
+                            0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
+                        pred_vals[i] = (
+                            (1 - blend_ciclo) * pred_vals[i]
+                            + blend_ciclo * proy_vals[i]
+                        )
+                    elif ratio_ciclo < 0.95:
+                        blend_ciclo = np.clip(
+                            0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
+                        pred_vals[i] = (
+                            (1 - blend_ciclo) * pred_vals[i]
+                            + blend_ciclo * proy_vals[i]
+                        )
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
         media_real = prod_real_vals.mean()
@@ -1810,8 +1866,8 @@ if file_path is not None:
     patron_weekly = construir_patron_semanal(patron_actual)
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
-    patron_feature_weight = 5
-    patron_prediction_weight = 0.45
+    patron_feature_weight = 3
+    patron_prediction_weight = 0.25
     entrenamiento_df = preparar_dataset_modelo(
         y_actual,
         patron_weekly,
@@ -1891,10 +1947,10 @@ if file_path is not None:
     x_frame['Semana_orden'] = np.arange(len(x_frame), dtype=float)
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
-    split_idx = int(len(x_train_df) * 0.8)
-    split_idx = min(max(split_idx, 1), len(x_train_df) - 1)
-    X_train, X_test = x_train_df.iloc[:split_idx], x_train_df.iloc[split_idx:]
-    y_train, y_test = y_train_df.iloc[:split_idx], y_train_df.iloc[split_idx:]
+    split_idx = len(x_train_df)
+    split_idx = max(split_idx, 1)
+    X_train = x_train_df.iloc[:split_idx]
+    y_train = y_train_df.iloc[:split_idx]
     inicio_train = entrenamiento_df.iloc[0]
     fin_train = entrenamiento_df.iloc[split_idx - 1]
 
@@ -1904,10 +1960,12 @@ if file_path is not None:
 
     if train_key not in st.session_state:
         modelo = RandomForestRegressor(
-            n_estimators=100,
+            n_estimators=400,
             random_state=42,
-            max_depth=12,
-            min_samples_leaf=2
+            max_depth=16,
+            min_samples_leaf=1,
+            min_samples_split=2,
+            max_features='sqrt'
         )
         modelo.fit(X_train, y_train.values.ravel())
         st.session_state[train_key] = modelo
@@ -1948,6 +2006,24 @@ if file_path is not None:
             (1 - patron_prediction_weight) * pred_vals[:n_blend]
             + patron_prediction_weight * proy_vals[:n_blend]
         )
+        for i in range(13, n_blend):
+            ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
+            if np.isfinite(ref_peak) and ref_peak > 0:
+                ratio_ciclo = proy_vals[i] / ref_peak
+                if ratio_ciclo > 1.05:
+                    blend_ciclo = np.clip(
+                        0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
+                    pred_vals[i] = (
+                        (1 - blend_ciclo) * pred_vals[i]
+                        + blend_ciclo * proy_vals[i]
+                    )
+                elif ratio_ciclo < 0.95:
+                    blend_ciclo = np.clip(
+                        0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
+                    pred_vals[i] = (
+                        (1 - blend_ciclo) * pred_vals[i]
+                        + blend_ciclo * proy_vals[i]
+                    )
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
     # escalar las predicciones para igualarlas.
