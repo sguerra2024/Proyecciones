@@ -35,6 +35,13 @@ anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
 openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
+PATRON_FEATURE_WEIGHT = 3.0
+PATRON_PREDICTION_WEIGHT = 0.25
+PICO_NO_CICLO_UMBRAL_REL = 0.08
+PICO_NO_CICLO_UMBRAL_PENDIENTE = 0.03
+PICO_NO_CICLO_MAX_BLEND = 0.55
+MINIMOS_MERCADO_CANTIDAD = 3
+PICO_MERCADO_INCREMENTO = 0.10
 
 
 def obtener_valor_env(*claves):
@@ -769,6 +776,30 @@ if 'archivo_sesion_df' not in st.session_state:
     st.session_state['archivo_sesion_df'] = pd.DataFrame()
 if 'archivo_sesion_nombre' not in st.session_state:
     st.session_state['archivo_sesion_nombre'] = ''
+if 'tabla_mse_patron_masivo' not in st.session_state:
+    st.session_state['tabla_mse_patron_masivo'] = pd.DataFrame()
+if 'mostrar_dashboard_ia' not in st.session_state:
+    st.session_state['mostrar_dashboard_ia'] = False
+
+
+def consulta_solicita_dashboard(texto_consulta):
+    texto = (texto_consulta or '').strip().lower()
+    if not texto:
+        return False
+
+    palabras_clave = [
+        'dashboard',
+        'tablero',
+        'panel',
+        'grafico',
+        'graficos',
+        'visualizacion',
+        'indicador',
+        'indicadores',
+        'kpi',
+        'kpis'
+    ]
+    return any(palabra in texto for palabra in palabras_clave)
 
 
 @st.fragment
@@ -934,8 +965,12 @@ def construir_prompt_dashboard_anthropic(df_base, base_modelo, instruccion_extra
     return '\n'.join(resumen)
 
 
-def render_dashboard_base(df_base):
-    with st.expander('Dashboard de la base', expanded=True):
+def render_dashboard_base(df_base, usar_expander=True):
+    contenedor_dashboard = (
+        st.expander('Dashboard de la base', expanded=False)
+        if usar_expander else st.container()
+    )
+    with contenedor_dashboard:
         if 'Anio' not in df_base.columns:
             st.info('No hay columna Anio para separar acumulados.')
             return
@@ -1083,8 +1118,10 @@ def render_dashboard_base(df_base):
                 total_real = float(comparativo_filtrado['Produccion'].sum())
                 total_modelo = float(
                     comparativo_filtrado['Estimado_modelo'].sum())
-                brecha = (total_modelo - total_real) / \
-                    total_real if total_real != 0 else 0
+                brecha = (
+                    (total_modelo - total_real) / total_real
+                    if total_real != 0 else 0
+                )
                 m1, m2, m3 = st.columns(3)
                 m1.metric('Total Produccion', f"{total_real:,.0f}")
                 m2.metric('Total Modelo', f"{total_modelo:,.0f}")
@@ -1116,8 +1153,8 @@ def render_dashboard_base(df_base):
                         return
 
                     st.markdown(f'**{titulo}**')
-                    fig_h = max(4, min(10, len(totales_dim) * 0.42))
-                    fig, ax = plt.subplots(figsize=(12, fig_h))
+                    fig_h = max(2.8, min(6, len(totales_dim) * 0.35))
+                    fig, ax = plt.subplots(figsize=(10, fig_h))
                     y_pos = np.arange(len(totales_dim))
                     bar_h = 0.08
                     ax.barh(
@@ -1146,13 +1183,13 @@ def render_dashboard_base(df_base):
                     st.pyplot(fig, use_container_width=True)
 
                 render_totales_horizontal(
-                    comparativo_filtrado, 'Anio', 'Totales por Año', top_n=50)
+                    comparativo_filtrado, 'Anio', 'Totales por Año', top_n=8)
                 render_totales_horizontal(
-                    comparativo_filtrado, col_finca, 'Totales por Finca')
+                    comparativo_filtrado, col_finca, 'Totales por Finca', top_n=8)
                 render_totales_horizontal(
-                    comparativo_filtrado, col_producto, 'Totales por Producto')
+                    comparativo_filtrado, col_producto, 'Totales por Producto', top_n=8)
                 render_totales_horizontal(
-                    comparativo_filtrado, 'Variedad_mostrar', 'Totales por Variedad')
+                    comparativo_filtrado, 'Variedad_mostrar', 'Totales por Variedad', top_n=8)
         else:
             st.info(
                 'Corre PROYECTAR FINCA para visualizar graficos comparativos del modelo.')
@@ -1166,6 +1203,11 @@ def render_preguntas_claude(df_base, selected_finca):
         st.caption(
             'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
+
+        if st.session_state.get('mostrar_dashboard_ia', False):
+            render_dashboard_base(df_base, usar_expander=False)
+            st.divider()
+
         st.write()
         with st.form('form_pregunta_IA', clear_on_submit=True):
             pregunta_negocio = st.text_area(
@@ -1175,6 +1217,9 @@ def render_preguntas_claude(df_base, selected_finca):
             enviar_pregunta = st.form_submit_button('Preguntale a la IA')
 
         if enviar_pregunta:
+            st.session_state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(
+                pregunta_negocio
+            )
             try:
                 respuesta_negocio = responder_pregunta_anthropic(
                     df_base,
@@ -1277,11 +1322,19 @@ if file_path is not None:
     progreso_placeholder = st.empty()
 
     if st.session_state.get('dashboard_finca_activo') and not run_masiva:
-        render_dashboard_base(df)
         mostrar_analisis_avanzado = True
         st.divider()
         st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
                     unsafe_allow_html=True)
+        if st.button('Volver a casos individuales', key='btn_volver_individual'):
+            st.session_state['tabla_mse_patron_masivo'] = pd.DataFrame()
+            st.session_state['tabla_mse_patron'] = pd.DataFrame()
+            st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
+            st.session_state['dashboard_finca_activo'] = False
+            st.session_state['dashboard_export_bytes'] = None
+            st.session_state['dashboard_export_name'] = ''
+            st.session_state['dashboard_export_mime'] = ''
+            st.rerun()
         render_subida_archivo_anthropic(file_path)
         render_preguntas_claude(df, selected_finca)
 
@@ -1380,6 +1433,268 @@ if file_path is not None:
         )
         return patron_weekly
 
+    def excluir_ultimas_4_semanas(df_base, columnas_grupo=None):
+        if df_base is None or df_base.empty:
+            return df_base.copy()
+
+        trabajo = df_base.copy()
+        if 'Anio_Semana' in trabajo.columns:
+            anio_semana = trabajo['Anio_Semana'].astype(
+                str).str.split('-', n=1, expand=True)
+            trabajo['__anio_tmp'] = pd.to_numeric(
+                anio_semana[0], errors='coerce')
+            trabajo['__semana_tmp'] = pd.to_numeric(
+                anio_semana[1], errors='coerce')
+        elif {'Anio', 'Semana'}.issubset(trabajo.columns):
+            trabajo['__anio_tmp'] = pd.to_numeric(
+                trabajo['Anio'], errors='coerce')
+            trabajo['__semana_tmp'] = pd.to_numeric(
+                trabajo['Semana'], errors='coerce')
+        else:
+            return trabajo
+
+        validos = trabajo[
+            trabajo['__anio_tmp'].notna() & trabajo['__semana_tmp'].notna()
+        ].copy()
+        invalidos = trabajo[
+            ~(trabajo['__anio_tmp'].notna() & trabajo['__semana_tmp'].notna())
+        ].copy()
+
+        if validos.empty:
+            return trabajo.drop(columns=['__anio_tmp', '__semana_tmp'], errors='ignore')
+
+        grupos_validos = []
+        if columnas_grupo:
+            grupos_validos = [
+                col for col in columnas_grupo if col in validos.columns
+            ]
+
+        if grupos_validos:
+            orden_desc = validos.sort_values(
+                grupos_validos + ['__anio_tmp', '__semana_tmp'],
+                ascending=[True] * len(grupos_validos) + [False, False]
+            )
+            orden_desc['__rank_ultimas_tmp'] = (
+                orden_desc.groupby(grupos_validos).cumcount() + 1
+            )
+        else:
+            orden_desc = validos.sort_values(
+                ['__anio_tmp', '__semana_tmp'],
+                ascending=[False, False]
+            )
+            orden_desc['__rank_ultimas_tmp'] = np.arange(len(orden_desc)) + 1
+
+        validos_filtrados = orden_desc[
+            orden_desc['__rank_ultimas_tmp'] > 4
+        ].copy()
+
+        resultado = pd.concat(
+            [validos_filtrados, invalidos],
+            ignore_index=True,
+            sort=False
+        )
+        resultado = resultado.drop(
+            columns=['__anio_tmp', '__semana_tmp', '__rank_ultimas_tmp'],
+            errors='ignore'
+        )
+
+        if {'Anio', 'Semana'}.issubset(resultado.columns):
+            resultado['__anio_sort'] = pd.to_numeric(
+                resultado['Anio'], errors='coerce')
+            resultado['__semana_sort'] = pd.to_numeric(
+                resultado['Semana'], errors='coerce')
+            resultado = resultado.sort_values(['__anio_sort', '__semana_sort'])
+            resultado = resultado.drop(
+                columns=['__anio_sort', '__semana_sort'], errors='ignore')
+        elif 'Anio_Semana' in resultado.columns:
+            anio_semana_sort = resultado['Anio_Semana'].astype(
+                str).str.split('-', n=1, expand=True)
+            resultado['__anio_sort'] = pd.to_numeric(
+                anio_semana_sort[0], errors='coerce')
+            resultado['__semana_sort'] = pd.to_numeric(
+                anio_semana_sort[1], errors='coerce')
+            resultado = resultado.sort_values(['__anio_sort', '__semana_sort'])
+            resultado = resultado.drop(
+                columns=['__anio_sort', '__semana_sort'], errors='ignore')
+
+        return resultado.reset_index(drop=True)
+
+    def construir_tabla_mse_patron(df_export, finca_val, variedad_val):
+        columnas_necesarias = {
+            'Anio_Semana',
+            'Estimado_modelo',
+            'Produccion_real',
+            'Proy_patron',
+            'Tallos_m2_patron'
+        }
+        if not columnas_necesarias.issubset(df_export.columns):
+            return pd.DataFrame(
+                columns=['Finca', 'Bloque&Varid', 'Anio', 'Log10_MSE', 'S/N']
+            )
+
+        tabla = df_export[[
+            'Anio_Semana',
+            'Estimado_modelo',
+            'Produccion_real',
+            'Proy_patron',
+            'Tallos_m2_patron'
+        ]].copy()
+        tabla = excluir_ultimas_4_semanas(tabla)
+        tabla['Anio'] = pd.to_numeric(
+            tabla['Anio_Semana'].astype(str).str.split('-').str[0],
+            errors='coerce'
+        )
+        tabla['Estimado_modelo'] = pd.to_numeric(
+            tabla['Estimado_modelo'], errors='coerce')
+        tabla['Produccion_real'] = pd.to_numeric(
+            tabla['Produccion_real'], errors='coerce')
+        tabla['Proy_patron'] = pd.to_numeric(
+            tabla['Proy_patron'], errors='coerce')
+        tabla['Tallos_m2_patron'] = pd.to_numeric(
+            tabla['Tallos_m2_patron'], errors='coerce')
+        tabla = tabla.dropna(subset=['Anio'])
+        tabla['Anio'] = tabla['Anio'].astype(int)
+        peso_patron_mse = PATRON_PREDICTION_WEIGHT
+        peso_modelo_mse = 1.0 - PATRON_PREDICTION_WEIGHT
+        tabla['promedio_ponderado_modelo_patron'] = (
+            (
+                tabla['Estimado_modelo'] * peso_modelo_mse
+                + tabla['Proy_patron'] * peso_patron_mse
+            )
+            / (peso_modelo_mse + peso_patron_mse)
+        )
+
+        resultados = []
+        for anio_val, grupo in tabla.groupby('Anio'):
+            pares_validos = grupo[[
+                'promedio_ponderado_modelo_patron', 'Produccion_real'
+            ]].dropna()
+            tallos_m2_anual = pd.to_numeric(
+                grupo['Tallos_m2_patron'],
+                errors='coerce'
+            ).mean()
+            if pares_validos.empty:
+                mse_valor = np.nan
+            else:
+                mse_valor = mean_squared_error(
+                    pares_validos['promedio_ponderado_modelo_patron'],
+                    pares_validos['Produccion_real']
+                )
+
+            resultados.append({
+                'Finca': finca_val,
+                'Bloque&Varid': variedad_val,
+                'Anio': int(anio_val),
+                'MSE': mse_valor,
+                'Tallos_m2_anual': tallos_m2_anual
+            })
+
+        tabla_mse = pd.DataFrame(resultados)
+        if not tabla_mse.empty:
+            tabla_mse['MSE'] = pd.to_numeric(
+                tabla_mse['MSE'], errors='coerce')
+            tabla_mse['Tallos_m2_anual'] = pd.to_numeric(
+                tabla_mse['Tallos_m2_anual'], errors='coerce')
+            tabla_mse['Log10_MSE'] = np.where(
+                tabla_mse['MSE'] > 0,
+                np.log10(tabla_mse['MSE']),
+                np.nan
+            )
+            tabla_mse['Log10_MSE'] = tabla_mse['Log10_MSE'].round(3)
+
+            # S/N unico solicitado: log10((MSE_2026 - MSE_2025)^2)
+            tabla_mse = tabla_mse.sort_values('Anio').reset_index(drop=True)
+            tabla_mse['S/N'] = np.nan
+
+            fila_2025 = tabla_mse[tabla_mse['Anio'] == 2025]
+            fila_2026 = tabla_mse[tabla_mse['Anio'] == 2026]
+            if not fila_2025.empty and not fila_2026.empty:
+                mse_2025 = pd.to_numeric(
+                    fila_2025['MSE'].iloc[0], errors='coerce')
+                mse_2026 = pd.to_numeric(
+                    fila_2026['MSE'].iloc[0], errors='coerce')
+
+                if (
+                    pd.notna(mse_2025)
+                    and pd.notna(mse_2026)
+                ):
+                    diferencia_mse_cuadrada = (mse_2026 - mse_2025) ** 2
+                    if diferencia_mse_cuadrada > 0:
+                        sn_valor = np.log10(diferencia_mse_cuadrada)
+                        tabla_mse.loc[
+                            tabla_mse['Anio'].isin([2025, 2026]),
+                            'S/N'
+                        ] = sn_valor
+
+            tabla_mse['S/N'] = pd.to_numeric(
+                tabla_mse['S/N'], errors='coerce'
+            ).round(3)
+
+            tabla_mse = tabla_mse.sort_values(
+                ['Anio', 'MSE'],
+                ascending=[False, False],
+                na_position='last'
+            ).reset_index(drop=True)
+            tabla_mse = tabla_mse[[
+                'Finca', 'Bloque&Varid', 'Anio', 'Log10_MSE', 'S/N'
+            ]]
+        return tabla_mse
+
+    def estilizar_tabla_mse_alerta(df_tabla):
+        if df_tabla is None or df_tabla.empty:
+            return df_tabla
+
+        col_sn = None
+        for col in ['S/N', 'S/N_prom_2025_2026']:
+            if col in df_tabla.columns:
+                col_sn = col
+                break
+        if col_sn is None:
+            return df_tabla
+
+        def estilo_sn(valor):
+            valor_num = pd.to_numeric(valor, errors='coerce')
+            if pd.notna(valor_num) and valor_num <= -150:
+                return 'background-color: #FFA500; color: #000000; font-weight: 700;'
+            return ''
+
+        return df_tabla.style.applymap(estilo_sn, subset=[col_sn])
+
+    def resumir_indicador_promedio_2025_2026(df_tabla):
+        columnas_salida = [
+            'Finca', 'Bloque&Varid', 'S/N_prom_2025_2026'
+        ]
+        if df_tabla is None or df_tabla.empty:
+            return pd.DataFrame(columns=columnas_salida)
+        if not {'Finca', 'Bloque&Varid', 'Anio', 'Log10_MSE', 'S/N'}.issubset(df_tabla.columns):
+            return pd.DataFrame(columns=columnas_salida)
+
+        base = df_tabla.copy()
+        base['Anio'] = pd.to_numeric(base['Anio'], errors='coerce')
+        base['Log10_MSE'] = pd.to_numeric(base['Log10_MSE'], errors='coerce')
+        base['S/N'] = pd.to_numeric(base['S/N'], errors='coerce')
+        base = base[base['Anio'].isin([2025, 2026])].copy()
+        if base.empty:
+            return pd.DataFrame(columns=columnas_salida)
+
+        resumen = (
+            base
+            .groupby(['Finca', 'Bloque&Varid'], as_index=False)
+            .agg(
+                S_N_prom=('S/N', 'mean')
+            )
+            .rename(columns={'S_N_prom': 'S/N_prom_2025_2026'})
+        )
+        resumen['S/N_prom_2025_2026'] = pd.to_numeric(
+            resumen['S/N_prom_2025_2026'], errors='coerce'
+        ).round(3)
+        resumen = resumen.sort_values(
+            ['S/N_prom_2025_2026', 'Finca', 'Bloque&Varid'],
+            ascending=[False, True, True],
+            na_position='last'
+        ).reset_index(drop=True)
+        return resumen
+
     def preparar_dataset_modelo(df_variedad_base, patron_weekly, patron_feature_weight):
         trabajo = (
             df_variedad_base[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
@@ -1475,6 +1790,129 @@ if file_path is not None:
         'Produccion_patron'
     ]
 
+    def ajustar_prediccion_con_sensibilidad_picos(
+        pred_vals,
+        proy_vals,
+        eval_actual_df,
+        patron_prediction_weight
+    ):
+        n_blend = min(len(pred_vals), len(proy_vals))
+        if n_blend <= 0:
+            return pred_vals
+
+        pred_vals[:n_blend] = (
+            (1 - patron_prediction_weight) * pred_vals[:n_blend]
+            + patron_prediction_weight * proy_vals[:n_blend]
+        )
+
+        rel_vs_lag10_arr = pd.to_numeric(
+            eval_actual_df['Cambio_relativo_vs_lag10'], errors='coerce'
+        ).to_numpy(copy=False)
+        pendiente_3_arr = pd.to_numeric(
+            eval_actual_df['Pendiente_ultimas_3'], errors='coerce'
+        ).to_numpy(copy=False)
+        cambio_vs_picos_arr = pd.to_numeric(
+            eval_actual_df['Cambio_vs_promedio_picos_12_13'], errors='coerce'
+        ).to_numpy(copy=False)
+        lag10_arr = pd.to_numeric(
+            eval_actual_df['Produccion_lag10'], errors='coerce'
+        ).to_numpy(copy=False)
+
+        produccion_hist = pd.to_numeric(
+            eval_actual_df['Produccion'], errors='coerce'
+        )
+        minimos_hist = produccion_hist.dropna().nsmallest(MINIMOS_MERCADO_CANTIDAD)
+        umbral_minimos = np.nan
+        piso_compromiso_mercado = np.nan
+        if len(minimos_hist) == MINIMOS_MERCADO_CANTIDAD:
+            umbral_minimos = float(minimos_hist.min())
+            idx_ultima_minima = int(max(minimos_hist.index.tolist()))
+            ultima_minima = pd.to_numeric(
+                eval_actual_df.loc[idx_ultima_minima, 'Produccion'],
+                errors='coerce'
+            )
+            if pd.notna(ultima_minima):
+                piso_compromiso_mercado = float(
+                    ultima_minima * (1.0 + PICO_MERCADO_INCREMENTO)
+                )
+
+        for i in range(n_blend):
+            ratio_ciclo = np.nan
+            if i >= 13:
+                ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
+                if np.isfinite(ref_peak) and ref_peak > 0:
+                    ratio_ciclo = proy_vals[i] / ref_peak
+                    if ratio_ciclo > 1.05:
+                        blend_ciclo = np.clip(
+                            0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
+                        pred_vals[i] = (
+                            (1 - blend_ciclo) * pred_vals[i]
+                            + blend_ciclo * proy_vals[i]
+                        )
+                    elif ratio_ciclo < 0.95:
+                        blend_ciclo = np.clip(
+                            0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
+                        pred_vals[i] = (
+                            (1 - blend_ciclo) * pred_vals[i]
+                            + blend_ciclo * proy_vals[i]
+                        )
+
+            rel_vs_lag10 = rel_vs_lag10_arr[i] if i < len(
+                rel_vs_lag10_arr) else np.nan
+            pendiente_3 = pendiente_3_arr[i] if i < len(
+                pendiente_3_arr) else np.nan
+            cambio_vs_picos = cambio_vs_picos_arr[i] if i < len(
+                cambio_vs_picos_arr) else np.nan
+            lag10_ref = lag10_arr[i] if i < len(lag10_arr) else np.nan
+            pendiente_rel = (
+                pendiente_3 / lag10_ref
+                if np.isfinite(pendiente_3) and np.isfinite(lag10_ref) and lag10_ref != 0
+                else 0.0
+            )
+
+            # Detecta picos fuera del ciclo lag (12-13) y aumenta sensibilidad.
+            fuera_ciclo_lag = (
+                (not np.isfinite(ratio_ciclo))
+                or (0.92 <= ratio_ciclo <= 1.08)
+            )
+            senal_pico_no_ciclico = (
+                np.isfinite(rel_vs_lag10)
+                and rel_vs_lag10 > PICO_NO_CICLO_UMBRAL_REL
+                and (
+                    (np.isfinite(cambio_vs_picos) and cambio_vs_picos > 0)
+                    or (pendiente_rel > PICO_NO_CICLO_UMBRAL_PENDIENTE)
+                )
+            )
+
+            if fuera_ciclo_lag and senal_pico_no_ciclico:
+                intensidad_pico = np.clip(
+                    0.15
+                    + 0.60 * max(rel_vs_lag10, 0.0)
+                    + 0.30 * max(pendiente_rel, 0.0),
+                    0.15,
+                    PICO_NO_CICLO_MAX_BLEND
+                )
+                objetivo_pico = max(
+                    pred_vals[i],
+                    proy_vals[i] * (1.0 + 0.20 * max(rel_vs_lag10, 0.0)),
+                    proy_vals[i] + 0.35 * max(cambio_vs_picos, 0.0)
+                )
+                pred_vals[i] = (
+                    (1 - intensidad_pico) * pred_vals[i]
+                    + intensidad_pico * objetivo_pico
+                )
+
+            # Regla de negocio: si cae por debajo de los 3 minimos historicos,
+            # forzar pico de 10% sobre la ultima produccion minima.
+            if (
+                np.isfinite(umbral_minimos)
+                and np.isfinite(piso_compromiso_mercado)
+                and pred_vals[i] < umbral_minimos
+            ):
+                pred_vals[i] = max(pred_vals[i], piso_compromiso_mercado)
+
+        return pred_vals
+
     def proyectar_variedad_masiva(df_base, var_proy):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
@@ -1509,8 +1947,8 @@ if file_path is not None:
 
         patron_weekly = construir_patron_semanal(patron_actual)
 
-        patron_feature_weight = 3
-        patron_prediction_weight = 0.25
+        patron_feature_weight = PATRON_FEATURE_WEIGHT
+        patron_prediction_weight = PATRON_PREDICTION_WEIGHT
 
         entrenamiento_df = preparar_dataset_modelo(
             y_actual,
@@ -1521,6 +1959,7 @@ if file_path is not None:
         entrenamiento_df = entrenamiento_df[
             entrenamiento_df['Anio'] >= 2025
         ].reset_index(drop=True)
+        entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
 
         prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
         entrenamiento_df['Produccion_ajustada'] = prod_train
@@ -1571,30 +2010,12 @@ if file_path is not None:
                               columns=['Estimado_modelo'])
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
-        n_blend = min(len(pred_vals), len(proy_vals))
-        if n_blend > 0:
-            pred_vals[:n_blend] = (
-                (1 - patron_prediction_weight) * pred_vals[:n_blend]
-                + patron_prediction_weight * proy_vals[:n_blend]
-            )
-            for i in range(13, n_blend):
-                ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
-                if np.isfinite(ref_peak) and ref_peak > 0:
-                    ratio_ciclo = proy_vals[i] / ref_peak
-                    if ratio_ciclo > 1.05:
-                        blend_ciclo = np.clip(
-                            0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
-                        pred_vals[i] = (
-                            (1 - blend_ciclo) * pred_vals[i]
-                            + blend_ciclo * proy_vals[i]
-                        )
-                    elif ratio_ciclo < 0.95:
-                        blend_ciclo = np.clip(
-                            0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
-                        pred_vals[i] = (
-                            (1 - blend_ciclo) * pred_vals[i]
-                            + blend_ciclo * proy_vals[i]
-                        )
+        pred_vals = ajustar_prediccion_con_sensibilidad_picos(
+            pred_vals,
+            proy_vals,
+            eval_actual_df,
+            patron_prediction_weight
+        )
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
         media_real = prod_real_vals.mean()
@@ -1616,6 +2037,7 @@ if file_path is not None:
         df_export = pd.DataFrame({
             'Variedad_proyectada': [var_proy] * n_export,
             'Anio_Semana': etiquetas_anio_semana.iloc[:n_export].values,
+            'Tallos_m2_patron': eval_actual_df['Tallos_m2_patron'].iloc[:n_export].values,
             'Produccion_real': y_frame.iloc[:n_export, 0].values,
             'Proy_patron': proy.iloc[:n_export].values,
             'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
@@ -1630,10 +2052,21 @@ if file_path is not None:
             np.nan
         )
 
+        df_metricas = excluir_ultimas_4_semanas(df_export)
+        pares_modelo = df_metricas[[
+            'Produccion_real', 'Estimado_modelo']].dropna()
+        pares_patron = df_metricas[['Produccion_real', 'Proy_patron']].dropna()
+
         return {
             'df_export': df_export,
-            'mse_modelo': mean_squared_error(df_export['Produccion_real'], df_export['Estimado_modelo']),
-            'mse_patron': mean_squared_error(df_export['Produccion_real'], df_export['Proy_patron'])
+            'mse_modelo': mean_squared_error(
+                pares_modelo['Produccion_real'],
+                pares_modelo['Estimado_modelo']
+            ) if not pares_modelo.empty else np.nan,
+            'mse_patron': mean_squared_error(
+                pares_patron['Produccion_real'],
+                pares_patron['Proy_patron']
+            ) if not pares_patron.empty else np.nan
         }
 
     if run_masiva:
@@ -1654,6 +2087,7 @@ if file_path is not None:
             st.stop()
 
         resultados_export = []
+        tablas_mse_masivo = []
         resumen = []
         errores = []
         progreso = progreso_placeholder.progress(0)
@@ -1662,6 +2096,13 @@ if file_path is not None:
             try:
                 resultado = proyectar_variedad_masiva(df_masivo, var_item)
                 resultados_export.append(resultado['df_export'])
+                tabla_mse_item = construir_tabla_mse_patron(
+                    resultado['df_export'],
+                    selected_finca,
+                    var_item
+                )
+                if not tabla_mse_item.empty:
+                    tablas_mse_masivo.append(tabla_mse_item)
                 resumen.append({
                     'Variedad_proyectada': var_item,
                     'MSE_modelo': resultado['mse_modelo'],
@@ -1679,6 +2120,30 @@ if file_path is not None:
         else:
             df_export_todo = pd.DataFrame(
                 columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
+
+        df_sn_por_caso = pd.DataFrame(columns=['Bloque&Varid', 'S/N'])
+        if tablas_mse_masivo:
+            df_mse_patron = pd.concat(tablas_mse_masivo, ignore_index=True)
+            df_mse_patron = resumir_indicador_promedio_2025_2026(df_mse_patron)
+            if 'S/N_prom_2025_2026' in df_mse_patron.columns:
+                df_sn_por_caso = (
+                    df_mse_patron[['Bloque&Varid', 'S/N_prom_2025_2026']]
+                    .rename(columns={'S/N_prom_2025_2026': 'S/N'})
+                    .drop_duplicates(subset=['Bloque&Varid'])
+                    .reset_index(drop=True)
+                )
+            st.session_state['tabla_mse_patron_masivo'] = df_mse_patron.copy()
+            with st.expander(
+                'MSE entre calculo del modelo y patron seleccionado - masivo',
+                expanded=True
+            ):
+                tabla_mse_visual = estilizar_tabla_mse_alerta(df_mse_patron)
+                st.dataframe(
+                    tabla_mse_visual,
+                    use_container_width=True,
+                    hide_index=True
+                )
+            st.session_state['tabla_mse_patron'] = df_mse_patron
 
         # Reordenar resultados al orden original del archivo cargado.
         df_original_order = df_masivo.copy().reset_index(drop=True)
@@ -1782,6 +2247,29 @@ if file_path is not None:
             # Exportar columnas base mas Estimado_modelo.
             df_export_estimado.to_excel(
                 writer, sheet_name='Estimado_modelo', index=False)
+            df_mse_export = pd.DataFrame(resumen)
+            if not df_mse_export.empty:
+                df_mse_export = df_mse_export.rename(columns={
+                    'Variedad_proyectada': 'Bloque&Varid',
+                    'MSE_modelo': 'MSE'
+                })
+                df_mse_export = df_mse_export.merge(
+                    df_sn_por_caso,
+                    on='Bloque&Varid',
+                    how='left'
+                )
+                columnas_mse = [
+                    col for col in ['Bloque&Varid', 'MSE', 'MSE_proy_patron', 'S/N']
+                    if col in df_mse_export.columns
+                ]
+                df_mse_export = df_mse_export[columnas_mse]
+            else:
+                df_mse_export = pd.DataFrame(
+                    columns=['Bloque&Varid', 'MSE', 'MSE_proy_patron', 'S/N']
+                )
+            df_mse_export.to_excel(
+                writer, sheet_name='MSE_por_BloqueVarid', index=False
+            )
         st.download_button(
             'Exportar datos a Excel',
             data=buffer_masivo.getvalue(),
@@ -1799,8 +2287,6 @@ if file_path is not None:
             st.session_state['dashboard_export_mime']
         )
 
-        render_dashboard_base(df)
-
         st.divider()
         st.markdown("<h3 style='text-align:center; margin-top:2rem;'>Análisis Avanzado</h3>",
                     unsafe_allow_html=True)
@@ -1812,7 +2298,7 @@ if file_path is not None:
     # Una sola lectura reutilizada para todo el flujo individual
     df = leer_excel_subido(file_path)
 
-    # Seleccion individual ubicada despues del reporte Dashboard.
+    # Seleccion individual ubicada antes del bloque de IA.
     df_finca_ind = df[df["Finca"].astype(str) == selected_finca].copy()
     variedades = sorted(
         df_finca_ind["Bloque&Varid"].dropna().astype(str).unique().tolist()
@@ -1866,8 +2352,8 @@ if file_path is not None:
     patron_weekly = construir_patron_semanal(patron_actual)
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
-    patron_feature_weight = 3
-    patron_prediction_weight = 0.25
+    patron_feature_weight = PATRON_FEATURE_WEIGHT
+    patron_prediction_weight = PATRON_PREDICTION_WEIGHT
     entrenamiento_df = preparar_dataset_modelo(
         y_actual,
         patron_weekly,
@@ -1877,6 +2363,7 @@ if file_path is not None:
     entrenamiento_df = entrenamiento_df[
         entrenamiento_df['Anio'] >= 2025
     ].reset_index(drop=True)
+    entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
 
     prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
     entrenamiento_df['Produccion_ajustada'] = prod_train
@@ -2000,30 +2487,12 @@ if file_path is not None:
 
     # Mezcla dirigida con la proyeccion del patron (vectorizada)
     proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
-    n_blend = min(len(pred_vals), len(proy_vals))
-    if n_blend > 0:
-        pred_vals[:n_blend] = (
-            (1 - patron_prediction_weight) * pred_vals[:n_blend]
-            + patron_prediction_weight * proy_vals[:n_blend]
-        )
-        for i in range(13, n_blend):
-            ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
-            if np.isfinite(ref_peak) and ref_peak > 0:
-                ratio_ciclo = proy_vals[i] / ref_peak
-                if ratio_ciclo > 1.05:
-                    blend_ciclo = np.clip(
-                        0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
-                    pred_vals[i] = (
-                        (1 - blend_ciclo) * pred_vals[i]
-                        + blend_ciclo * proy_vals[i]
-                    )
-                elif ratio_ciclo < 0.95:
-                    blend_ciclo = np.clip(
-                        0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
-                    pred_vals[i] = (
-                        (1 - blend_ciclo) * pred_vals[i]
-                        + blend_ciclo * proy_vals[i]
-                    )
+    pred_vals = ajustar_prediccion_con_sensibilidad_picos(
+        pred_vals,
+        proy_vals,
+        eval_actual_df,
+        patron_prediction_weight
+    )
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
     # escalar las predicciones para igualarlas.
@@ -2106,8 +2575,8 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
-    st.write('Promedio semanal Tallos/m2 por anio')
-    st.dataframe(promedio_semanal_anual, width='stretch')
+    with st.expander('Promedio semanal Tallos/m2 por anio', expanded=False):
+        st.dataframe(promedio_semanal_anual, use_container_width=True)
 
     n_export = min(
         len(etiquetas_anio_semana),
@@ -2152,14 +2621,35 @@ if file_path is not None:
         (df_export['Error_abs'] / df_export['Produccion_real']) * 100,
         np.nan
     )
+
+    df_mse_patron = construir_tabla_mse_patron(
+        df_export,
+        selected_finca,
+        var_proy
+    )
+    df_mse_patron = resumir_indicador_promedio_2025_2026(df_mse_patron)
+    with st.expander(
+        'MSE entre calculo del modelo y patron seleccionado - individual',
+        expanded=True
+    ):
+        tabla_mse_visual = estilizar_tabla_mse_alerta(df_mse_patron)
+        st.dataframe(tabla_mse_visual,
+                     use_container_width=True, hide_index=True)
+    st.session_state['tabla_mse_patron'] = df_mse_patron
+
+    df_metricas_ind = excluir_ultimas_4_semanas(df_export)
+    pares_modelo_ind = df_metricas_ind[[
+        'Produccion_real', 'Estimado_modelo']].dropna()
+    pares_patron_ind = df_metricas_ind[[
+        'Produccion_real', 'Proy_patron']].dropna()
     mse_modelo = mean_squared_error(
-        df_export['Produccion_real'],
-        df_export['Estimado_modelo']
-    )
+        pares_modelo_ind['Produccion_real'],
+        pares_modelo_ind['Estimado_modelo']
+    ) if not pares_modelo_ind.empty else np.nan
     mse_patron = mean_squared_error(
-        df_export['Produccion_real'],
-        df_export['Proy_patron']
-    )
+        pares_patron_ind['Produccion_real'],
+        pares_patron_ind['Proy_patron']
+    ) if not pares_patron_ind.empty else np.nan
 
     buffer_individual = io.BytesIO()
     with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
@@ -2175,9 +2665,9 @@ if file_path is not None:
             {'metrica': 'MSE_proy_patron', 'valor': mse_patron},
             {'metrica': 'factor_correccion', 'valor': factor_correccion},
             {'metrica': 'MAE_modelo',
-                'valor': df_export['Error_abs'].mean()},
+                'valor': df_metricas_ind['Error_abs'].mean() if not df_metricas_ind.empty else np.nan},
             {'metrica': 'MAPE_modelo_pct',
-                'valor': df_export['Error_pct'].mean()},
+                'valor': df_metricas_ind['Error_pct'].mean() if not df_metricas_ind.empty else np.nan},
             {'metrica': 'variedad_proyectada', 'valor': var_proy}
         ]).to_excel(writer, sheet_name='Resumen', index=False)
 
