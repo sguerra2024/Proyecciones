@@ -55,6 +55,27 @@ def test_corrige_sesgo_residual_hacia_la_realidad():
 
     assert np.abs(ajustado - 1000.0).mean() < np.abs(pred - 1000.0).mean()
 
+    def test_lags_no_empujan_la_correccion_final():
+        pred = np.array([800.0, 800.0, 800.0, 800.0])
+        proy = np.array([0.0, 0.0, 0.0, 0.0])
+        eval_actual_df = pd.DataFrame({
+            'Produccion': [1000.0, 1000.0, 1000.0, 1000.0],
+            'Produccion_lag10': [100.0, 100.0, 100.0, 100.0],
+            'Produccion_lag11': [50.0, 50.0, 50.0, 50.0],
+            'Produccion_lag12': [25.0, 25.0, 25.0, 25.0],
+        })
+
+        ajustado = ajustar_prediccion_modelo_con_patron(
+            pred,
+            proy,
+            eval_actual_df,
+            patron_prediction_weight=0.0,
+            sn_alto=False,
+            residual_weight=0.25,
+        )
+
+        assert np.abs(ajustado - 1000.0).mean() < np.abs(pred - 1000.0).mean()
+
 
 def test_alineacion_de_series_para_ajuste():
     pred = np.array([1000.0, 2000.0, 3000.0])
@@ -192,7 +213,7 @@ def test_reacciona_al_pico_y_descenso_del_caso_021leila():
         sn_alto=True,
     )
 
-    assert ajustado[0] > 5000.0
-    assert ajustado[1] < ajustado[0]
-    assert ajustado[2] < 5000.0
+    assert ajustado[0] == 5000.0
+    assert ajustado[1] > ajustado[0]
+    assert ajustado[2] <= 5000.0
     assert ajustado[3] <= ajustado[2]

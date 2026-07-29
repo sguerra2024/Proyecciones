@@ -826,7 +826,7 @@ def _ajustar_patron_con_extremos_real_modulo(trabajo, refuerzo_tallos_m2=None):
     sn_alto = bool(pd.notna(sn_valor) and sn_valor > 13.0)
     factor_refuerzo_tallos = REFUERZO_TALLOS_M2 if refuerzo_tallos_m2 is None else float(
         refuerzo_tallos_m2)
-    factor_intensidad = 1.25 * intensidad_tallos if sn_alto else intensidad_tallos
+    factor_intensidad = 1.15 * intensidad_tallos if sn_alto else intensidad_tallos
 
     z_score = (produccion_real - media_real) / std_real
     mask_positiva_moderada = (z_score >= 1.0) & (z_score < 2.0)
@@ -1065,9 +1065,6 @@ def ajustar_prediccion_modelo_con_patron(
             return pd.to_numeric(df[col_name], errors='coerce').to_numpy(copy=False)
         return np.full(len(df), np.nan, dtype=float)
 
-    lag10_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag10')
-    lag11_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag11')
-    lag12_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag12')
     produccion_hist = _get_numeric_array(eval_actual_df, 'Produccion')
 
     media_hist = float(np.nanmean(produccion_hist)
@@ -1080,35 +1077,12 @@ def ajustar_prediccion_modelo_con_patron(
 
     for i in range(n_blend):
         valor_real = produccion_hist[i] if i < len(produccion_hist) else np.nan
-        lag10_ref = lag10_arr[i] if i < len(lag10_arr) else np.nan
-        lag11_ref = lag11_arr[i] if i < len(lag11_arr) else np.nan
-        lag12_ref = lag12_arr[i] if i < len(lag12_arr) else np.nan
-
-        referencia_lags = np.nanmean([
-            lag10_ref,
-            lag11_ref,
-            lag12_ref
-        ]) if any(np.isfinite(v) for v in [lag10_ref, lag11_ref, lag12_ref]) else np.nan
-
-        if np.isfinite(valor_real) and np.isfinite(referencia_lags):
-            delta = float(valor_real) - float(referencia_lags)
-            umbral = max(abs(float(referencia_lags)) * 0.15, 150.0)
-            if abs(delta) > umbral:
-                pred[i] = (1.0 - real_weight) * pred[i] + \
-                    real_weight * float(valor_real)
 
         if np.isfinite(valor_real) and np.isfinite(media_hist) and np.isfinite(std_hist) and std_hist > 0:
             z_score = (float(valor_real) - media_hist) / std_hist
-            if z_score > 1.0 and np.isfinite(referencia_lags):
-                factor_reduccion = np.clip(
-                    0.05 + 0.03 * (z_score - 1.0), 0.05, 0.18)
-                pred[i] = min(pred[i], referencia_lags *
-                              (1.0 - factor_reduccion))
-            elif z_score < -1.0 and np.isfinite(referencia_lags):
-                factor_positiva = np.clip(
-                    0.05 + 0.03 * (1.0 + z_score), 0.05, 0.18)
-                pred[i] = max(pred[i], referencia_lags *
-                              (1.0 + factor_positiva))
+            if abs(z_score) > 1.0:
+                pred[i] = (1.0 - real_weight) * pred[i] + \
+                    real_weight * float(valor_real)
 
         if np.isfinite(proy[i]) and patron_weight > 0:
             pred[i] = (1.0 - patron_weight) * pred[i] + patron_weight * proy[i]
@@ -2255,22 +2229,6 @@ if file_path is not None:
             (1.0 - peso_patron) * trabajo['Produccion']
             + peso_patron * trabajo['Produccion_patron']
         )
-        trabajo['Produccion_lag10'] = trabajo['Produccion'].shift(10)
-        trabajo['Produccion_lag10'] = trabajo['Produccion_lag10'].fillna(
-            trabajo['Produccion'].median()
-        )
-        trabajo['Produccion_lag11'] = trabajo['Produccion'].shift(11)
-        trabajo['Produccion_lag11'] = trabajo['Produccion_lag11'].fillna(
-            trabajo['Produccion'].median()
-        )
-        trabajo['Produccion_lag12'] = trabajo['Produccion'].shift(12)
-        trabajo['Produccion_lag13'] = trabajo['Produccion'].shift(13)
-        trabajo['Produccion_lag12'] = trabajo['Produccion_lag12'].fillna(
-            trabajo['Produccion'].median()
-        )
-        trabajo['Produccion_lag13'] = trabajo['Produccion_lag13'].fillna(
-            trabajo['Produccion'].median()
-        )
 
         sn_valor = calcular_sn_patron(trabajo)
         trabajo['sn_alto'] = (
@@ -2288,10 +2246,6 @@ if file_path is not None:
         'Produccion_patron_ponderado',
         'Incremento_tallos_patron',
         'Incremento_produccion_patron',
-        'Produccion_lag10',
-        'Produccion_lag11',
-        'Produccion_lag12',
-        'Produccion_lag13',
         'sn_alto',
     ]
 
