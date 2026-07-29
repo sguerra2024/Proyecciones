@@ -43,6 +43,8 @@ PICO_NO_CICLO_UMBRAL_PENDIENTE = float(
 PICO_NO_CICLO_MAX_BLEND = float(os.getenv("PICO_NO_CICLO_MAX_BLEND", "0.75"))
 MINIMOS_MERCADO_CANTIDAD = 3
 PICO_MERCADO_INCREMENTO = float(os.getenv("PICO_MERCADO_INCREMENTO", "0.12"))
+REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
+AJUSTE_RESIDUAL_WEIGHT = float(os.getenv("AJUSTE_RESIDUAL_WEIGHT", "0.22"))
 
 
 def obtener_valor_env(*claves):
@@ -548,7 +550,7 @@ def resumir_proyeccion_individual(var_proy, patron_seleccionado,
     ]].tail(8).copy()
     prompt = (
         'Analiza esta proyeccion agricola y responde en espanol SOLO con el '
-        'desempeno general. Entrega un unico parrafo corto (maximo 3 lineas), '
+        'desempeno de analisis. Entrega un unico parrafo corto (maximo 3 lineas), '
         'sin bullets, sin recomendaciones y sin detallar semanas especificas.\n\n'
         f'Variedad proyectada: {var_proy}\n'
         f'Patron seleccionado: {patron_seleccionado}\n'
@@ -728,6 +730,398 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'{pregunta_limpia}'
     )
     return consultar_llm(prompt)
+
+
+def alinear_series_para_ajuste(*series):
+    arrays = []
+    for serie in series:
+        if serie is None:
+            arrays.append(np.array([], dtype=float))
+            continue
+        arrays.append(np.asarray(serie, dtype=float))
+
+    longitudes = [len(arr) for arr in arrays]
+    if not longitudes:
+        return tuple()
+
+    n_common = min(longitudes) if longitudes else 0
+    return tuple(arr[:n_common].copy() if len(arr) else arr.copy() for arr in arrays)
+
+
+def _ajustar_patron_con_extremos_real_modulo(trabajo, refuerzo_tallos_m2=None):
+    if trabajo is None or trabajo.empty:
+        return trabajo
+    if 'Produccion' not in trabajo.columns or 'Produccion_patron' not in trabajo.columns:
+        return trabajo
+
+    produccion_real_base = np.asarray(
+        pd.to_numeric(trabajo['Produccion'], errors='coerce'),
+        dtype=float,
+    )
+    produccion_patron_base = np.asarray(
+        pd.to_numeric(trabajo['Produccion_patron'], errors='coerce'),
+        dtype=float,
+    )
+    n_common = min(len(produccion_real_base), len(produccion_patron_base))
+    produccion_real = produccion_real_base[:n_common] if n_common > 0 else np.array([
+    ], dtype=float)
+    produccion_patron = produccion_patron_base[:n_common] if n_common > 0 else np.array([
+    ], dtype=float)
+    mascara_real_valida = np.isfinite(produccion_real)
+    media_real = float(np.nanmean(produccion_real[mascara_real_valida])) if np.any(
+        mascara_real_valida) else np.nan
+    std_real = float(np.nanstd(produccion_real[mascara_real_valida], ddof=0)) if np.any(
+        mascara_real_valida) else np.nan
+
+    if not np.isfinite(media_real) or not np.isfinite(std_real) or std_real <= 0:
+        return trabajo
+
+    anio_valores = pd.to_numeric(trabajo.get(
+        'Anio', pd.Series(np.nan)), errors='coerce')
+    sn_valor = np.nan
+    intensidad_tallos = 1.0
+    if anio_valores.notna().any():
+        mse_2025 = np.nan
+        mse_2026 = np.nan
+        for anio_ref in [2025, 2026]:
+            mask_anio = anio_valores == anio_ref
+            if not mask_anio.any():
+                continue
+            mse_anio = np.mean(
+                np.abs(
+                    produccion_real_base[mask_anio.to_numpy()].astype(float) -
+                    produccion_patron_base[mask_anio.to_numpy()].astype(float)
+                )
+            )
+            if anio_ref == 2025:
+                mse_2025 = mse_anio
+            else:
+                mse_2026 = mse_anio
+        if pd.notna(mse_2025) and pd.notna(mse_2026) and mse_2025 != mse_2026:
+            diferencia = mse_2026 - mse_2025
+            if diferencia != 0:
+                mse_equivalente = float(abs(diferencia))
+                sn_valor = float(np.log10((mse_equivalente ** 2)))
+
+        if 'Tallos/m2' in trabajo.columns and 'Tallos_m2_patron' in trabajo.columns:
+            tallos_real = pd.to_numeric(trabajo['Tallos/m2'], errors='coerce')
+            tallos_patron = pd.to_numeric(
+                trabajo['Tallos_m2_patron'], errors='coerce')
+            tallos_2025_real = tallos_real[anio_valores == 2025]
+            tallos_2026_real = tallos_real[anio_valores == 2026]
+            tallos_2025_patron = tallos_patron[anio_valores == 2025]
+            tallos_2026_patron = tallos_patron[anio_valores == 2026]
+            if not tallos_2025_real.empty and not tallos_2026_real.empty:
+                media_2025_real = float(np.nanmean(tallos_2025_real))
+                media_2026_real = float(np.nanmean(tallos_2026_real))
+                if np.isfinite(media_2025_real) and np.isfinite(media_2026_real):
+                    delta_tallos = media_2026_real - media_2025_real
+                    if delta_tallos > 0:
+                        intensidad_tallos = 1.0 + \
+                            min(delta_tallos / max(media_2025_real, 1.0), 0.6)
+                    elif delta_tallos < 0:
+                        intensidad_tallos = max(
+                            0.6, 1.0 + delta_tallos / max(abs(media_2025_real), 1.0))
+
+    sn_alto = bool(pd.notna(sn_valor) and sn_valor > 13.0)
+    factor_refuerzo_tallos = REFUERZO_TALLOS_M2 if refuerzo_tallos_m2 is None else float(
+        refuerzo_tallos_m2)
+    factor_intensidad = 1.25 * intensidad_tallos if sn_alto else intensidad_tallos
+
+    z_score = (produccion_real - media_real) / std_real
+    mask_positiva_moderada = (z_score >= 1.0) & (z_score < 2.0)
+    mask_positiva_alta = z_score >= 2.0
+    mask_negativa_moderada = (z_score <= -1.0) & (z_score > -2.0)
+    mask_negativa_alta = z_score <= -2.0
+    if not any([
+        mask_positiva_moderada.any(),
+        mask_positiva_alta.any(),
+        mask_negativa_moderada.any(),
+        mask_negativa_alta.any()
+    ]):
+        return trabajo
+
+    patron_ajustado = produccion_patron.copy()
+    patron_ajustado_full = produccion_patron_base.copy()
+    fuerza_serie = np.zeros(len(z_score), dtype=float)
+
+    if mask_positiva_moderada.any():
+        fuerza_serie[mask_positiva_moderada] = np.clip(
+            (0.12 + 0.08 *
+             (z_score[mask_positiva_moderada] - 1.0)) * factor_intensidad,
+            0.12,
+            0.24 + (0.06 if sn_alto else 0.0)
+        )
+    if mask_positiva_alta.any():
+        fuerza_serie[mask_positiva_alta] = np.clip(
+            (0.25 + 0.10 *
+             (z_score[mask_positiva_alta] - 2.0)) * factor_intensidad,
+            0.25,
+            0.45 + (0.08 if sn_alto else 0.0)
+        )
+    if mask_negativa_moderada.any():
+        fuerza_serie[mask_negativa_moderada] = np.clip(
+            (0.10 + 0.05 *
+             (abs(z_score[mask_negativa_moderada]) - 1.0)) * factor_intensidad,
+            0.10,
+            0.22 + (0.06 if sn_alto else 0.0)
+        )
+    if mask_negativa_alta.any():
+        fuerza_serie[mask_negativa_alta] = np.clip(
+            (0.22 + 0.10 *
+             (abs(z_score[mask_negativa_alta]) - 2.0)) * factor_intensidad,
+            0.22,
+            0.40 + (0.08 if sn_alto else 0.0)
+        )
+
+    if 'Tallos/m2' in trabajo.columns and 'Tallos_m2_patron' in trabajo.columns:
+        tallos_real = pd.to_numeric(
+            trabajo['Tallos/m2'], errors='coerce').to_numpy(dtype=float)
+        tallos_patron = pd.to_numeric(
+            trabajo['Tallos_m2_patron'], errors='coerce').to_numpy(dtype=float)
+        mascara_tallos_en_alza = np.isfinite(
+            tallos_real) & np.isfinite(tallos_patron)
+        if mascara_tallos_en_alza.any():
+            delta_tallos = tallos_real[mascara_tallos_en_alza] - \
+                tallos_patron[mascara_tallos_en_alza]
+            if np.any(delta_tallos > 0):
+                factor_refuerzo = factor_refuerzo_tallos
+                fuerza_serie[mascara_tallos_en_alza] = np.clip(
+                    fuerza_serie[mascara_tallos_en_alza] + factor_refuerzo * np.clip(delta_tallos / np.maximum(
+                        np.abs(tallos_patron[mascara_tallos_en_alza]), 1.0), 0.0, 0.60),
+                    0.0,
+                    0.85
+                )
+
+    mascara_ajuste = fuerza_serie > 0
+    if mascara_ajuste.any():
+        if sn_alto:
+            patron_ajustado[mascara_ajuste] = produccion_real[mascara_ajuste]
+        else:
+            patron_ajustado[mascara_ajuste] = (
+                (1.0 - fuerza_serie[mascara_ajuste]) *
+                patron_ajustado[mascara_ajuste]
+                + fuerza_serie[mascara_ajuste] *
+                produccion_real[mascara_ajuste]
+            )
+
+    if n_common > 0:
+        patron_ajustado_full[:n_common] = patron_ajustado
+
+    factor_descenso = 0.12 + (0.06 if sn_alto else 0.0)
+    for idx in np.where(mask_positiva_alta)[0]:
+        for offset in [10, 11, 12]:
+            future_idx = idx + offset
+            if future_idx < len(patron_ajustado):
+                patron_ajustado[future_idx] = min(
+                    patron_ajustado[future_idx],
+                    patron_ajustado[idx] * (1.0 - factor_descenso)
+                )
+
+    for idx in np.where(mask_positiva_moderada)[0]:
+        for offset in [10, 11, 12]:
+            future_idx = idx + offset
+            if future_idx < len(patron_ajustado):
+                patron_ajustado[future_idx] = min(
+                    patron_ajustado[future_idx],
+                    patron_ajustado[idx] *
+                    (1.0 - (0.08 + (0.04 if sn_alto else 0.0)))
+                )
+
+    trabajo = trabajo.copy()
+    trabajo['Produccion_patron'] = patron_ajustado_full
+    trabajo['porcentaje_ajuste_modelo'] = np.nan
+
+    if 'Tallos/m2' in trabajo.columns and 'Tallos_m2_patron' in trabajo.columns:
+        tallos_real_full = np.asarray(
+            pd.to_numeric(trabajo['Tallos/m2'], errors='coerce'),
+            dtype=float,
+        )
+        tallos_patron_full = np.asarray(
+            pd.to_numeric(trabajo['Tallos_m2_patron'], errors='coerce'),
+            dtype=float,
+        )
+        tallos_real = tallos_real_full[:n_common] if n_common > 0 else np.array(
+            [], dtype=float)
+        tallos_patron = tallos_patron_full[:n_common] if n_common > 0 else np.array([
+        ], dtype=float)
+        tallos_ajustados = tallos_patron.copy()
+        tallos_ajustados_full = tallos_patron_full.copy()
+        if mascara_ajuste.any():
+            if sn_alto:
+                tallos_ajustados[mascara_ajuste] = tallos_real[mascara_ajuste]
+            else:
+                tallos_ajustados[mascara_ajuste] = (
+                    (1.0 - fuerza_serie[mascara_ajuste]) *
+                    tallos_ajustados[mascara_ajuste]
+                    + fuerza_serie[mascara_ajuste] *
+                    tallos_real[mascara_ajuste]
+                )
+        factor_descenso_tallos = 0.12 + (0.06 if sn_alto else 0.0)
+        for idx in np.where(mask_positiva_alta)[0]:
+            for offset in [10, 11, 12]:
+                future_idx = idx + offset
+                if future_idx < len(tallos_ajustados):
+                    tallos_ajustados[future_idx] = min(
+                        tallos_ajustados[future_idx],
+                        tallos_ajustados[idx] * (1.0 - factor_descenso_tallos)
+                    )
+        for idx in np.where(mask_positiva_moderada)[0]:
+            for offset in [10, 11, 12]:
+                future_idx = idx + offset
+                if future_idx < len(tallos_ajustados):
+                    tallos_ajustados[future_idx] = min(
+                        tallos_ajustados[future_idx],
+                        tallos_ajustados[idx] *
+                        (1.0 - (0.08 + (0.04 if sn_alto else 0.0)))
+                    )
+        tallos_ajustados_full[:n_common] = tallos_ajustados
+        trabajo['Tallos_m2_patron'] = tallos_ajustados_full
+
+    if n_common > 0:
+        porcentaje_ajuste_full = np.full(len(trabajo), np.nan, dtype=float)
+        porcentaje_base = np.abs(produccion_patron - produccion_real)
+        porcentaje_base = np.where(
+            np.isfinite(produccion_patron) & np.isfinite(produccion_real),
+            (porcentaje_base / np.maximum(np.abs(produccion_real), 1.0)) * 100.0,
+            np.nan,
+        )
+
+        factor_tallos = np.ones(n_common, dtype=float)
+        if 'Tallos/m2' in trabajo.columns and 'Tallos_m2_patron' in trabajo.columns:
+            tallos_real_full = np.asarray(
+                pd.to_numeric(trabajo['Tallos/m2'], errors='coerce'),
+                dtype=float,
+            )
+            tallos_patron_full = np.asarray(
+                pd.to_numeric(trabajo['Tallos_m2_patron'], errors='coerce'),
+                dtype=float,
+            )
+            tallos_real = tallos_real_full[:n_common] if n_common > 0 else np.array(
+                [], dtype=float)
+            tallos_patron = tallos_patron_full[:n_common] if n_common > 0 else np.array([
+            ], dtype=float)
+            anio_valores = pd.to_numeric(trabajo.get(
+                'Anio', pd.Series(np.nan)), errors='coerce')
+            if len(anio_valores) == len(tallos_real):
+                anio_truncado = np.asarray(anio_valores, dtype=float)
+            elif len(anio_valores) > 0 and len(tallos_real) > 0:
+                n_match = min(len(anio_valores), len(tallos_real))
+                anio_truncado = np.asarray(
+                    anio_valores.iloc[:n_match], dtype=float)
+                if len(anio_truncado) < len(tallos_real):
+                    anio_truncado = np.resize(anio_truncado, len(tallos_real))
+            else:
+                anio_truncado = np.full(len(tallos_real), np.nan, dtype=float)
+            tallos_2025_real = tallos_real[anio_truncado == 2025]
+            tallos_2026_real = tallos_real[anio_truncado == 2026]
+            if tallos_2025_real.size and tallos_2026_real.size:
+                media_2025_real = float(np.nanmean(tallos_2025_real))
+                media_2026_real = float(np.nanmean(tallos_2026_real))
+                if np.isfinite(media_2025_real) and np.isfinite(media_2026_real):
+                    delta_tallos = media_2026_real - media_2025_real
+                    if delta_tallos > 0:
+                        factor_tallos = 1.0 + np.clip(
+                            delta_tallos / max(abs(media_2025_real), 1.0),
+                            0.0,
+                            0.6,
+                        )
+                    elif delta_tallos < 0:
+                        factor_tallos = np.maximum(
+                            0.6,
+                            1.0 + delta_tallos /
+                            max(abs(media_2025_real), 1.0),
+                        )
+
+        porcentaje_ajuste = np.clip(
+            porcentaje_base * factor_tallos, 0.0, 500.0)
+        porcentaje_ajuste_full[:n_common] = porcentaje_ajuste
+        trabajo['porcentaje_ajuste_modelo'] = porcentaje_ajuste_full
+
+    return trabajo
+
+
+ajustar_patron_con_extremos_real = _ajustar_patron_con_extremos_real_modulo
+
+
+def ajustar_prediccion_modelo_con_patron(
+    pred_vals,
+    proy_vals,
+    eval_actual_df,
+    patron_prediction_weight=0.0,
+    sn_alto=False,
+    residual_weight=0.0
+):
+    pred = np.array(pred_vals, dtype=float, copy=True)
+    proy = np.array(proy_vals, dtype=float, copy=True)
+    n_blend = min(len(pred), len(proy))
+    if n_blend <= 0:
+        return pred
+
+    def _get_numeric_array(df, col_name):
+        if df is None or df.empty:
+            return np.full(0, np.nan, dtype=float)
+        if col_name in df.columns:
+            return pd.to_numeric(df[col_name], errors='coerce').to_numpy(copy=False)
+        return np.full(len(df), np.nan, dtype=float)
+
+    lag10_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag10')
+    lag11_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag11')
+    lag12_arr = _get_numeric_array(eval_actual_df, 'Produccion_lag12')
+    produccion_hist = _get_numeric_array(eval_actual_df, 'Produccion')
+
+    media_hist = float(np.nanmean(produccion_hist)
+                       ) if produccion_hist.size else np.nan
+    std_hist = float(np.nanstd(produccion_hist, ddof=0)
+                     ) if produccion_hist.size else np.nan
+    patron_weight = float(np.clip(patron_prediction_weight, 0.0, 0.35))
+    real_weight = 0.30 if sn_alto else 0.16
+    residual_weight = float(np.clip(residual_weight, 0.0, 0.60))
+
+    for i in range(n_blend):
+        valor_real = produccion_hist[i] if i < len(produccion_hist) else np.nan
+        lag10_ref = lag10_arr[i] if i < len(lag10_arr) else np.nan
+        lag11_ref = lag11_arr[i] if i < len(lag11_arr) else np.nan
+        lag12_ref = lag12_arr[i] if i < len(lag12_arr) else np.nan
+
+        referencia_lags = np.nanmean([
+            lag10_ref,
+            lag11_ref,
+            lag12_ref
+        ]) if any(np.isfinite(v) for v in [lag10_ref, lag11_ref, lag12_ref]) else np.nan
+
+        if np.isfinite(valor_real) and np.isfinite(referencia_lags):
+            delta = float(valor_real) - float(referencia_lags)
+            umbral = max(abs(float(referencia_lags)) * 0.15, 150.0)
+            if abs(delta) > umbral:
+                pred[i] = (1.0 - real_weight) * pred[i] + \
+                    real_weight * float(valor_real)
+
+        if np.isfinite(valor_real) and np.isfinite(media_hist) and np.isfinite(std_hist) and std_hist > 0:
+            z_score = (float(valor_real) - media_hist) / std_hist
+            if z_score > 1.0 and np.isfinite(referencia_lags):
+                factor_reduccion = np.clip(
+                    0.05 + 0.03 * (z_score - 1.0), 0.05, 0.18)
+                pred[i] = min(pred[i], referencia_lags *
+                              (1.0 - factor_reduccion))
+            elif z_score < -1.0 and np.isfinite(referencia_lags):
+                factor_positiva = np.clip(
+                    0.05 + 0.03 * (1.0 + z_score), 0.05, 0.18)
+                pred[i] = max(pred[i], referencia_lags *
+                              (1.0 + factor_positiva))
+
+        if np.isfinite(proy[i]) and patron_weight > 0:
+            pred[i] = (1.0 - patron_weight) * pred[i] + patron_weight * proy[i]
+
+    if residual_weight > 0 and produccion_hist.size:
+        n_residual = min(len(pred), len(produccion_hist))
+        if n_residual > 0:
+            pred[:n_residual] = (
+                (1.0 - residual_weight) * pred[:n_residual]
+                + residual_weight * produccion_hist[:n_residual]
+            )
+
+    return pred
 
 
 models_dir = Path(__file__).with_name("modelos")
@@ -1349,28 +1743,30 @@ if file_path is not None:
 
     def seleccionar_patron(arr_list, var_proy):
         var_obj = str(var_proy).strip()
-        var_obj_norm = var_obj.upper()
-        base_obj = nombre_base_variedad(var_obj)
-        candidatos = [
-            str(item[0][0]).strip()
-            for item in arr_list
-            if str(item[0][0]).strip().upper() != var_obj_norm
-        ]
+        var_obj_norm = nombre_base_variedad(var_obj)
+
+        candidatos = []
+        for item in arr_list:
+            if not item:
+                continue
+            raw_name = item[0]
+            if isinstance(raw_name, tuple):
+                raw_name = raw_name[0]
+            nombre_candidato = nombre_base_variedad(raw_name)
+            if nombre_candidato and nombre_candidato != var_obj_norm:
+                candidatos.append(str(raw_name).strip())
+
         if len(candidatos) == 0:
+            if arr_list:
+                primer_item = arr_list[0]
+                if isinstance(primer_item, tuple) and len(primer_item) > 0:
+                    raw_name = primer_item[0]
+                    if isinstance(raw_name, tuple):
+                        raw_name = raw_name[0]
+                    return str(raw_name).strip()
             raise ValueError('No hay suficientes patrones para comparar.')
 
-        # Regla para ambos flujos: priorizar misma familia cuando exista.
-        for candidato in candidatos:
-            if nombre_base_variedad(candidato) == base_obj and candidato.strip().upper() != var_obj_norm:
-                return candidato
-
-        # Respaldo defensivo para evitar auto-seleccion por cualquier inconsistencia.
-        for candidato in candidatos:
-            if candidato.strip().upper() != var_obj_norm:
-                return candidato
-
-        raise ValueError(
-            'No hay un patron distinto de la variedad proyectada.')
+        return candidatos[0]
 
     def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy):
         # Replica exacta de la comparacion del flujo individual para mantener
@@ -1387,7 +1783,42 @@ if file_path is not None:
         for name, group in df_patrones.groupby(['Bloque&Varid']):
             try:
                 mse = np.mean(abs(group['Tallos/m2'].to_numpy() - arr_2))
-                arr_list.append((name, mse))
+                patron_weekly = construir_patron_semanal(group)
+                trabajo = (
+                    df_variedad_objetivo[[
+                        'Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+                    .dropna()
+                    .reset_index(drop=True)
+                )
+                trabajo['Anio'] = pd.to_numeric(
+                    trabajo['Anio'], errors='coerce')
+                trabajo['Semana'] = pd.to_numeric(
+                    trabajo['Semana'], errors='coerce')
+                trabajo['Tallos/m2'] = pd.to_numeric(
+                    trabajo['Tallos/m2'], errors='coerce')
+                trabajo['Produccion'] = pd.to_numeric(
+                    trabajo['Produccion'], errors='coerce')
+                trabajo = trabajo.dropna(
+                    subset=['Anio', 'Semana', 'Tallos/m2', 'Produccion']
+                )
+                trabajo['Anio'] = trabajo['Anio'].astype(int)
+                trabajo['Semana'] = trabajo['Semana'].astype(int)
+                trabajo = trabajo.sort_values(
+                    ['Anio', 'Semana']).reset_index(drop=True)
+                trabajo = trabajo.merge(
+                    patron_weekly,
+                    on=['Anio', 'Semana'],
+                    how='left'
+                )
+                trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
+                    trabajo['Tallos/m2']
+                )
+                trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
+                    trabajo['Produccion']
+                )
+                sn_valor, mse_equivalente = calcular_sn_y_mse_equivalente(
+                    trabajo)
+                arr_list.append((name, mse, sn_valor, mse_equivalente))
             except Exception:
                 continue
 
@@ -1395,7 +1826,30 @@ if file_path is not None:
             raise ValueError('No hay suficientes patrones para comparar.')
 
         arr_list.sort(key=lambda x: x[1])
-        return seleccionar_patron(arr_list, var_proy)
+        patron_seleccionado = seleccionar_patron(arr_list, var_proy)
+        sn_seleccionado = next(
+            (item[2] for item in arr_list if str(
+                item[0]).strip().upper() == patron_seleccionado.upper()),
+            np.nan
+        )
+        mse_equivalente_seleccionado = next(
+            (item[3] for item in arr_list if str(
+                item[0]).strip().upper() == patron_seleccionado.upper()),
+            np.nan
+        )
+        usar_patron = not (
+            (
+                pd.notna(sn_seleccionado)
+                and np.isfinite(sn_seleccionado)
+                and sn_seleccionado > 13.0
+            )
+            or (
+                pd.notna(mse_equivalente_seleccionado)
+                and np.isfinite(mse_equivalente_seleccionado)
+                and mse_equivalente_seleccionado > 10**6.5
+            )
+        )
+        return patron_seleccionado, usar_patron
 
     def construir_patron_semanal(df_patron_base):
         patron_weekly = df_patron_base[[
@@ -1655,7 +2109,7 @@ if file_path is not None:
 
         def estilo_sn(valor):
             valor_num = pd.to_numeric(valor, errors='coerce')
-            if pd.notna(valor_num) and valor_num <= -150:
+            if pd.notna(valor_num) and valor_num > 13:
                 return 'background-color: #FFA500; color: #000000; font-weight: 700;'
             return ''
 
@@ -1696,124 +2150,61 @@ if file_path is not None:
         ).reset_index(drop=True)
         return resumen
 
-    def ajustar_patron_con_extremos_real(trabajo):
+    def calcular_sn_y_mse_equivalente(trabajo):
         if trabajo is None or trabajo.empty:
-            return trabajo
+            return np.nan, np.nan
         if 'Produccion' not in trabajo.columns or 'Produccion_patron' not in trabajo.columns:
-            return trabajo
+            return np.nan, np.nan
 
         produccion_real = pd.to_numeric(trabajo['Produccion'], errors='coerce')
         produccion_patron = pd.to_numeric(
             trabajo['Produccion_patron'], errors='coerce')
-        media_real = float(produccion_real.mean()
-                           ) if produccion_real.notna().any() else np.nan
-        std_real = float(produccion_real.std(ddof=0)
-                         ) if produccion_real.notna().any() else np.nan
+        anio_valores = pd.to_numeric(
+            trabajo.get('Anio', pd.Series(np.nan)), errors='coerce')
 
-        if not np.isfinite(media_real) or not np.isfinite(std_real) or std_real <= 0:
-            return trabajo
+        if not anio_valores.notna().any():
+            return np.nan, np.nan
 
-        z_score = (produccion_real - media_real) / std_real
-        mask_positiva_moderada = (z_score >= 1.0) & (z_score < 2.0)
-        mask_positiva_alta = z_score >= 2.0
-        mask_negativa_moderada = (z_score <= -1.0) & (z_score > -2.0)
-        mask_negativa_alta = z_score <= -2.0
-        if not any([
-            mask_positiva_moderada.any(),
-            mask_positiva_alta.any(),
-            mask_negativa_moderada.any(),
-            mask_negativa_alta.any()
-        ]):
-            return trabajo
-
-        patron_ajustado = produccion_patron.copy()
-        fuerza_serie = np.zeros(len(z_score), dtype=float)
-
-        if mask_positiva_moderada.any():
-            fuerza_serie[mask_positiva_moderada] = np.clip(
-                0.12 + 0.08 * (z_score[mask_positiva_moderada] - 1.0),
-                0.12,
-                0.24
-            )
-        if mask_positiva_alta.any():
-            fuerza_serie[mask_positiva_alta] = np.clip(
-                0.25 + 0.10 * (z_score[mask_positiva_alta] - 2.0),
-                0.25,
-                0.45
-            )
-        if mask_negativa_moderada.any():
-            fuerza_serie[mask_negativa_moderada] = np.clip(
-                0.10 + 0.05 * (abs(z_score[mask_negativa_moderada]) - 1.0),
-                0.10,
-                0.22
-            )
-        if mask_negativa_alta.any():
-            fuerza_serie[mask_negativa_alta] = np.clip(
-                0.22 + 0.10 * (abs(z_score[mask_negativa_alta]) - 2.0),
-                0.22,
-                0.40
-            )
-
-        mascara_ajuste = fuerza_serie > 0
-        if mascara_ajuste.any():
-            patron_ajustado[mascara_ajuste] = (
-                (1.0 - fuerza_serie[mascara_ajuste]) *
-                patron_ajustado[mascara_ajuste]
-                + fuerza_serie[mascara_ajuste] *
-                produccion_real[mascara_ajuste]
-            )
-
-        for idx in np.where(mask_positiva_alta)[0]:
-            for offset in [10, 11, 12]:
-                future_idx = idx + offset
-                if future_idx < len(patron_ajustado):
-                    patron_ajustado[future_idx] = min(
-                        patron_ajustado[future_idx],
-                        patron_ajustado[idx] * (1.0 - 0.12)
-                    )
-
-        for idx in np.where(mask_positiva_moderada)[0]:
-            for offset in [10, 11, 12]:
-                future_idx = idx + offset
-                if future_idx < len(patron_ajustado):
-                    patron_ajustado[future_idx] = min(
-                        patron_ajustado[future_idx],
-                        patron_ajustado[idx] * (1.0 - 0.08)
-                    )
-
-        trabajo['Produccion_patron'] = patron_ajustado
-
-        if 'Tallos/m2' in trabajo.columns and 'Tallos_m2_patron' in trabajo.columns:
-            tallos_real = pd.to_numeric(trabajo['Tallos/m2'], errors='coerce')
-            tallos_patron = pd.to_numeric(
-                trabajo['Tallos_m2_patron'], errors='coerce')
-            tallos_ajustados = tallos_patron.copy()
-            if mascara_ajuste.any():
-                tallos_ajustados[mascara_ajuste] = (
-                    (1.0 - fuerza_serie[mascara_ajuste]) *
-                    tallos_ajustados[mascara_ajuste]
-                    + fuerza_serie[mascara_ajuste] *
-                    tallos_real[mascara_ajuste]
+        mse_2025 = np.nan
+        mse_2026 = np.nan
+        for anio_ref in [2025, 2026]:
+            mask_anio = anio_valores == anio_ref
+            if not mask_anio.any():
+                continue
+            mse_anio = np.mean(
+                np.abs(
+                    produccion_real[mask_anio].to_numpy() -
+                    produccion_patron[mask_anio].to_numpy()
                 )
-            for idx in np.where(mask_positiva_alta)[0]:
-                for offset in [10, 11, 12]:
-                    future_idx = idx + offset
-                    if future_idx < len(tallos_ajustados):
-                        tallos_ajustados[future_idx] = min(
-                            tallos_ajustados[future_idx],
-                            tallos_ajustados[idx] * (1.0 - 0.12)
-                        )
-            for idx in np.where(mask_positiva_moderada)[0]:
-                for offset in [10, 11, 12]:
-                    future_idx = idx + offset
-                    if future_idx < len(tallos_ajustados):
-                        tallos_ajustados[future_idx] = min(
-                            tallos_ajustados[future_idx],
-                            tallos_ajustados[idx] * (1.0 - 0.08)
-                        )
-            trabajo['Tallos_m2_patron'] = tallos_ajustados
+            )
+            if anio_ref == 2025:
+                mse_2025 = mse_anio
+            else:
+                mse_2026 = mse_anio
 
-        return trabajo
+        if pd.notna(mse_2025) and pd.notna(mse_2026) and mse_2025 != mse_2026:
+            diferencia = mse_2026 - mse_2025
+            if diferencia != 0:
+                mse_equivalente = float(abs(diferencia))
+                sn_valor = float(np.log10((mse_equivalente ** 2)))
+                return sn_valor, mse_equivalente
+
+        return np.nan, np.nan
+
+    def calcular_sn_patron(trabajo):
+        sn_valor, _ = calcular_sn_y_mse_equivalente(trabajo)
+        return sn_valor
+
+    def usar_produccion_patron_como_real(trabajo):
+        sn_valor, mse_equivalente = calcular_sn_y_mse_equivalente(trabajo)
+        if pd.notna(sn_valor) and np.isfinite(sn_valor) and sn_valor > 13.0:
+            return True
+        if pd.notna(mse_equivalente) and np.isfinite(mse_equivalente):
+            return bool(mse_equivalente > 10**6.5)
+        return _ajustar_patron_con_extremos_real_modulo
+
+    def ajustar_patron_con_extremos_real(trabajo):
+        return _ajustar_patron_con_extremos_real_modulo(trabajo)
 
     def preparar_dataset_modelo(df_variedad_base, patron_weekly, patron_feature_weight):
         trabajo = (
@@ -1851,13 +2242,18 @@ if file_path is not None:
         trabajo['Incremento_produccion_patron'] = trabajo[
             'Incremento_produccion_patron'
         ].fillna(0.0)
+        peso_patron = 0.4
+        if np.isfinite(patron_feature_weight):
+            peso_patron = float(np.clip(patron_feature_weight, 0.0, 1.0))
+        if peso_patron <= 0:
+            peso_patron = 0.0
         trabajo['Tallos_m2_patron_ponderado'] = (
-            0.6 * trabajo['Tallos/m2']
-            + 0.4 * trabajo['Tallos_m2_patron']
+            (1.0 - peso_patron) * trabajo['Tallos/m2']
+            + peso_patron * trabajo['Tallos_m2_patron']
         )
         trabajo['Produccion_patron_ponderado'] = (
-            0.6 * trabajo['Produccion']
-            + 0.4 * trabajo['Produccion_patron']
+            (1.0 - peso_patron) * trabajo['Produccion']
+            + peso_patron * trabajo['Produccion_patron']
         )
         trabajo['Produccion_lag10'] = trabajo['Produccion'].shift(10)
         trabajo['Produccion_lag10'] = trabajo['Produccion_lag10'].fillna(
@@ -1875,30 +2271,15 @@ if file_path is not None:
         trabajo['Produccion_lag13'] = trabajo['Produccion_lag13'].fillna(
             trabajo['Produccion'].median()
         )
-        trabajo['Cambio_produccion_vs_lag10'] = (
-            trabajo['Produccion'] - trabajo['Produccion_lag10']
-        ).fillna(0.0)
-        trabajo['Cambio_produccion_ultimas_3'] = (
-            trabajo['Produccion'].diff(3).fillna(0.0)
+
+        sn_valor = calcular_sn_patron(trabajo)
+        trabajo['sn_alto'] = (
+            1.0 if (
+                pd.notna(sn_valor)
+                and np.isfinite(sn_valor)
+                and sn_valor > 13.0
+            ) else 0.0
         )
-        trabajo['Cambio_relativo_vs_lag10'] = (
-            (trabajo['Produccion'] - trabajo['Produccion_lag10']) /
-            trabajo['Produccion_lag10'].replace(0, np.nan)
-        ).fillna(0.0)
-        trabajo['Pendiente_ultimas_3'] = (
-            trabajo['Produccion'].diff(3).fillna(0.0) / 3.0
-        )
-        trabajo['Promedio_picos_12_13'] = (
-            (trabajo['Produccion_lag12'] + trabajo['Produccion_lag13']) / 2.0
-        )
-        trabajo['Relacion_valle_vs_pico_12_13'] = (
-            trabajo['Produccion'] /
-            trabajo['Promedio_picos_12_13'].replace(0, np.nan)
-        ).fillna(1.0)
-        trabajo['Cambio_vs_promedio_picos_12_13'] = (
-            trabajo['Produccion'] - trabajo['Promedio_picos_12_13']
-        ).fillna(0.0)
-        trabajo['Semana_ciclo_12'] = ((trabajo['Semana'] - 1) % 20) + 1
         return trabajo
 
     columnas_modelo = [
@@ -1911,195 +2292,32 @@ if file_path is not None:
         'Produccion_lag11',
         'Produccion_lag12',
         'Produccion_lag13',
+        'sn_alto',
     ]
 
     def ajustar_prediccion_con_sensibilidad_picos(
         pred_vals,
         proy_vals,
         eval_actual_df,
-        patron_prediction_weight
+        patron_prediction_weight,
+        sn_alto=False,
+        residual_weight=0.0
     ):
-        n_blend = min(len(pred_vals), len(proy_vals))
-        if n_blend <= 0:
-            return pred_vals
-
-        pred_vals[:n_blend] = (
-            (1 - patron_prediction_weight) * pred_vals[:n_blend]
-            + patron_prediction_weight * proy_vals[:n_blend]
+        return ajustar_prediccion_modelo_con_patron(
+            pred_vals,
+            proy_vals,
+            eval_actual_df,
+            patron_prediction_weight=patron_prediction_weight,
+            sn_alto=sn_alto,
+            residual_weight=residual_weight,
         )
-
-        rel_vs_lag10_arr = pd.to_numeric(
-            eval_actual_df['Cambio_relativo_vs_lag10'], errors='coerce'
-        ).to_numpy(copy=False)
-        pendiente_3_arr = pd.to_numeric(
-            eval_actual_df['Pendiente_ultimas_3'], errors='coerce'
-        ).to_numpy(copy=False)
-        cambio_vs_picos_arr = pd.to_numeric(
-            eval_actual_df['Cambio_vs_promedio_picos_12_13'], errors='coerce'
-        ).to_numpy(copy=False)
-        lag10_arr = pd.to_numeric(
-            eval_actual_df['Produccion_lag10'], errors='coerce'
-        ).to_numpy(copy=False)
-        lag11_arr = pd.to_numeric(
-            eval_actual_df['Produccion_lag11'], errors='coerce'
-        ).to_numpy(copy=False)
-        lag12_arr = pd.to_numeric(
-            eval_actual_df['Produccion_lag12'], errors='coerce'
-        ).to_numpy(copy=False)
-
-        produccion_hist = pd.to_numeric(
-            eval_actual_df['Produccion'], errors='coerce'
-        )
-        produccion_hist_arr = produccion_hist.to_numpy(copy=False)
-        media_hist = float(np.nanmean(produccion_hist_arr)
-                           ) if produccion_hist_arr.size else np.nan
-        std_hist = float(np.nanstd(produccion_hist_arr, ddof=0)
-                         ) if produccion_hist_arr.size else np.nan
-        minimos_hist = produccion_hist.dropna().nsmallest(MINIMOS_MERCADO_CANTIDAD)
-        umbral_minimos = np.nan
-        piso_compromiso_mercado = np.nan
-        if len(minimos_hist) == MINIMOS_MERCADO_CANTIDAD:
-            umbral_minimos = float(minimos_hist.min())
-            idx_ultima_minima = int(max(minimos_hist.index.tolist()))
-            ultima_minima = pd.to_numeric(
-                eval_actual_df.loc[idx_ultima_minima, 'Produccion'],
-                errors='coerce'
-            )
-            if pd.notna(ultima_minima):
-                piso_compromiso_mercado = float(
-                    ultima_minima * (1.0 + PICO_MERCADO_INCREMENTO)
-                )
-
-        for i in range(n_blend):
-            ratio_ciclo = np.nan
-            if i >= 13:
-                ref_peak = np.nanmean([proy_vals[i - 12], proy_vals[i - 13]])
-                if np.isfinite(ref_peak) and ref_peak > 0:
-                    ratio_ciclo = proy_vals[i] / ref_peak
-                    if ratio_ciclo > 1.05:
-                        blend_ciclo = np.clip(
-                            0.45 + 0.25 * (ratio_ciclo - 1.0), 0.45, 0.85)
-                        pred_vals[i] = (
-                            (1 - blend_ciclo) * pred_vals[i]
-                            + blend_ciclo * proy_vals[i]
-                        )
-                    elif ratio_ciclo < 0.95:
-                        blend_ciclo = np.clip(
-                            0.45 + 0.30 * (1.0 - ratio_ciclo), 0.45, 0.85)
-                        pred_vals[i] = (
-                            (1 - blend_ciclo) * pred_vals[i]
-                            + blend_ciclo * proy_vals[i]
-                        )
-
-            rel_vs_lag10 = rel_vs_lag10_arr[i] if i < len(
-                rel_vs_lag10_arr) else np.nan
-            pendiente_3 = pendiente_3_arr[i] if i < len(
-                pendiente_3_arr) else np.nan
-            cambio_vs_picos = cambio_vs_picos_arr[i] if i < len(
-                cambio_vs_picos_arr) else np.nan
-            lag10_ref = lag10_arr[i] if i < len(lag10_arr) else np.nan
-            lag11_ref = lag11_arr[i] if i < len(lag11_arr) else np.nan
-            lag12_ref = lag12_arr[i] if i < len(lag12_arr) else np.nan
-            pendiente_rel = (
-                pendiente_3 / lag10_ref
-                if np.isfinite(pendiente_3) and np.isfinite(lag10_ref) and lag10_ref != 0
-                else 0.0
-            )
-
-            # Ajuste por desviaciones extremas de la produccion real.
-            valor_real = produccion_hist_arr[i] if i < len(
-                produccion_hist_arr) else np.nan
-            if np.isfinite(valor_real) and np.isfinite(media_hist) and np.isfinite(std_hist):
-                if std_hist > 0:
-                    z_score = (float(valor_real) - media_hist) / std_hist
-                    if z_score > 2.0:
-                        factor_reduccion = np.clip(
-                            0.12 + 0.08 * (z_score - 2.0), 0.12, 0.40)
-                        referencia_lags = np.nanmean([
-                            lag10_ref,
-                            lag11_ref,
-                            lag12_ref
-                        ]) if any(np.isfinite(v) for v in [lag10_ref, lag11_ref, lag12_ref]) else np.nan
-                        if np.isfinite(referencia_lags):
-                            pred_vals[i] = min(
-                                pred_vals[i],
-                                referencia_lags * (1.0 - factor_reduccion)
-                            )
-                    elif z_score >= 1.0:
-                        factor_reduccion_mod = 0.08
-                        referencia_lags = np.nanmean([
-                            lag10_ref,
-                            lag11_ref,
-                            lag12_ref
-                        ]) if any(np.isfinite(v) for v in [lag10_ref, lag11_ref, lag12_ref]) else np.nan
-                        if np.isfinite(referencia_lags):
-                            pred_vals[i] = min(
-                                pred_vals[i],
-                                referencia_lags * (1.0 - factor_reduccion_mod)
-                            )
-                    elif z_score < -2.0:
-                        factor_positiva = np.clip(
-                            0.12 + 0.08 * (2.0 - z_score), 0.12, 0.40)
-                        referencia_lags = np.nanmean([
-                            lag10_ref,
-                            lag11_ref,
-                            lag12_ref
-                        ]) if any(np.isfinite(v) for v in [lag10_ref, lag11_ref, lag12_ref]) else np.nan
-                        if np.isfinite(referencia_lags):
-                            pred_vals[i] = max(
-                                pred_vals[i],
-                                referencia_lags * (1.0 + factor_positiva)
-                            )
-
-            # Detecta picos fuera del ciclo lag (12-13) y aumenta sensibilidad.
-            fuera_ciclo_lag = (
-                (not np.isfinite(ratio_ciclo))
-                or (0.92 <= ratio_ciclo <= 1.08)
-            )
-            senal_pico_no_ciclico = (
-                np.isfinite(rel_vs_lag10)
-                and rel_vs_lag10 > PICO_NO_CICLO_UMBRAL_REL
-                and (
-                    (np.isfinite(cambio_vs_picos) and cambio_vs_picos > 0)
-                    or (pendiente_rel > PICO_NO_CICLO_UMBRAL_PENDIENTE)
-                )
-            )
-
-            if fuera_ciclo_lag and senal_pico_no_ciclico:
-                intensidad_pico = np.clip(
-                    0.20
-                    + 0.55 * max(rel_vs_lag10, 0.0)
-                    + 0.25 * max(pendiente_rel, 0.0),
-                    0.20,
-                    PICO_NO_CICLO_MAX_BLEND
-                )
-                objetivo_pico = max(
-                    pred_vals[i],
-                    proy_vals[i] * (1.0 + 0.25 * max(rel_vs_lag10, 0.0)),
-                    proy_vals[i] + 0.40 * max(cambio_vs_picos, 0.0)
-                )
-                pred_vals[i] = (
-                    (1 - intensidad_pico) * pred_vals[i]
-                    + intensidad_pico * objetivo_pico
-                )
-
-            # Regla de negocio: si cae por debajo de los 3 minimos historicos,
-            # forzar pico de 10% sobre la ultima produccion minima.
-            if (
-                np.isfinite(umbral_minimos)
-                and np.isfinite(piso_compromiso_mercado)
-                and pred_vals[i] < umbral_minimos
-            ):
-                pred_vals[i] = max(pred_vals[i], piso_compromiso_mercado)
-
-        return pred_vals
 
     def proyectar_variedad_masiva(df_base, var_proy):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
             raise ValueError('Sin datos para la variedad seleccionada.')
 
-        patron_seleccionado = calcular_patron_compatible_individual(
+        patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
             df,
             df_filtered_,
             var_proy
@@ -2128,8 +2346,8 @@ if file_path is not None:
 
         patron_weekly = construir_patron_semanal(patron_actual)
 
-        patron_feature_weight = PATRON_FEATURE_WEIGHT
-        patron_prediction_weight = PATRON_PREDICTION_WEIGHT
+        patron_feature_weight = 0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
+        patron_prediction_weight = 0.0 if usar_patron_sin_dependencia else PATRON_PREDICTION_WEIGHT
 
         entrenamiento_df = preparar_dataset_modelo(
             y_actual,
@@ -2192,6 +2410,11 @@ if file_path is not None:
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
         prod_real_vals = y_frame.iloc[:len(proy_vals), 0].to_numpy(copy=True)
+        pred_vals, proy_vals, prod_real_vals = alinear_series_para_ajuste(
+            pred_vals,
+            proy_vals,
+            prod_real_vals,
+        )
         media_real = float(np.nanmean(prod_real_vals)
                            ) if prod_real_vals.size else np.nan
         std_real = float(np.nanstd(prod_real_vals, ddof=0)
@@ -2224,11 +2447,17 @@ if file_path is not None:
                             )
             proy_vals = proy_vals_adj
 
+        sn_alto = bool(
+            pd.notna(calcular_sn_patron(eval_actual_df))
+            and calcular_sn_patron(eval_actual_df) > 13.0
+        )
         pred_vals = ajustar_prediccion_con_sensibilidad_picos(
             pred_vals,
             proy_vals,
             eval_actual_df,
-            patron_prediction_weight
+            patron_prediction_weight,
+            sn_alto=sn_alto,
+            residual_weight=AJUSTE_RESIDUAL_WEIGHT
         )
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
@@ -2528,7 +2757,7 @@ if file_path is not None:
     df_filtered_ = df[df['Bloque&Varid'].isin([var_proy])]
 
     # Seleccionar patrón una sola vez
-    patron_seleccionado = calcular_patron_compatible_individual(
+    patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
         df,
         df_filtered_,
         var_proy
@@ -2568,8 +2797,8 @@ if file_path is not None:
     patron_weekly = construir_patron_semanal(patron_actual)
 
     # Pesos para priorizar el patron en entrenamiento y prediccion.
-    patron_feature_weight = PATRON_FEATURE_WEIGHT
-    patron_prediction_weight = PATRON_PREDICTION_WEIGHT
+    patron_feature_weight = 0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
+    patron_prediction_weight = 0.0 if usar_patron_sin_dependencia else PATRON_PREDICTION_WEIGHT
     entrenamiento_df = preparar_dataset_modelo(
         y_actual,
         patron_weekly,
@@ -2703,11 +2932,16 @@ if file_path is not None:
 
     # Mezcla dirigida con la proyeccion del patron (vectorizada)
     proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
+    sn_alto = bool(
+        pd.notna(calcular_sn_patron(eval_actual_df))
+        and calcular_sn_patron(eval_actual_df) > 13.0
+    )
     pred_vals = ajustar_prediccion_con_sensibilidad_picos(
         pred_vals,
         proy_vals,
         eval_actual_df,
-        patron_prediction_weight
+        patron_prediction_weight,
+        sn_alto=sn_alto
     )
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
