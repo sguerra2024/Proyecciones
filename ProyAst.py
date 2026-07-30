@@ -36,7 +36,7 @@ llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
 openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
 PATRON_FEATURE_WEIGHT = float(os.getenv("PATRON_FEATURE_WEIGHT", "1.5"))
-PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.35"))
+PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.55"))
 PICO_NO_CICLO_UMBRAL_REL = float(os.getenv("PICO_NO_CICLO_UMBRAL_REL", "0.06"))
 PICO_NO_CICLO_UMBRAL_PENDIENTE = float(
     os.getenv("PICO_NO_CICLO_UMBRAL_PENDIENTE", "0.02"))
@@ -44,7 +44,11 @@ PICO_NO_CICLO_MAX_BLEND = float(os.getenv("PICO_NO_CICLO_MAX_BLEND", "0.75"))
 MINIMOS_MERCADO_CANTIDAD = 3
 PICO_MERCADO_INCREMENTO = float(os.getenv("PICO_MERCADO_INCREMENTO", "0.12"))
 REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
+TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.25"))
 AJUSTE_RESIDUAL_WEIGHT = float(os.getenv("AJUSTE_RESIDUAL_WEIGHT", "0.22"))
+PATRON_TRAIN_TARGET_WEIGHT = float(
+    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.40")
+)
 
 
 def obtener_valor_env(*claves):
@@ -544,6 +548,20 @@ def cargar_archivo_a_dataframe(archivo_subido):
 
 def resumir_proyeccion_individual(var_proy, patron_seleccionado,
                                   factor_correccion, df_export):
+    pares_modelo = df_export[[
+        'Produccion_real', 'Estimado_modelo'
+    ]].dropna()
+    pares_patron = df_export[[
+        'Produccion_real', 'Proy_patron'
+    ]].dropna()
+    mse_modelo = mean_squared_error(
+        pares_modelo['Produccion_real'],
+        pares_modelo['Estimado_modelo']
+    ) if not pares_modelo.empty else np.nan
+    mse_patron = mean_squared_error(
+        pares_patron['Produccion_real'],
+        pares_patron['Proy_patron']
+    ) if not pares_patron.empty else np.nan
     vista = df_export[[
         'Anio_Semana', 'Produccion_real', 'Proy_patron', 'Estimado_modelo',
         'Error_abs', 'Error_pct'
@@ -1022,9 +1040,10 @@ def _ajustar_patron_con_extremos_real_modulo(trabajo, refuerzo_tallos_m2=None):
                     delta_tallos = media_2026_real - media_2025_real
                     if delta_tallos > 0:
                         factor_tallos = 1.0 + np.clip(
-                            delta_tallos / max(abs(media_2025_real), 1.0),
+                            TALLOS_2026_BOOST * delta_tallos /
+                            max(abs(media_2025_real), 1.0),
                             0.0,
-                            0.6,
+                            0.75,
                         )
                     elif delta_tallos < 0:
                         factor_tallos = np.maximum(
@@ -1071,7 +1090,7 @@ def ajustar_prediccion_modelo_con_patron(
                        ) if produccion_hist.size else np.nan
     std_hist = float(np.nanstd(produccion_hist, ddof=0)
                      ) if produccion_hist.size else np.nan
-    patron_weight = float(np.clip(patron_prediction_weight, 0.0, 0.35))
+    patron_weight = float(np.clip(patron_prediction_weight, 0.0, 0.55))
     real_weight = 0.30 if sn_alto else 0.16
     residual_weight = float(np.clip(residual_weight, 0.0, 0.60))
 
@@ -1096,6 +1115,32 @@ def ajustar_prediccion_modelo_con_patron(
             )
 
     return pred
+
+
+def construir_objetivo_entrenamiento_con_patron(
+    entrenamiento_df,
+    patron_train_target_weight=0.0
+):
+    produccion_real = pd.to_numeric(
+        entrenamiento_df.get('Produccion', pd.Series(dtype=float)),
+        errors='coerce'
+    ).to_numpy(dtype=float)
+    if 'Produccion_patron' not in entrenamiento_df.columns:
+        return produccion_real
+
+    produccion_patron = pd.to_numeric(
+        entrenamiento_df['Produccion_patron'],
+        errors='coerce'
+    ).to_numpy(dtype=float)
+    peso_patron_objetivo = float(
+        np.clip(patron_train_target_weight, 0.0, 0.80))
+    if peso_patron_objetivo <= 0:
+        return produccion_real
+
+    return (
+        (1.0 - peso_patron_objetivo) * produccion_real
+        + peso_patron_objetivo * produccion_patron
+    )
 
 
 models_dir = Path(__file__).with_name("modelos")
@@ -2175,7 +2220,7 @@ if file_path is not None:
             return True
         if pd.notna(mse_equivalente) and np.isfinite(mse_equivalente):
             return bool(mse_equivalente > 10**6.5)
-        return _ajustar_patron_con_extremos_real_modulo
+        return False
 
     def ajustar_patron_con_extremos_real(trabajo):
         return _ajustar_patron_con_extremos_real_modulo(trabajo)
@@ -2242,6 +2287,8 @@ if file_path is not None:
 
     columnas_modelo = [
         'Tallos/m2',
+        'Tallos_m2_patron',
+        'Produccion_patron',
         'Tallos_m2_patron_ponderado',
         'Produccion_patron_ponderado',
         'Incremento_tallos_patron',
@@ -2314,7 +2361,10 @@ if file_path is not None:
         ].reset_index(drop=True)
         entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
 
-        prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
+        prod_train = construir_objetivo_entrenamiento_con_patron(
+            entrenamiento_df,
+            PATRON_TRAIN_TARGET_WEIGHT
+        )
         entrenamiento_df['Produccion_ajustada'] = prod_train
 
         eval_actual_df = preparar_dataset_modelo(
@@ -2764,7 +2814,10 @@ if file_path is not None:
     ].reset_index(drop=True)
     entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
 
-    prod_train = entrenamiento_df['Produccion'].to_numpy(copy=True)
+    prod_train = construir_objetivo_entrenamiento_con_patron(
+        entrenamiento_df,
+        PATRON_TRAIN_TARGET_WEIGHT
+    )
     entrenamiento_df['Produccion_ajustada'] = prod_train
 
     eval_actual_df = preparar_dataset_modelo(
