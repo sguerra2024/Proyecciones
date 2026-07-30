@@ -55,6 +55,29 @@ def test_corrige_sesgo_residual_hacia_la_realidad():
 
     assert np.abs(ajustado - 1000.0).mean() < np.abs(pred - 1000.0).mean()
 
+
+def test_refuerza_las_ultimas_4_semanas_hacia_arriba():
+    pred = np.array([1000.0, 1000.0, 1000.0, 1000.0,
+                    1000.0, 1000.0, 1000.0, 1000.0])
+    proy = np.zeros_like(pred)
+    eval_actual_df = pd.DataFrame({
+        'Produccion': [1000.0] * len(pred),
+        'Produccion_lag10': [1000.0] * len(pred),
+        'Produccion_lag11': [1000.0] * len(pred),
+        'Produccion_lag12': [1000.0] * len(pred),
+    })
+
+    ajustado = ajustar_prediccion_modelo_con_patron(
+        pred,
+        proy,
+        eval_actual_df,
+        patron_prediction_weight=0.0,
+        sn_alto=False,
+        residual_weight=0.0,
+    )
+
+    assert ajustado[-4:].mean() > ajustado[:-4].mean()
+
     def test_lags_no_empujan_la_correccion_final():
         pred = np.array([800.0, 800.0, 800.0, 800.0])
         proy = np.array([0.0, 0.0, 0.0, 0.0])

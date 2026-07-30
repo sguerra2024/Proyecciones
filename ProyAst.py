@@ -36,7 +36,7 @@ llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
 openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
 PATRON_FEATURE_WEIGHT = float(os.getenv("PATRON_FEATURE_WEIGHT", "1.5"))
-PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.55"))
+PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
 PICO_NO_CICLO_UMBRAL_REL = float(os.getenv("PICO_NO_CICLO_UMBRAL_REL", "0.06"))
 PICO_NO_CICLO_UMBRAL_PENDIENTE = float(
     os.getenv("PICO_NO_CICLO_UMBRAL_PENDIENTE", "0.02"))
@@ -44,10 +44,10 @@ PICO_NO_CICLO_MAX_BLEND = float(os.getenv("PICO_NO_CICLO_MAX_BLEND", "0.75"))
 MINIMOS_MERCADO_CANTIDAD = 3
 PICO_MERCADO_INCREMENTO = float(os.getenv("PICO_MERCADO_INCREMENTO", "0.12"))
 REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
-TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.25"))
-AJUSTE_RESIDUAL_WEIGHT = float(os.getenv("AJUSTE_RESIDUAL_WEIGHT", "0.22"))
+TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.0"))
+AJUSTE_RESIDUAL_WEIGHT = float(os.getenv("AJUSTE_RESIDUAL_WEIGHT", "0.30"))
 PATRON_TRAIN_TARGET_WEIGHT = float(
-    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.40")
+    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.50")
 )
 
 
@@ -1095,6 +1095,9 @@ def ajustar_prediccion_modelo_con_patron(
     residual_weight = float(np.clip(residual_weight, 0.0, 0.60))
 
     for i in range(n_blend):
+        if i == 0:
+            continue
+
         valor_real = produccion_hist[i] if i < len(produccion_hist) else np.nan
 
         if np.isfinite(valor_real) and np.isfinite(media_hist) and np.isfinite(std_hist) and std_hist > 0:
@@ -1106,13 +1109,23 @@ def ajustar_prediccion_modelo_con_patron(
         if np.isfinite(proy[i]) and patron_weight > 0:
             pred[i] = (1.0 - patron_weight) * pred[i] + patron_weight * proy[i]
 
-    if residual_weight > 0 and produccion_hist.size:
+    if produccion_hist.size:
         n_residual = min(len(pred), len(produccion_hist))
         if n_residual > 0:
-            pred[:n_residual] = (
-                (1.0 - residual_weight) * pred[:n_residual]
-                + residual_weight * produccion_hist[:n_residual]
-            )
+            if residual_weight > 0:
+                pred[1:n_residual] = (
+                    (1.0 - residual_weight) * pred[1:n_residual]
+                    + residual_weight * produccion_hist[1:n_residual]
+                )
+
+            if n_residual >= 4:
+                refuerzo_ultimas = 0.08
+                ultimas_idx = slice(n_residual - 4, n_residual)
+                if n_residual > 4:
+                    pred[ultimas_idx] = pred[ultimas_idx] * \
+                        (1.0 + refuerzo_ultimas)
+                else:
+                    pred[ultimas_idx] = pred[ultimas_idx]
 
     return pred
 
@@ -2396,7 +2409,7 @@ if file_path is not None:
 
         if train_key not in st.session_state:
             modelo = RandomForestRegressor(
-                n_estimators=400,
+                n_estimators=100,
                 random_state=42,
                 max_depth=16,
                 min_samples_leaf=1,
@@ -2847,7 +2860,7 @@ if file_path is not None:
         .sort_values('Anio')
     )
 
-    factor_correccion = 1.0
+    factor_correccion = 1.4
     if not promedio_semanal_anual.empty:
         anio_objetivo = promedio_semanal_anual['Anio'].max()
         prom_objetivo = float(
@@ -2899,9 +2912,9 @@ if file_path is not None:
 
     if train_key not in st.session_state:
         modelo = RandomForestRegressor(
-            n_estimators=400,
+            n_estimators=100,
             random_state=42,
-            max_depth=16,
+            max_depth=20,
             min_samples_leaf=1,
             min_samples_split=2,
             max_features='sqrt'
