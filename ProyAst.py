@@ -2145,7 +2145,7 @@ if file_path is not None:
                 return 'background-color: #FFA500; color: #000000; font-weight: 700;'
             return ''
 
-        return df_tabla.style.applymap(estilo_sn, subset=[col_sn])
+        return df_tabla.style.map(estilo_sn, subset=[col_sn])
 
     def resumir_indicador_promedio_2025_2026(df_tabla):
         columnas_salida = [
