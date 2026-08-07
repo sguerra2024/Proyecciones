@@ -253,6 +253,47 @@ def consultar_llm(prompt_usuario):
     )
 
 
+def obtener_configuracion_proyeccion_masiva(ligera=False):
+    if ligera:
+        return {
+            "modo_liviano": True,
+            "n_estimators": 25,
+            "max_depth": 8,
+            "min_samples_leaf": 2,
+            "min_samples_split": 3,
+            "max_features": "sqrt",
+            "columnas_modelo": [
+                'Tallos/m2',
+                'Tallos_m2_patron',
+                'Produccion_patron',
+                'Tallos_m2_patron_ponderado',
+                'Produccion_patron_ponderado',
+            ],
+            "usar_sensibilidad_picos": False,
+            "limite_filas_entrenamiento": 40,
+        }
+    return {
+        "modo_liviano": False,
+        "n_estimators": 100,
+        "max_depth": 16,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "max_features": "sqrt",
+        "columnas_modelo": [
+            'Tallos/m2',
+            'Tallos_m2_patron',
+            'Produccion_patron',
+            'Tallos_m2_patron_ponderado',
+            'Produccion_patron_ponderado',
+            'Incremento_tallos_patron',
+            'Incremento_produccion_patron',
+            'sn_alto',
+        ],
+        "usar_sensibilidad_picos": True,
+        "limite_filas_entrenamiento": None,
+    }
+
+
 def estado_configuracion_llm():
     proveedor = obtener_llm_provider()
     if proveedor == 'anthropic':
@@ -2394,19 +2435,92 @@ if file_path is not None:
             residual_weight=residual_weight,
         )
 
-    def proyectar_variedad_masiva(df_base, var_proy, cache_patrones=None):
+    def preparar_features_base(df_base, cache_patrones=None):
+        features_cache = {}
+        if df_base is None or df_base.empty:
+            return features_cache
+
+        for variedad in df_base['Bloque&Varid'].dropna().astype(str).unique():
+            try:
+                df_variedad = df_base[df_base['Bloque&Varid'].astype(
+                    str) == variedad].copy()
+                patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
+                    df,
+                    df_variedad,
+                    variedad
+                )
+                patron_actual = df[df['Bloque&Varid'].astype(
+                    str) == str(patron_seleccionado)].copy()
+                patron_weekly = None
+                if cache_patrones is not None and str(patron_seleccionado) in cache_patrones:
+                    patron_weekly = cache_patrones[str(
+                        patron_seleccionado)].copy()
+                if patron_weekly is None:
+                    patron_weekly = construir_patron_semanal(patron_actual)
+                entrenamiento_df = preparar_dataset_modelo(
+                    df_variedad,
+                    patron_weekly,
+                    0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
+                )
+                entrenamiento_df = entrenamiento_df[entrenamiento_df['Anio'] >= 2025].reset_index(
+                    drop=True)
+                entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
+                features_cache[variedad] = {
+                    'df_variedad': df_variedad,
+                    'patron_seleccionado': patron_seleccionado,
+                    'usar_patron_sin_dependencia': usar_patron_sin_dependencia,
+                    'patron_weekly': patron_weekly,
+                    'entrenamiento_df': entrenamiento_df,
+                }
+            except Exception:
+                continue
+        return features_cache
+
+    def proyectar_variedad_masiva(df_base, var_proy, cache_patrones=None, features_cache=None, config_proyeccion=None):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
             raise ValueError('Sin datos para la variedad seleccionada.')
 
-        patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
-            df,
-            df_filtered_,
-            var_proy
-        )
+        feature_data = None
+        if features_cache is not None and str(var_proy) in features_cache:
+            feature_data = features_cache[str(var_proy)]
 
-        df_patron = df[df['Bloque&Varid'].isin(
-            [patron_seleccionado])]
+        if feature_data is None:
+            patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
+                df,
+                df_filtered_,
+                var_proy
+            )
+            df_patron = df[df['Bloque&Varid'].isin(
+                [patron_seleccionado])]
+            patron_actual = df[df['Bloque&Varid'].isin(
+                [patron_seleccionado])].copy()
+            patron_weekly = None
+            if cache_patrones is not None and str(patron_seleccionado) in cache_patrones:
+                patron_weekly = cache_patrones[str(patron_seleccionado)].copy()
+            if patron_weekly is None:
+                patron_weekly = construir_patron_semanal(patron_actual)
+            entrenamiento_df = preparar_dataset_modelo(
+                df_filtered_,
+                patron_weekly,
+                0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
+            )
+            entrenamiento_df = entrenamiento_df[entrenamiento_df['Anio'] >= 2025].reset_index(
+                drop=True)
+            entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
+            feature_data = {
+                'df_variedad': df_filtered_,
+                'patron_seleccionado': patron_seleccionado,
+                'usar_patron_sin_dependencia': usar_patron_sin_dependencia,
+                'patron_weekly': patron_weekly,
+                'entrenamiento_df': entrenamiento_df,
+                'df_patron': df_patron,
+            }
+        else:
+            patron_seleccionado = feature_data['patron_seleccionado']
+            usar_patron_sin_dependencia = feature_data['usar_patron_sin_dependencia']
+            df_patron = df[df['Bloque&Varid'].astype(
+                str) == str(patron_seleccionado)]
         if df_patron.empty:
             raise ValueError('No hay datos del patron seleccionado.')
 
@@ -2423,28 +2537,12 @@ if file_path is not None:
         proy = pd.Series(np.float64(np.array(df_patron['Tallos/m2'])) * m2_1)
 
         y_actual = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
-        patron_actual = df[df['Bloque&Varid'].isin(
-            [patron_seleccionado])].copy()
-
-        patron_weekly = None
-        if cache_patrones is not None and str(patron_seleccionado) in cache_patrones:
-            patron_weekly = cache_patrones[str(patron_seleccionado)].copy()
-        if patron_weekly is None:
-            patron_weekly = construir_patron_semanal(patron_actual)
+        patron_weekly = feature_data['patron_weekly']
 
         patron_feature_weight = 0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
         patron_prediction_weight = 0.0 if usar_patron_sin_dependencia else PATRON_PREDICTION_WEIGHT
 
-        entrenamiento_df = preparar_dataset_modelo(
-            y_actual,
-            patron_weekly,
-            patron_feature_weight
-        )
-        # Entrenar con todo el historial desde 2025 en adelante (incluye 2026+).
-        entrenamiento_df = entrenamiento_df[
-            entrenamiento_df['Anio'] >= 2025
-        ].reset_index(drop=True)
-        entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
+        entrenamiento_df = feature_data['entrenamiento_df'].copy()
 
         prod_train = construir_objetivo_entrenamiento_con_patron(
             entrenamiento_df,
@@ -2461,6 +2559,16 @@ if file_path is not None:
         if len(entrenamiento_df) < 5 or len(eval_actual_df) == 0:
             raise ValueError(
                 'No hay suficientes datos para entrenar/prediccion.')
+
+        config_proyeccion = config_proyeccion or obtener_configuracion_proyeccion_masiva(
+            ligera=False)
+        columnas_modelo = config_proyeccion.get(
+            'columnas_modelo', columnas_modelo)
+        if config_proyeccion.get('modo_liviano'):
+            entrenamiento_df = entrenamiento_df.tail(
+                min(len(entrenamiento_df), config_proyeccion.get(
+                    'limite_filas_entrenamiento', 40))
+            ).reset_index(drop=True)
 
         x_train_df = entrenamiento_df[columnas_modelo].reset_index(drop=True)
         x_train_df['Semana_orden'] = np.arange(len(x_train_df), dtype=float)
@@ -2481,12 +2589,13 @@ if file_path is not None:
 
         if train_key not in st.session_state:
             modelo = RandomForestRegressor(
-                n_estimators=100,
+                n_estimators=config_proyeccion.get('n_estimators', 100),
                 random_state=42,
-                max_depth=16,
-                min_samples_leaf=1,
-                min_samples_split=2,
-                max_features='sqrt'
+                max_depth=config_proyeccion.get('max_depth', 16),
+                min_samples_leaf=config_proyeccion.get('min_samples_leaf', 1),
+                min_samples_split=config_proyeccion.get(
+                    'min_samples_split', 2),
+                max_features=config_proyeccion.get('max_features', 'sqrt')
             )
             modelo.fit(x_train_df.iloc[:split_idx],
                        y_train_df.iloc[:split_idx].values.ravel())
@@ -2536,18 +2645,21 @@ if file_path is not None:
                             )
             proy_vals = proy_vals_adj
 
-        sn_alto = bool(
-            pd.notna(calcular_sn_patron(eval_actual_df))
-            and calcular_sn_patron(eval_actual_df) > 13.0
-        )
-        pred_vals = ajustar_prediccion_con_sensibilidad_picos(
-            pred_vals,
-            proy_vals,
-            eval_actual_df,
-            patron_prediction_weight,
-            sn_alto=sn_alto,
-            residual_weight=AJUSTE_RESIDUAL_WEIGHT
-        )
+        if config_proyeccion.get('modo_liviano') or not config_proyeccion.get('usar_sensibilidad_picos', True):
+            pred_vals = pred_vals
+        else:
+            sn_alto = bool(
+                pd.notna(calcular_sn_patron(eval_actual_df))
+                and calcular_sn_patron(eval_actual_df) > 13.0
+            )
+            pred_vals = ajustar_prediccion_con_sensibilidad_picos(
+                pred_vals,
+                proy_vals,
+                eval_actual_df,
+                patron_prediction_weight,
+                sn_alto=sn_alto,
+                residual_weight=AJUSTE_RESIDUAL_WEIGHT
+            )
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
         media_real = float(np.nanmean(prod_real_vals)
@@ -2626,6 +2738,10 @@ if file_path is not None:
         errores = []
         progreso = progreso_placeholder.progress(0)
         cache_patrones = construir_cache_patrones_semanales(df_masivo)
+        features_cache = preparar_features_base(
+            df_masivo, cache_patrones=cache_patrones)
+        config_proyeccion = obtener_configuracion_proyeccion_masiva(
+            ligera=True)
 
         for i, var_item in enumerate(variedades_todas, start=1):
             try:
@@ -2633,6 +2749,8 @@ if file_path is not None:
                     df_masivo,
                     var_item,
                     cache_patrones=cache_patrones,
+                    features_cache=features_cache,
+                    config_proyeccion=config_proyeccion,
                 )
                 resultados_export.append(resultado['df_export'])
                 tabla_mse_item = construir_tabla_mse_patron(

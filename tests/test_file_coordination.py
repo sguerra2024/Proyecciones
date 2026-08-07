@@ -78,3 +78,12 @@ def test_construir_cache_patrones_semanales_reutiliza_patrones():
     assert set(cache) == {"A", "B"}
     assert cache["A"].columns.tolist()[:2] == ["Anio", "Semana"]
     assert cache["A"]["Tallos_m2_patron"].tolist() == [10.0, 20.0]
+
+
+def test_obtener_configuracion_proyeccion_masiva_ligera():
+    config = ProyAst.obtener_configuracion_proyeccion_masiva(ligera=True)
+
+    assert config["modo_liviano"] is True
+    assert config["n_estimators"] == 25
+    assert config["max_depth"] == 8
+    assert "Tallos/m2" in config["columnas_modelo"]
