@@ -497,11 +497,18 @@ class ArchivoEnMemoria:
         return self._data
 
 
-def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export):
+def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export, dataframe=None, state=None):
     if not bytes_export:
         return
+    target_state = st.session_state if state is None else state
+    cache_key = f"__export_sync_cache__{nombre_export}"
+    if target_state.get(cache_key) == bytes_export:
+        return
+
     try:
-        df_export = pd.read_excel(io.BytesIO(bytes_export))
+        df_export = dataframe
+        if df_export is None:
+            df_export = pd.read_excel(io.BytesIO(bytes_export))
         archivo_export = ArchivoEnMemoria(
             nombre_export,
             bytes_export,
@@ -518,10 +525,58 @@ def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_exp
             nombre_export,
             nombre_export + str(len(bytes_export))
         )
+        target_state[cache_key] = bytes_export
     except Exception as exc:
-        st.session_state['estado_subida_anthropic'] = (
+        target_state['estado_subida_anthropic'] = (
             'error', f'Sincronizacion automatica fallida: {exc}'
         )
+
+
+def construir_cache_patrones_semanales(df_base):
+    cache = {}
+    if df_base is None or df_base.empty:
+        return cache
+
+    for nombre_variedad, grupo in df_base.groupby('Bloque&Varid', dropna=False):
+        try:
+            patron_weekly = grupo[[
+                'Anio', 'Semana', 'Tallos/m2', 'Produccion'
+            ]].dropna(subset=['Anio', 'Semana']).copy()
+            patron_weekly['Anio'] = pd.to_numeric(
+                patron_weekly['Anio'], errors='coerce')
+            patron_weekly['Semana'] = pd.to_numeric(
+                patron_weekly['Semana'], errors='coerce')
+            patron_weekly['Tallos/m2'] = pd.to_numeric(
+                patron_weekly['Tallos/m2'], errors='coerce')
+            patron_weekly['Produccion'] = pd.to_numeric(
+                patron_weekly['Produccion'], errors='coerce')
+            patron_weekly = patron_weekly.dropna(subset=['Anio', 'Semana'])
+            patron_weekly['Anio'] = patron_weekly['Anio'].astype(int)
+            patron_weekly['Semana'] = patron_weekly['Semana'].astype(int)
+            patron_weekly = (
+                patron_weekly
+                .groupby(['Anio', 'Semana'], as_index=False)
+                .agg({
+                    'Tallos/m2': 'mean',
+                    'Produccion': 'sum'
+                })
+                .rename(columns={
+                    'Tallos/m2': 'Tallos_m2_patron',
+                    'Produccion': 'Produccion_patron'
+                })
+                .sort_values(['Anio', 'Semana'])
+                .reset_index(drop=True)
+            )
+            patron_weekly['Incremento_tallos_patron'] = (
+                patron_weekly['Tallos_m2_patron'].diff().fillna(0.0)
+            )
+            patron_weekly['Incremento_produccion_patron'] = (
+                patron_weekly['Produccion_patron'].diff().fillna(0.0)
+            )
+            cache[str(nombre_variedad)] = patron_weekly
+        except Exception:
+            continue
+    return cache
 
 
 def cargar_archivo_a_dataframe(archivo_subido):
@@ -2339,7 +2394,7 @@ if file_path is not None:
             residual_weight=residual_weight,
         )
 
-    def proyectar_variedad_masiva(df_base, var_proy):
+    def proyectar_variedad_masiva(df_base, var_proy, cache_patrones=None):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
             raise ValueError('Sin datos para la variedad seleccionada.')
@@ -2371,7 +2426,11 @@ if file_path is not None:
         patron_actual = df[df['Bloque&Varid'].isin(
             [patron_seleccionado])].copy()
 
-        patron_weekly = construir_patron_semanal(patron_actual)
+        patron_weekly = None
+        if cache_patrones is not None and str(patron_seleccionado) in cache_patrones:
+            patron_weekly = cache_patrones[str(patron_seleccionado)].copy()
+        if patron_weekly is None:
+            patron_weekly = construir_patron_semanal(patron_actual)
 
         patron_feature_weight = 0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
         patron_prediction_weight = 0.0 if usar_patron_sin_dependencia else PATRON_PREDICTION_WEIGHT
@@ -2566,10 +2625,15 @@ if file_path is not None:
         resumen = []
         errores = []
         progreso = progreso_placeholder.progress(0)
+        cache_patrones = construir_cache_patrones_semanales(df_masivo)
 
         for i, var_item in enumerate(variedades_todas, start=1):
             try:
-                resultado = proyectar_variedad_masiva(df_masivo, var_item)
+                resultado = proyectar_variedad_masiva(
+                    df_masivo,
+                    var_item,
+                    cache_patrones=cache_patrones,
+                )
                 resultados_export.append(resultado['df_export'])
                 tabla_mse_item = construir_tabla_mse_patron(
                     resultado['df_export'],
@@ -2759,7 +2823,9 @@ if file_path is not None:
         sincronizar_export_generado_automatico(
             st.session_state['dashboard_export_bytes'],
             st.session_state['dashboard_export_name'],
-            st.session_state['dashboard_export_mime']
+            st.session_state['dashboard_export_mime'],
+            dataframe=df_export_estimado,
+            state=st.session_state
         )
 
         st.divider()
