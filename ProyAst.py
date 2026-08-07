@@ -1209,6 +1209,22 @@ if 'mostrar_dashboard_ia' not in st.session_state:
     st.session_state['mostrar_dashboard_ia'] = False
 
 
+def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, preservar_archivo_sesion=True):
+    """Resetea solo el estado asociado a la base proyectada, preservando el contexto sincronizado."""
+    target_state = st.session_state if state is None else state
+    if nuevo_archivo_id is not None:
+        target_state['dashboard_archivo_id'] = nuevo_archivo_id
+    target_state['dashboard_finca_activo'] = False
+    target_state['base_proyeccion_anthropic'] = pd.DataFrame()
+    target_state['dashboard_export_bytes'] = None
+    target_state['dashboard_export_name'] = ''
+    target_state['dashboard_export_mime'] = ''
+    if not preservar_archivo_sesion:
+        target_state['archivo_sesion_df'] = pd.DataFrame()
+        target_state['archivo_sesion_nombre'] = ''
+    return target_state
+
+
 def consulta_solicita_dashboard(texto_consulta):
     texto = (texto_consulta or '').strip().lower()
     if not texto:
@@ -1681,14 +1697,11 @@ if file_path is not None:
     )
 
     if st.session_state.get('dashboard_archivo_id') != archivo_actual_id:
-        st.session_state['dashboard_archivo_id'] = archivo_actual_id
-        st.session_state['dashboard_finca_activo'] = False
-        st.session_state['base_proyeccion_anthropic'] = pd.DataFrame()
-        st.session_state['dashboard_export_bytes'] = None
-        st.session_state['dashboard_export_name'] = ''
-        st.session_state['dashboard_export_mime'] = ''
-        st.session_state['archivo_sesion_df'] = pd.DataFrame()
-        st.session_state['archivo_sesion_nombre'] = ''
+        preparar_estado_para_nuevo_archivo_base(
+            st.session_state,
+            archivo_actual_id,
+            preservar_archivo_sesion=True
+        )
 
     if 'Finca' not in df.columns:
         st.warning(

@@ -105,11 +105,11 @@ def train_projection_model(
     x_train, _, y_train, _ = train_test_split(
         features,
         target,
-        test_size=0.2,
+        test_size=0.5,
         random_state=42,
     )
 
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model = RandomForestRegressor(n_estimators=50, random_state=42)
     model.fit(x_train, y_train)
 
     predictions = model.predict(features)
