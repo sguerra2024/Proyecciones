@@ -163,7 +163,7 @@ def crear_cliente_openai_compatible(proveedor):
             )
         base_url = (
             os.getenv("GITHUB_MODELS_BASE_URL")
-            or "https://models.inference.ai.azure.com"
+            or "https://models.github.ai/inference"
         ).strip()
         return openai.OpenAI(api_key=api_key, base_url=base_url)
 
@@ -181,6 +181,14 @@ def crear_cliente_openai_compatible(proveedor):
 def normalizar_error_github_models(exc):
     texto_error = str(exc)
     texto_error_lower = texto_error.lower()
+    if (
+        'github_models_retirement_brownout' in texto_error_lower
+        or ('error code: 410' in texto_error_lower and 'retirement' in texto_error_lower)
+    ):
+        return RuntimeError(
+            'GitHub Models no esta disponible por su proceso de retiro. '
+            'Configura LLM_PROVIDER=anthropic u openai para continuar.'
+        )
     if (
         'models permission is required' in texto_error_lower
         or ('unauthorized' in texto_error_lower and 'models' in texto_error_lower)
@@ -222,23 +230,30 @@ def consultar_openai_compatible(prompt_usuario, proveedor):
             if proveedor == 'github':
                 exc = normalizar_error_github_models(exc)
             ultimo_error = exc
-            texto_error = str(exc).lower()
-            es_error_modelo = any(
-                frag in texto_error for frag in [
-                    'model_not_found',
-                    'model not found',
-                    'invalid model',
-                    'unknown model',
-                    'not available for your account'
-                ]
-            )
-            if es_error_modelo:
+            if es_error_modelo_inexistente(exc):
                 continue
             raise
 
     raise RuntimeError(
         'No fue posible usar ningun modelo OpenAI-compatible configurado. '
         f'Ultimo error: {ultimo_error}'
+    )
+
+
+def es_error_modelo_inexistente(exc):
+    texto_error = str(exc).lower()
+    return any(
+        frag in texto_error for frag in [
+            'error code: 404',
+            '404',
+            'model_not_found',
+            'model not found',
+            'invalid model',
+            'unknown model',
+            'not available for your account',
+            'not_found_error',
+            'is not available'
+        ]
     )
 
 
@@ -306,17 +321,7 @@ def consultar_anthropic(prompt_usuario):
             break
         except Exception as exc:
             ultimo_error = exc
-            texto_error = str(exc).lower()
-            es_error_modelo = any(
-                frag in texto_error for frag in [
-                    'not_found_error',
-                    'model not found',
-                    'invalid model',
-                    'unknown model',
-                    'is not available for your account'
-                ]
-            )
-            if es_error_modelo:
+            if es_error_modelo_inexistente(exc):
                 continue
             raise
 

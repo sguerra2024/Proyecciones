@@ -78,3 +78,23 @@ def test_construir_cache_patrones_semanales_reutiliza_patrones():
     assert set(cache) == {"A", "B"}
     assert cache["A"].columns.tolist()[:2] == ["Anio", "Semana"]
     assert cache["A"]["Tallos_m2_patron"].tolist() == [10.0, 20.0]
+
+
+def test_es_error_modelo_inexistente_detecta_404():
+    assert ProyAst.es_error_modelo_inexistente(
+        RuntimeError("Error code: 404")) is True
+    assert ProyAst.es_error_modelo_inexistente(
+        RuntimeError("Model not found")) is True
+    assert ProyAst.es_error_modelo_inexistente(
+        RuntimeError("timeout")) is False
+
+
+def test_normalizar_error_github_models_detecta_retiro():
+    error = ProyAst.normalizar_error_github_models(
+        RuntimeError(
+            "Error code: 410 - github_models_retirement_brownout"
+        )
+    )
+
+    assert "proceso de retiro" in str(error)
+    assert "LLM_PROVIDER=anthropic" in str(error)
