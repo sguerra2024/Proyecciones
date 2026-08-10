@@ -1,11 +1,16 @@
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
+import gc
 import pickle
 import io
 import importlib
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import matplotlib
+# Backend sin ventana: en un contenedor headless no hay display y cualquier
+# backend interactivo aborta el arranque. Mismo criterio que Graf_evaluacion.py.
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt  # noqa: E402  (despues de fijar el backend)
 import re
 from pathlib import Path
 import streamlit as st
@@ -2807,27 +2812,30 @@ if file_path is not None:
         split_idx = len(x_train_df)
         split_idx = max(split_idx, 1)
 
-        model_name = ''.join(
-            ch if ch.isalnum() else '_' for ch in str(var_proy))
-        train_key = f'entrenado_masivo_{model_name}_cal_v2'
-
-        if train_key not in st.session_state:
-            modelo = RandomForestRegressor(
-                n_estimators=100,
-                random_state=42,
-                max_depth=16,
-                min_samples_leaf=1,
-                min_samples_split=2,
-                max_features='sqrt'
-            )
-            modelo.fit(x_train_df.iloc[:split_idx],
-                       y_train_df.iloc[:split_idx].values.ravel())
-            st.session_state[train_key] = modelo
-        else:
-            modelo = st.session_state[train_key]
+        # El modelo se entrena, se usa y se descarta. Guardarlo en session_state
+        # retenia un RandomForest por variedad durante toda la sesion: en
+        # ASTROFLORES son 114 modelos entrenables, 84 MB de arboles medidos mas
+        # 11.400 objetos de sklearn, y nunca se liberaban. En local sobra RAM y no
+        # se nota; en un contenedor de 512 MB con Streamlit y sklearn ya cargados
+        # no entra. La prediccion es identica: mismo random_state y mismos datos.
+        #
+        # De paso desaparece un bug: la clave del cache era solo el nombre de la
+        # variedad, sin huella de los datos, asi que al cargar un archivo base
+        # nuevo en la misma sesion se reusaba el modelo entrenado con el anterior.
+        modelo = RandomForestRegressor(
+            n_estimators=100,
+            random_state=42,
+            max_depth=16,
+            min_samples_leaf=1,
+            min_samples_split=2,
+            max_features='sqrt'
+        )
+        modelo.fit(x_train_df.iloc[:split_idx],
+                   y_train_df.iloc[:split_idx].values.ravel())
 
         y_pred = pd.DataFrame(modelo.predict(x_frame),
                               columns=['Estimado_modelo'])
+        del modelo
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
         prod_real_vals = y_frame.iloc[:len(proy_vals), 0].to_numpy(copy=True)
@@ -2984,6 +2992,10 @@ if file_path is not None:
                     'Variedad_proyectada': var_item,
                     'Error': str(e)
                 })
+            # Los estimadores de sklearn dejan ciclos de referencias que el
+            # contador no libera solo. Con 116 variedades seguidas eso se acumula.
+            if i % 25 == 0:
+                gc.collect()
             progreso.progress(i / len(variedades_todas))
 
         if resultados_export:
