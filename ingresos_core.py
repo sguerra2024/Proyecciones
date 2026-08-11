@@ -68,10 +68,12 @@ ARCHIVO_ERRORES_MODELO = 'errores_evaluacion_modelo.csv'
 _ERROR_MAXIMO = 0.99
 
 # Bandas con que se reporta el cumplimiento, las mismas de Graf_evaluacion.py.
-TOLERANCIAS_CUMPLIMIENTO: tuple[float, ...] = (0.05, 0.10, 0.15, 0.20, 0.30, 0.50)
+TOLERANCIAS_CUMPLIMIENTO: tuple[float, ...] = (
+    0.05, 0.10, 0.15, 0.20, 0.30, 0.50)
 
 # Niveles a los que se reporta el ingreso comprometible.
-NIVELES_CONFIANZA: tuple[float, ...] = (0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.99)
+NIVELES_CONFIANZA: tuple[float, ...] = (
+    0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.99)
 
 COLUMNAS_CATALOGO = ['fecha', 'variedad', 'grado',
                      'mercado', 'pct', 'fraccion', 'precio']
@@ -249,8 +251,9 @@ def _canonico_desde_largo(df: pd.DataFrame,
     usadas = {col_variedad}
     col_grado = _resolver(df, mapeo, 'grado', excluir=usadas)
     usadas.add(col_grado)
-    col_pct = _resolver(df, mapeo, 'pct', excluir=usadas)
-    usadas.add(col_pct)
+    col_pct = _resolver(df, mapeo, 'pct', requerido=False, excluir=usadas)
+    if col_pct is not None:
+        usadas.add(col_pct)
     col_precio = _resolver(df, mapeo, 'precio', excluir=usadas)
     usadas.add(col_precio)
     col_fecha = _resolver(df, mapeo, 'fecha', requerido=False, excluir=usadas)
@@ -261,7 +264,11 @@ def _canonico_desde_largo(df: pd.DataFrame,
     return pd.DataFrame({
         'variedad': df[col_variedad],
         'grado': df[col_grado],
-        'pct': pd.to_numeric(df[col_pct], errors='coerce'),
+        'pct': (
+            pd.to_numeric(df[col_pct], errors='coerce')
+            if col_pct is not None
+            else np.nan
+        ),
         'precio': pd.to_numeric(df[col_precio], errors='coerce'),
         'fecha': df[col_fecha] if col_fecha else pd.NaT,
         'mercado': df[col_mercado] if col_mercado else '',
@@ -306,6 +313,40 @@ def normalizar_catalogo(df: pd.DataFrame,
             'El catalogo no tiene filas utilizables: revisa las columnas de '
             'variedad y longitud.'
         )
+
+    # Si el archivo no trae %, inferirlo para no bloquear la carga:
+    # - 1 longitud: 100%
+    # - varias longitudes: reparto equitativo por longitud
+    faltantes_pct = catalogo['pct'].isna()
+    if faltantes_pct.any():
+        grupos_pct = catalogo.groupby(['fecha', 'variedad'], dropna=False)
+        for (fecha, variedad), grupo in grupos_pct:
+            idx_faltantes = grupo.index[grupo['pct'].isna()]
+            if len(idx_faltantes) == 0:
+                continue
+
+            grados_con_pct = grupo.loc[grupo['pct'].notna(), 'grado']
+            if not grados_con_pct.empty:
+                continue
+
+            longitudes = grupo['grado'].dropna().astype(str).nunique()
+            if longitudes <= 1:
+                catalogo.loc[idx_faltantes, 'pct'] = 100.0
+            else:
+                pct_equilibrado = 100.0 / float(longitudes)
+                grados_faltantes = (
+                    grupo.loc[grupo['pct'].isna(), 'grado']
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+                for grado in grados_faltantes:
+                    idx_grado = grupo.index[
+                        grupo['grado'].astype(str) == str(grado)
+                    ]
+                    catalogo.loc[idx_grado, 'pct'] = pct_equilibrado
+
     # Un precio 0, negativo o vacio no es un precio: se marca como faltante para
     # que se reporte en vez de valorar tallos a cero.
     catalogo.loc[~(catalogo['precio'] > 0), 'precio'] = np.nan
@@ -1012,7 +1053,8 @@ def simular_ingresos(resultado: ResultadoIngresos,
 
     factores = np.asarray([], dtype=float)
     if errores_modelo is not None:
-        factores = factor_real_sobre_estimado(errores_modelo).to_numpy(dtype=float)
+        factores = factor_real_sobre_estimado(
+            errores_modelo).to_numpy(dtype=float)
     empirico = factores.size > 0
 
     sigma_tallos = np.zeros(len(variedades), dtype=float)
@@ -1064,7 +1106,8 @@ def simular_ingresos(resultado: ResultadoIngresos,
             # marginal sigue siendo exactamente la empirica.
             propio = factores[rng.integers(
                 0, factores.size, size=(len(variedades), ancho))]
-            comun = factores[rng.integers(0, factores.size, size=ancho)][None, :]
+            comun = factores[rng.integers(
+                0, factores.size, size=ancho)][None, :]
             factor_tallos = np.where(
                 rng.random((len(variedades), ancho)) < correlacion_tallos,
                 np.broadcast_to(comun, propio.shape), propio)

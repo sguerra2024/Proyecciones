@@ -55,7 +55,7 @@ Recomendaciones de calidad de datos:
 2. Seleccionar `Finca`.
 3. Clic en `PROYECTAR FINCA`.
 4. Proyecta todas las `Bloque&Varid` de la finca respetando el orden original de entrada.
-5. Si alguna variedad no se puede proyectar, se asigna `0` en `Estimado_modelo`.
+5. Si alguna variedad no se puede proyectar, se registra el error y el proceso continua con el resto.
 6. Descarga por navegador del archivo `Proyecto_todas_variedades.xlsx`.
 
 ## 3. Reglas de Negocio del Modelo
@@ -72,17 +72,21 @@ Recomendaciones de calidad de datos:
 El modelo de regresion recibe las siguientes variables de entrada:
 
 - `Tallos/m2`
+- `Tallos_m2_patron`
+- `Produccion_patron`
 - `Tallos_m2_patron_ponderado`
+- `Produccion_patron_ponderado`
 - `Incremento_tallos_patron`
 - `Incremento_produccion_patron`
-- `Produccion_lag12`
-- `Cambio_produccion_vs_lag12`
-- `Semana_ciclo_12`
-- `Produccion_patron`
+- `sn_alto`
 
-La variable objetivo es:
+Adicionalmente se agrega una variable temporal derivada para el entrenamiento/prediccion:
 
-- `Produccion`
+- `Semana_orden`
+
+La variable objetivo de entrenamiento es:
+
+- `Produccion_ajustada` (construida a partir de `Produccion` y del patron)
 
 ### 3.3 Modelo Utilizado
 
@@ -90,8 +94,10 @@ Se entrena un `RandomForestRegressor` con estos parametros:
 
 - `n_estimators = 100`
 - `random_state = 42`
-- `max_depth = 12`
-- `min_samples_leaf = 2`
+- `max_depth = 16`
+- `min_samples_leaf = 1`
+- `min_samples_split = 2`
+- `max_features = 'sqrt'`
 
 ### 3.4 Ventana de Entrenamiento
 
@@ -99,15 +105,16 @@ El entrenamiento se realiza usando datos a partir de:
 
 - `Anio >= 2025`
 
+Antes de calcular metricas y en el set de entrenamiento se excluyen las ultimas 4 semanas por variedad.
+
 Se construye un dataset con historial semanal de la variedad y caracteristicas del patron seleccionado.
 
 ### 3.5 Ajustes Aplicados
 
 - Se construye un dataset con variables de nivel, cambios y ciclo semanal.
-- Se incorpora `Produccion_lag12` para reflejar el ciclo natural de 12 semanas de las rosas.
-- Se añade `Cambio_produccion_vs_lag12` para capturar picos y descensos respecto al ciclo anterior.
-- Se incluye `Semana_ciclo_12` para representar la posicion dentro del ciclo de 12 semanas.
-- Se mezcla la prediccion del modelo con la proyeccion del patron mediante `patron_prediction_weight`.
+- Se mezcla la prediccion del modelo con la proyeccion del patron mediante `patron_prediction_weight` y un ajuste residual configurable.
+- Se aplican ajustes sobre la serie del patron en semanas con desviaciones altas (z-score) para amortiguar picos.
+- Se incorpora una bandera `sn_alto` para ajustar la sensibilidad de mezcla ante escenarios de alta relacion senal/ruido.
 - Se ajusta la media final de la prediccion para alinearla con la produccion real observada.
 
 ## 4. Exportaciones
@@ -133,9 +140,10 @@ Descarga por navegador con nombre:
 
 Contenido:
 
-- Hoja `Estimado_modelo`
-- Solo columna `Estimado_modelo`
-- Valores sin decimales (enteros)
+- Hoja `Estimado_modelo` con columnas base (`Anio`, `Semana`, `Producto`, `Finca`, `Bloque`, `Variedad`, `Bloque&Varid`) mas `Estimado_modelo`.
+- Hoja `MSE_por_BloqueVarid` con `Bloque&Varid`, `MSE`, `MSE_proy_patron` y `S/N` (si disponible).
+- En la hoja `Estimado_modelo` se exportan solo registros del anio 2026, solo las ultimas 4 semanas por variedad y solo filas con `Estimado_modelo > 0`.
+- `Estimado_modelo` se exporta redondeado a entero.
 
 Nota movil:
 
@@ -211,7 +219,7 @@ Incluye:
 ## 8. Observaciones Operativas
 
 - Si en masiva no hay datos suficientes para una variedad, el sistema no detiene el proceso global.
-- En esos casos, reporta motivo y exporta `0` para esa fila.
+- En esos casos, reporta motivo en el resumen de errores y continua con las demas variedades.
 - Para mejores resultados, mantener historial actualizado y consistente por semana.
 
 ## 9. Contacto

@@ -1,3 +1,11 @@
+import ingresos_core as ingresos
+import mimetypes
+import sys
+import os
+from dotenv import load_dotenv, dotenv_values
+import streamlit as st
+from pathlib import Path
+import re
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 import gc
@@ -11,14 +19,6 @@ import matplotlib
 # backend interactivo aborta el arranque. Mismo criterio que Graf_evaluacion.py.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402  (despues de fijar el backend)
-import re
-from pathlib import Path
-import streamlit as st
-from dotenv import load_dotenv, dotenv_values
-import os
-import sys
-import mimetypes
-import ingresos_core as ingresos
 
 CARPETA_MERCADO = Path(__file__).with_name(ingresos.CARPETA_DATOS_MERCADO)
 
@@ -393,24 +393,6 @@ def subir_archivo_anthropic(archivo_subido):
     if not contenido:
         raise ValueError('El archivo seleccionado esta vacio.')
 
-    # Anthropic puede variar el formato aceptado segun version del SDK/API.
-    # Probamos variantes comunes del payload antes de reportar error final.
-    def construir_variantes_payload(file_name, file_bytes, mime):
-        return [
-            ('tuple_name_bytes_mime', (file_name, file_bytes, mime)),
-            ('tuple_name_bytes', (file_name, file_bytes)),
-            ('dict_content', {
-                'name': file_name,
-                'content': file_bytes,
-                'media_type': mime
-            }),
-            ('dict_file', {
-                'file_name': file_name,
-                'bytes': file_bytes,
-                'media_type': mime
-            }),
-        ]
-
     variantes_archivo = []
 
     # Para Excel, priorizamos CSV porque Anthropic lo reconoce de forma mas estable.
@@ -428,44 +410,56 @@ def subir_archivo_anthropic(archivo_subido):
     # Mantener binario original como respaldo final.
     variantes_archivo.append((nombre, contenido, media_type))
 
-    def ejecutar_metodo(metodo, payload):
-        if metodo == 'beta.files.upload':
-            return cliente.beta.files.upload(file=payload)
-        if metodo == 'files.create':
-            return cliente.files.create(file=payload)
-        if metodo == 'beta.files.create':
-            return cliente.beta.files.create(file=payload)
-        raise RuntimeError(f'Metodo no soportado: {metodo}')
+    # Elegir un unico metodo soportado por el SDK instalado para evitar
+    # incompatibilidades entre versiones.
+    metodo_carga = None
+    if hasattr(cliente, 'files') and hasattr(cliente.files, 'create'):
+        metodo_carga = 'files.create'
+    elif (
+        hasattr(cliente, 'beta')
+        and hasattr(cliente.beta, 'files')
+        and hasattr(cliente.beta.files, 'upload')
+    ):
+        metodo_carga = 'beta.files.upload'
+    elif (
+        hasattr(cliente, 'beta')
+        and hasattr(cliente.beta, 'files')
+        and hasattr(cliente.beta.files, 'create')
+    ):
+        metodo_carga = 'beta.files.create'
 
-    metodos = ['beta.files.upload', 'files.create', 'beta.files.create']
+    if metodo_carga is None:
+        raise RuntimeError(
+            'El SDK de Anthropic instalado no expone metodos de archivos '
+            'compatibles (files.create/beta.files.upload/beta.files.create). '
+            'Actualiza la libreria anthropic para habilitar la sincronizacion de archivos.'
+        )
 
     ultimo_error = None
-    errores = []
     for file_name, file_bytes, mime in variantes_archivo:
-        for metodo in metodos:
-            for payload_tipo, payload in construir_variantes_payload(file_name, file_bytes, mime):
-                try:
-                    respuesta = ejecutar_metodo(metodo, payload)
-                    file_id = getattr(respuesta, 'id', None)
-                    if file_id is None and isinstance(respuesta, dict):
-                        file_id = respuesta.get('id')
-                    return {
-                        'file_id': file_id,
-                        'nombre': file_name,
-                        'bytes': len(file_bytes),
-                        'metodo': f'{metodo}:{payload_tipo}'
-                    }
-                except Exception as exc:
-                    ultimo_error = exc
-                    errores.append(
-                        f'{metodo}:{payload_tipo}:{file_name} -> {exc}'
-                    )
+        try:
+            payload = (file_name, file_bytes, mime)
+            if metodo_carga == 'files.create':
+                respuesta = cliente.files.create(file=payload)
+            elif metodo_carga == 'beta.files.upload':
+                respuesta = cliente.beta.files.upload(file=payload)
+            else:
+                respuesta = cliente.beta.files.create(file=payload)
+            file_id = getattr(respuesta, 'id', None)
+            if file_id is None and isinstance(respuesta, dict):
+                file_id = respuesta.get('id')
+            return {
+                'file_id': file_id,
+                'nombre': file_name,
+                'bytes': len(file_bytes),
+                'metodo': f'{metodo_carga}:tuple_name_bytes_mime'
+            }
+        except Exception as exc:
+            ultimo_error = exc
 
     raise RuntimeError(
-        'No fue posible cargar el archivo a Anthropic. '
-        f'Ultimo error: {ultimo_error}. '
-        'Detalle de intentos: '
-        + ' | '.join(errores[-4:])
+        f'No fue posible cargar el archivo a Anthropic con {metodo_carga}. '
+        f'Ultimo error: {ultimo_error}'
     )
 
 
@@ -1532,7 +1526,8 @@ def render_ingresos_futuros():
         st.write('**2. Supuestos del calculo**')
         col_a, col_b, col_c = st.columns(3)
         with col_a:
-            mercados = sorted(historico['mercado'].astype(str).unique().tolist())
+            mercados = sorted(
+                historico['mercado'].astype(str).unique().tolist())
             opciones = ['Mejor precio por variedad y longitud'] + [
                 f'Solo {m}' for m in mercados]
             eleccion = st.selectbox(
@@ -1579,9 +1574,11 @@ def render_ingresos_futuros():
 
         st.write('**3. Ingreso proyectado**')
         m1, m2, m3 = st.columns(3)
-        m1.metric('Pesimista', f'{resultado.totales["ingreso_pesimista"]:,.0f}')
+        m1.metric(
+            'Pesimista', f'{resultado.totales["ingreso_pesimista"]:,.0f}')
         m2.metric('Base', f'{resultado.totales["ingreso_base"]:,.0f}')
-        m3.metric('Optimista', f'{resultado.totales["ingreso_optimista"]:,.0f}')
+        m3.metric(
+            'Optimista', f'{resultado.totales["ingreso_optimista"]:,.0f}')
         st.caption(
             f'Tallos valorados: {resultado.totales["tallos_valorados"]:,.0f} '
             f'({resultado.diagnostico.cobertura_pct:.1f}% de cobertura)'
@@ -1681,7 +1678,8 @@ def render_ingresos_futuros():
             st.bar_chart(
                 pd.DataFrame(
                     {'simulaciones': conteo},
-                    index=np.round((bordes[:-1] + bordes[1:]) / 2.0).astype(np.int64)
+                    index=np.round(
+                        (bordes[:-1] + bordes[1:]) / 2.0).astype(np.int64)
                 ),
                 width='stretch'
             )

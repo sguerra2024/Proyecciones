@@ -90,8 +90,10 @@ def test_el_precio_depende_de_la_variedad_no_solo_de_la_longitud():
 def test_escenarios_aplican_variacion_sobre_el_precio_vigente():
     resultado = preparar()
 
-    assert resultado.totales['ingreso_pesimista'] == pytest.approx(1020.0 * 0.9)
-    assert resultado.totales['ingreso_optimista'] == pytest.approx(1020.0 * 1.1)
+    assert resultado.totales['ingreso_pesimista'] == pytest.approx(
+        1020.0 * 0.9)
+    assert resultado.totales['ingreso_optimista'] == pytest.approx(
+        1020.0 * 1.1)
 
 
 def test_ranking_por_variedad_ordena_por_ingreso():
@@ -169,7 +171,8 @@ def test_variedad_fuera_del_catalogo_no_desaparece_en_silencio():
 
     assert resultado.diagnostico.variedades_sin_catalogo == ['VENDELA']
     assert resultado.diagnostico.tallos_sin_valorar == pytest.approx(300.0)
-    assert resultado.diagnostico.cobertura_pct == pytest.approx(100 * 1500 / 1800)
+    assert resultado.diagnostico.cobertura_pct == pytest.approx(
+        100 * 1500 / 1800)
     assert resultado.diagnostico.hay_alertas
     assert any('VENDELA' in msg for msg in resultado.diagnostico.mensajes())
 
@@ -302,6 +305,40 @@ def test_el_pct_puesto_en_un_solo_mercado_aplica_a_los_demas():
 def test_catalogo_vacio_falla_con_mensaje_claro():
     with pytest.raises(ValueError, match='vacio'):
         ic.normalizar_catalogo(pd.DataFrame())
+
+
+def test_formato_largo_sin_pct_con_una_longitud_asume_100():
+    catalogo = pd.DataFrame({
+        'Producto': ['ROSA'],
+        'Variedad': ['FREEDOM'],
+        'Longitud (cm)': ['60'],
+        'Precio (USD/tallo)': [0.55],
+    })
+
+    catalogo_tidy, fuera = normalizado(catalogo)
+
+    assert len(catalogo_tidy) == 1
+    assert catalogo_tidy.iloc[0]['pct'] == pytest.approx(100.0)
+    assert catalogo_tidy.iloc[0]['fraccion'] == pytest.approx(1.0)
+    assert catalogo_tidy.iloc[0]['precio'] == pytest.approx(0.55)
+    assert fuera == {}
+
+
+def test_formato_largo_sin_pct_con_varias_longitudes_reparte_equilibrado():
+    catalogo = pd.DataFrame({
+        'Producto': ['ROSA', 'ROSA'],
+        'Variedad': ['FREEDOM', 'FREEDOM'],
+        'Longitud (cm)': ['50', '60'],
+        'Precio (USD/tallo)': [0.40, 0.55],
+    })
+
+    catalogo_tidy, fuera = normalizado(catalogo)
+
+    assert len(catalogo_tidy) == 2
+    assert sorted(catalogo_tidy['pct'].tolist()) == pytest.approx([50.0, 50.0])
+    assert sorted(catalogo_tidy['fraccion'].tolist()
+                  ) == pytest.approx([0.5, 0.5])
+    assert fuera == {}
 
 
 # --- formatos aceptados ---------------------------------------------------
@@ -558,7 +595,8 @@ def test_columna_mapeada_a_un_nombre_inexistente_avisa():
 def test_acumular_catalogo_conserva_las_cargas_anteriores(tmp_path):
     # Sin columna de fecha en el archivo: la fecha de la carga es la del dia.
     sin_fecha = catalogo_base().drop(columns='Fecha')
-    carga_1, _ = normalizado(sin_fecha, fecha_defecto=HOY - pd.Timedelta(days=1))
+    carga_1, _ = normalizado(
+        sin_fecha, fecha_defecto=HOY - pd.Timedelta(days=1))
     carga_2, _ = normalizado(sin_fecha, fecha_defecto=HOY)
 
     ic.acumular_catalogo(carga_1, carpeta=tmp_path)
@@ -838,7 +876,8 @@ def test_la_simulacion_empirica_conserva_la_asimetria_medida():
     esperado_media = 1020.0 * float(factores.mean())
     esperado_p50 = 1020.0 * float(factores.median())
     assert probabilidad.media == pytest.approx(esperado_media, rel=0.05)
-    assert probabilidad.percentiles['p50'] == pytest.approx(esperado_p50, rel=0.05)
+    assert probabilidad.percentiles['p50'] == pytest.approx(
+        esperado_p50, rel=0.05)
 
 
 def test_la_probabilidad_de_superar_es_monotona():
@@ -874,7 +913,8 @@ def test_simulaciones_insuficientes_se_rechazan():
     with pytest.raises(ValueError, match='100 simulaciones'):
         ic.simular_ingresos(resultado, simulaciones=10)
     with pytest.raises(ValueError, match='correlacion_precio'):
-        ic.simular_ingresos(resultado, simulaciones=200, correlacion_precio=1.5)
+        ic.simular_ingresos(resultado, simulaciones=200,
+                            correlacion_precio=1.5)
 
 
 def test_el_ingreso_comprometible_baja_al_exigir_mas_confianza():
@@ -891,7 +931,8 @@ def test_el_ingreso_comprometible_baja_al_exigir_mas_confianza():
     assert al_50 == pytest.approx(probabilidad.percentiles['p50'], rel=1e-9)
     assert al_95 == pytest.approx(probabilidad.percentiles['p05'], rel=1e-9)
     # Y el monto comprometido se alcanza con la probabilidad prometida.
-    assert probabilidad.probabilidad_de_superar(al_80) == pytest.approx(80.0, abs=1.5)
+    assert probabilidad.probabilidad_de_superar(
+        al_80) == pytest.approx(80.0, abs=1.5)
 
 
 def test_la_curva_de_confianza_es_monotona():
@@ -900,7 +941,8 @@ def test_la_curva_de_confianza_es_monotona():
 
     curva = probabilidad.curva_confianza()
 
-    assert list(curva['confianza_pct']) == [50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0]
+    assert list(curva['confianza_pct']) == [
+        50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 99.0]
     assert list(curva['ingreso']) == sorted(curva['ingreso'], reverse=True)
 
 
@@ -928,7 +970,8 @@ def test_la_barra_de_volatilidad_ensancha_sin_mover_el_centro():
         medida.percentiles['p50'], rel=0.05)
     # ...pero si abrir las colas y castigar lo comprometible.
     assert duplicada.desviacion > medida.desviacion
-    assert duplicada.ingreso_comprometible(0.90) < medida.ingreso_comprometible(0.90)
+    assert duplicada.ingreso_comprometible(
+        0.90) < medida.ingreso_comprometible(0.90)
     assert 'escala' in duplicada.supuestos
     assert 'escala' not in medida.supuestos
 
@@ -945,7 +988,8 @@ def test_menos_volatilidad_angosta_el_intervalo():
         sigma_precio_defecto=0.0, escala_volatilidad_proyeccion=0.5)
 
     assert reducida.desviacion < medida.desviacion
-    assert reducida.ingreso_comprometible(0.90) > medida.ingreso_comprometible(0.90)
+    assert reducida.ingreso_comprometible(
+        0.90) > medida.ingreso_comprometible(0.90)
 
 
 def test_la_escala_tambien_aplica_al_camino_por_supuesto():
