@@ -1,26 +1,18 @@
-import ingresos_core as ingresos
-import mimetypes
-import sys
-import os
-from dotenv import load_dotenv, dotenv_values
-import streamlit as st
-from pathlib import Path
-import re
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
-import gc
 import pickle
 import io
 import importlib
 import pandas as pd
 import numpy as np
-import matplotlib
-# Backend sin ventana: en un contenedor headless no hay display y cualquier
-# backend interactivo aborta el arranque. Mismo criterio que Graf_evaluacion.py.
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt  # noqa: E402  (despues de fijar el backend)
-
-CARPETA_MERCADO = Path(__file__).with_name(ingresos.CARPETA_DATOS_MERCADO)
+import matplotlib.pyplot as plt
+import re
+from pathlib import Path
+import streamlit as st
+from dotenv import load_dotenv, dotenv_values
+import os
+import sys
+import mimetypes
 
 agents_dir = Path(__file__).with_name("agents")
 if agents_dir.exists():
@@ -39,17 +31,10 @@ except ImportError:
 dotenv_path = Path(__file__).with_name('.env')
 load_dotenv(dotenv_path=dotenv_path if dotenv_path.exists() else None)
 
-anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
 openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
-# Limite de salida por consulta. 512 truncaba las respuestas en bullets.
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
-LLM_MAX_TOKENS_RESPUESTA = int(os.getenv("LLM_MAX_TOKENS_RESPUESTA", "8192"))
-AVISO_RESPUESTA_TRUNCADA = (
-    '\n\n[Respuesta truncada por el limite de tokens. '
-    'Aumenta LLM_MAX_TOKENS o pide un resumen mas corto.]'
-)
 PATRON_FEATURE_WEIGHT = float(os.getenv("PATRON_FEATURE_WEIGHT", "1.5"))
 PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
 PICO_NO_CICLO_UMBRAL_REL = float(os.getenv("PICO_NO_CICLO_UMBRAL_REL", "0.06"))
@@ -109,12 +94,11 @@ def obtener_api_key_github():
 
 def modelos_anthropic_candidatos():
     candidatos = []
-    # Solo modelos vigentes: los claude-3.x fueron retirados y devuelven 404,
-    # lo que gastaba una llamada fallida por cada uno antes de acertar.
     for modelo in [
         anthropic_model,
-        'claude-opus-5',
-        'claude-sonnet-5',
+        'claude-3-5-sonnet-latest',
+        'claude-3-5-haiku-latest',
+        'claude-3-opus-latest',
         'claude-sonnet-4-6',
         'claude-haiku-4-5'
     ]:
@@ -218,17 +202,16 @@ def normalizar_error_github_models(exc):
     return exc
 
 
-def consultar_openai_compatible(prompt_usuario, proveedor, max_tokens=None):
+def consultar_openai_compatible(prompt_usuario, proveedor):
     cliente = crear_cliente_openai_compatible(proveedor)
     modelos_candidatos = modelos_openai_candidatos(proveedor)
-    limite_tokens = int(max_tokens or LLM_MAX_TOKENS)
 
     ultimo_error = None
     for modelo in modelos_candidatos:
         try:
             respuesta = cliente.chat.completions.create(
                 model=modelo,
-                max_tokens=limite_tokens,
+                max_tokens=512,
                 messages=[
                     {
                         'role': 'user',
@@ -237,14 +220,11 @@ def consultar_openai_compatible(prompt_usuario, proveedor, max_tokens=None):
                 ]
             )
             contenido = ''
-            truncada = False
             if respuesta and getattr(respuesta, 'choices', None):
                 mensaje = getattr(respuesta.choices[0], 'message', None)
                 contenido = (getattr(mensaje, 'content', None) or '').strip()
-                truncada = getattr(
-                    respuesta.choices[0], 'finish_reason', None) == 'length'
             if contenido:
-                return contenido + (AVISO_RESPUESTA_TRUNCADA if truncada else '')
+                return contenido
             raise RuntimeError('La respuesta del modelo llego vacia.')
         except Exception as exc:
             if proveedor == 'github':
@@ -277,13 +257,12 @@ def es_error_modelo_inexistente(exc):
     )
 
 
-def consultar_llm(prompt_usuario, max_tokens=None):
+def consultar_llm(prompt_usuario):
     proveedor = obtener_llm_provider()
     if proveedor == 'anthropic':
-        return consultar_anthropic(prompt_usuario, max_tokens=max_tokens)
+        return consultar_anthropic(prompt_usuario)
     if proveedor in ['github', 'openai']:
-        return consultar_openai_compatible(
-            prompt_usuario, proveedor, max_tokens=max_tokens)
+        return consultar_openai_compatible(prompt_usuario, proveedor)
     raise RuntimeError(
         'LLM_PROVIDER no soportado. Usa anthropic, github u openai.'
     )
@@ -317,15 +296,13 @@ def estado_configuracion_llm():
     return False, 'LLM_PROVIDER no soportado. Usa anthropic, github u openai.'
 
 
-def consultar_anthropic(prompt_usuario, max_tokens=None):
+def consultar_anthropic(prompt_usuario):
     proveedor = obtener_llm_provider()
     if proveedor in ['github', 'openai']:
-        return consultar_openai_compatible(
-            prompt_usuario, proveedor, max_tokens=max_tokens)
+        return consultar_openai_compatible(prompt_usuario, proveedor)
 
     cliente = crear_cliente_anthropic()
     modelos_candidatos = modelos_anthropic_candidatos()
-    limite_tokens = int(max_tokens or LLM_MAX_TOKENS)
 
     ultimo_error = None
     respuesta = None
@@ -333,7 +310,7 @@ def consultar_anthropic(prompt_usuario, max_tokens=None):
         try:
             respuesta = cliente.messages.create(
                 model=modelo,
-                max_tokens=limite_tokens,
+                max_tokens=512,
                 messages=[
                     {
                         'role': 'user',
@@ -359,10 +336,7 @@ def consultar_anthropic(prompt_usuario, max_tokens=None):
         texto = getattr(bloque, 'text', None)
         if texto:
             textos.append(texto)
-    salida = '\n'.join(textos).strip()
-    if getattr(respuesta, 'stop_reason', None) == 'max_tokens':
-        salida += AVISO_RESPUESTA_TRUNCADA
-    return salida
+    return '\n'.join(textos).strip()
 
 
 def es_perfil_analista():
@@ -393,6 +367,24 @@ def subir_archivo_anthropic(archivo_subido):
     if not contenido:
         raise ValueError('El archivo seleccionado esta vacio.')
 
+    # Anthropic puede variar el formato aceptado segun version del SDK/API.
+    # Probamos variantes comunes del payload antes de reportar error final.
+    def construir_variantes_payload(file_name, file_bytes, mime):
+        return [
+            ('tuple_name_bytes_mime', (file_name, file_bytes, mime)),
+            ('tuple_name_bytes', (file_name, file_bytes)),
+            ('dict_content', {
+                'name': file_name,
+                'content': file_bytes,
+                'media_type': mime
+            }),
+            ('dict_file', {
+                'file_name': file_name,
+                'bytes': file_bytes,
+                'media_type': mime
+            }),
+        ]
+
     variantes_archivo = []
 
     # Para Excel, priorizamos CSV porque Anthropic lo reconoce de forma mas estable.
@@ -410,56 +402,44 @@ def subir_archivo_anthropic(archivo_subido):
     # Mantener binario original como respaldo final.
     variantes_archivo.append((nombre, contenido, media_type))
 
-    # Elegir un unico metodo soportado por el SDK instalado para evitar
-    # incompatibilidades entre versiones.
-    metodo_carga = None
-    if hasattr(cliente, 'files') and hasattr(cliente.files, 'create'):
-        metodo_carga = 'files.create'
-    elif (
-        hasattr(cliente, 'beta')
-        and hasattr(cliente.beta, 'files')
-        and hasattr(cliente.beta.files, 'upload')
-    ):
-        metodo_carga = 'beta.files.upload'
-    elif (
-        hasattr(cliente, 'beta')
-        and hasattr(cliente.beta, 'files')
-        and hasattr(cliente.beta.files, 'create')
-    ):
-        metodo_carga = 'beta.files.create'
+    def ejecutar_metodo(metodo, payload):
+        if metodo == 'beta.files.upload':
+            return cliente.beta.files.upload(file=payload)
+        if metodo == 'files.create':
+            return cliente.files.create(file=payload)
+        if metodo == 'beta.files.create':
+            return cliente.beta.files.create(file=payload)
+        raise RuntimeError(f'Metodo no soportado: {metodo}')
 
-    if metodo_carga is None:
-        raise RuntimeError(
-            'El SDK de Anthropic instalado no expone metodos de archivos '
-            'compatibles (files.create/beta.files.upload/beta.files.create). '
-            'Actualiza la libreria anthropic para habilitar la sincronizacion de archivos.'
-        )
+    metodos = ['beta.files.upload', 'files.create', 'beta.files.create']
 
     ultimo_error = None
+    errores = []
     for file_name, file_bytes, mime in variantes_archivo:
-        try:
-            payload = (file_name, file_bytes, mime)
-            if metodo_carga == 'files.create':
-                respuesta = cliente.files.create(file=payload)
-            elif metodo_carga == 'beta.files.upload':
-                respuesta = cliente.beta.files.upload(file=payload)
-            else:
-                respuesta = cliente.beta.files.create(file=payload)
-            file_id = getattr(respuesta, 'id', None)
-            if file_id is None and isinstance(respuesta, dict):
-                file_id = respuesta.get('id')
-            return {
-                'file_id': file_id,
-                'nombre': file_name,
-                'bytes': len(file_bytes),
-                'metodo': f'{metodo_carga}:tuple_name_bytes_mime'
-            }
-        except Exception as exc:
-            ultimo_error = exc
+        for metodo in metodos:
+            for payload_tipo, payload in construir_variantes_payload(file_name, file_bytes, mime):
+                try:
+                    respuesta = ejecutar_metodo(metodo, payload)
+                    file_id = getattr(respuesta, 'id', None)
+                    if file_id is None and isinstance(respuesta, dict):
+                        file_id = respuesta.get('id')
+                    return {
+                        'file_id': file_id,
+                        'nombre': file_name,
+                        'bytes': len(file_bytes),
+                        'metodo': f'{metodo}:{payload_tipo}'
+                    }
+                except Exception as exc:
+                    ultimo_error = exc
+                    errores.append(
+                        f'{metodo}:{payload_tipo}:{file_name} -> {exc}'
+                    )
 
     raise RuntimeError(
-        f'No fue posible cargar el archivo a Anthropic con {metodo_carga}. '
-        f'Ultimo error: {ultimo_error}'
+        'No fue posible cargar el archivo a Anthropic. '
+        f'Ultimo error: {ultimo_error}. '
+        'Detalle de intentos: '
+        + ' | '.join(errores[-4:])
     )
 
 
@@ -697,8 +677,7 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
 
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                                  df_proyeccion=None, df_archivo_sincronizado=None,
-                                 nombre_archivo_sincronizado='',
-                                 resumen_ingresos=''):
+                                 nombre_archivo_sincronizado=''):
     pregunta_limpia = str(pregunta_usuario).strip()
     if not pregunta_limpia:
         raise ValueError(
@@ -806,26 +785,12 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
             f'{sample_sync.to_csv(index=False)}'
         )
 
-    ingresos_info = (
-        str(resumen_ingresos).strip()
-        or 'No hay calculo de ingresos en esta sesion (falta el catalogo de '
-           'precios por variedad y longitud, o la proyeccion).'
-    )
-
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde SOLO con informacion disponible en la base cargada, '
-        'la base de proyeccion, el archivo sincronizado activo de esta sesion '
-        'y el bloque de ingresos ya calculados. '
+        'la base de proyeccion y el archivo sincronizado activo de esta sesion. '
         'Si un dato no existe (por ejemplo precio u ocasion), di exactamente: '
         '"No disponible en esta base". No inventes datos ni supuestos. '
-        'Los ingresos del bloque correspondiente ya estan calculados con pandas: '
-        'usalos tal cual para priorizar y explicar, no los recalcules ni '
-        'multipliques tallos por precios por tu cuenta. '
-        'Lo mismo con las probabilidades y los intervalos: vienen de una '
-        'simulacion sobre los errores medidos del modelo, citalos tal cual y no '
-        'estimes probabilidades por tu cuenta. '
-        'Si hay advertencias de cobertura y afectan la respuesta, mencionalas. '
         'Responde en espanol, claro y en bullets cuando aplique.\n\n'
         f'Finca en contexto: {finca_contexto}\n'
         f'Filas en contexto: {len(contexto_df)}\n'
@@ -839,12 +804,10 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'{proyeccion_info}\n'
         'Archivo sincronizado de la sesion:\n'
         f'{archivo_sync_info}\n'
-        'Ingresos ya calculados (no recalcular):\n'
-        f'{ingresos_info}\n'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
-    return consultar_llm(prompt, max_tokens=LLM_MAX_TOKENS_RESPUESTA)
+    return consultar_llm(prompt)
 
 
 def alinear_series_para_ajuste(*series):
@@ -1413,298 +1376,6 @@ def render_subida_archivo_anthropic(file_path):
             elif tipo == 'error':
                 st.error(f'✗ Error: {detalle}')
 
-    render_ingresos_futuros()
-
-
-def _cargar_tabla_subida(archivo):
-    """Lee un Excel/CSV subido para los archivos de precios y de grados."""
-    df = cargar_archivo_a_dataframe(archivo)
-    if df is None or df.empty:
-        raise ValueError(
-            'No se pudo leer el archivo como tabla. Usa Excel o CSV con encabezados.'
-        )
-    return df
-
-
-def render_ingresos_futuros():
-    """Panel de ingresos futuros a partir de un solo catalogo comercial.
-
-    El archivo trae, por variedad y longitud, el % de tallos de esa longitud y su
-    precio. Cada carga se acumula con su fecha: el precio se arrastra desde la
-    ultima carga que lo trajo y el % se toma como la foto de la ultima carga de
-    esa variedad.
-    """
-    with st.expander('Ingresos futuros (catalogo de precios por variedad y longitud)'):
-        st.caption(
-            'El ingreso se calcula aqui con pandas: tallos proyectados x % de la '
-            'longitud x precio de esa longitud y variedad. La IA solo recibe el '
-            'resultado ya calculado para priorizar y explicar, nunca para multiplicar.'
-        )
-
-        historico = ingresos.cargar_catalogo(CARPETA_MERCADO)
-
-        st.write('**1. Catalogo de precios (variedad, longitud, % y precio)**')
-        if historico.empty:
-            st.info('Sin catalogo cargado todavia.')
-        else:
-            st.caption(
-                f'{historico["fecha"].nunique()} carga(s) acumulada(s) | '
-                f'ultima: {pd.to_datetime(historico["fecha"]).max().date()} | '
-                f'{historico["variedad"].nunique()} variedad(es), '
-                f'{historico["grado"].nunique()} longitud(es), '
-                f'{historico["mercado"].nunique()} mercado(s)'
-            )
-
-        st.download_button(
-            'Descargar ejemplo del catalogo',
-            data=ingresos.plantilla_catalogo().to_csv(index=False).encode('utf-8'),
-            file_name='ejemplo_catalogo_precios.csv',
-            mime='text/csv',
-            key='btn_ejemplo_catalogo',
-            help='Formato de referencia para arrancar un analisis nuevo. Tambien '
-                 'se acepta el formato ancho: una fila por variedad y una columna '
-                 'por longitud ("Precio 60" y "% 60").'
-        )
-
-        archivo_catalogo = st.file_uploader(
-            'Archivo del catalogo',
-            key='archivo_catalogo_precios',
-            type=['xlsx', 'xls', 'csv']
-        )
-        col_fecha, col_normalizar = st.columns(2)
-        with col_fecha:
-            fecha_carga = st.date_input(
-                'Fecha de esta carga',
-                key='fecha_catalogo',
-                help='Se usa solo si el archivo no trae columna de fecha. Sirve '
-                     'para recalcular una semana pasada con el catalogo de entonces.'
-            )
-        with col_normalizar:
-            normalizar_pct = st.checkbox(
-                'Normalizar variedades cuyos % no suman 100',
-                key='normalizar_pct_catalogo',
-                help='Desactivado: lo que falte queda sin valorar y se reporta.'
-            )
-        if archivo_catalogo is not None and st.button(
-                'Cargar catalogo', key='btn_cargar_catalogo'):
-            try:
-                tabla = _cargar_tabla_subida(archivo_catalogo)
-                formato = ingresos.formato_catalogo(tabla)
-                catalogo_tidy, fuera = ingresos.normalizar_catalogo(
-                    tabla, normalizar=normalizar_pct, fecha_defecto=fecha_carga)
-                ingresos.acumular_catalogo(
-                    catalogo_tidy, carpeta=CARPETA_MERCADO)
-                if fuera:
-                    st.warning(
-                        'Variedades cuyos % no suman 100: '
-                        + ', '.join(f'{v} ({s:.1f}%)'
-                                    for v, s in list(fuera.items())[:8])
-                    )
-                st.success(
-                    f'Catalogo en formato {formato} cargado: {len(catalogo_tidy)} '
-                    f'combinacion(es) variedad-longitud-mercado.'
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f'Catalogo no cargado: {exc}')
-
-        st.divider()
-
-        proyeccion = st.session_state.get('base_proyeccion_anthropic')
-        faltantes = []
-        if historico.empty:
-            faltantes.append('el catalogo de precios')
-        if proyeccion is None or proyeccion.empty:
-            faltantes.append('una proyeccion generada del modelo')
-
-        if faltantes:
-            st.info(
-                'Para calcular ingresos falta: ' + ', '.join(faltantes) + '.'
-            )
-            return
-
-        st.write('**2. Supuestos del calculo**')
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            mercados = sorted(
-                historico['mercado'].astype(str).unique().tolist())
-            opciones = ['Mejor precio por variedad y longitud'] + [
-                f'Solo {m}' for m in mercados]
-            eleccion = st.selectbox(
-                'Asignacion de mercado', opciones, key='estrategia_mercado',
-                help='"Mejor precio" es el techo de ingreso y la referencia '
-                     'cuando el objetivo es maximizar. Con un mercado fijo, lo que '
-                     'ese mercado no compra queda sin valorar y se reporta.'
-            )
-        with col_b:
-            pct_pesimista = st.number_input(
-                'Escenario pesimista (%)', value=-10.0, step=1.0,
-                key='pct_pesimista'
-            )
-        with col_c:
-            pct_optimista = st.number_input(
-                'Escenario optimista (%)', value=10.0, step=1.0,
-                key='pct_optimista'
-            )
-
-        if eleccion.startswith('Solo '):
-            estrategia, mercado_fijo = 'mercado_fijo', eleccion[5:]
-        else:
-            estrategia, mercado_fijo = 'mejor_precio', None
-
-        try:
-            vigente = ingresos.catalogo_vigente(historico)
-            precio_variedad = ingresos.elegir_mercado(
-                vigente, estrategia=estrategia, mercado_fijo=mercado_fijo)
-            resultado = ingresos.calcular_ingresos(
-                proyeccion,
-                precio_variedad,
-                escenarios={
-                    'pesimista': pct_pesimista / 100.0,
-                    'base': 0.0,
-                    'optimista': pct_optimista / 100.0,
-                },
-                mix_fuera_de_rango=ingresos.variedades_fuera_de_rango(vigente),
-            )
-            tendencia = ingresos.tendencia_precios(historico)
-        except Exception as exc:
-            st.error(f'No se pudo calcular ingresos: {exc}')
-            st.session_state['resumen_ingresos_llm'] = ''
-            return
-
-        st.write('**3. Ingreso proyectado**')
-        m1, m2, m3 = st.columns(3)
-        m1.metric(
-            'Pesimista', f'{resultado.totales["ingreso_pesimista"]:,.0f}')
-        m2.metric('Base', f'{resultado.totales["ingreso_base"]:,.0f}')
-        m3.metric(
-            'Optimista', f'{resultado.totales["ingreso_optimista"]:,.0f}')
-        st.caption(
-            f'Tallos valorados: {resultado.totales["tallos_valorados"]:,.0f} '
-            f'({resultado.diagnostico.cobertura_pct:.1f}% de cobertura)'
-        )
-
-        for aviso in resultado.diagnostico.mensajes():
-            st.warning(aviso)
-
-        st.write('Ranking por variedad')
-        st.dataframe(resultado.por_variedad, width='stretch')
-
-        st.write('Precios aplicados por variedad y longitud')
-        columnas_precio = [
-            c for c in ['variedad', 'grado', 'pct', 'mercado_elegido', 'precio',
-                        'precio_segundo_mercado', 'brecha_pct',
-                        'mercados_disponibles', 'antiguedad_dias']
-            if c in resultado.precios_aplicados.columns
-        ]
-        st.dataframe(
-            resultado.precios_aplicados[columnas_precio], width='stretch')
-
-        if not tendencia.empty:
-            st.write('Tendencia de precios')
-            st.dataframe(tendencia, width='stretch')
-
-        st.write('**4. Probabilidad del ingreso**')
-        st.caption(
-            'Los escenarios de arriba son tres numeros elegidos a mano. Aqui se '
-            'simula el ingreso miles de veces moviendo las dos fuentes de '
-            'incertidumbre reales: cuantos tallos habra y a que precio se venderan.'
-        )
-        errores_modelo = ingresos.cargar_errores_modelo()
-
-        confianza_pct = st.slider(
-            'Confianza requerida (%)', min_value=50, max_value=99, value=80,
-            step=1, key='confianza_ingreso',
-            help='Mueve la barra para ver cuanto ingreso se puede comprometer a '
-                 'ese nivel de probabilidad. A mas exigencia, menos monto.'
-        )
-        escala_volatilidad = st.slider(
-            'Volatilidad de la proyeccion (x la medida)',
-            min_value=0.5, max_value=2.0, value=1.0, step=0.1,
-            key='escala_volatilidad_proyeccion',
-            help='1.0 usa la dispersion medida en las evaluaciones del modelo. '
-                 'Subirla es un supuesto tuyo, no una medicion: sirve para ver que '
-                 'tan sensible es el ingreso si el modelo fuera mas erratico.'
-        )
-        col_meta, col_sim = st.columns(2)
-        with col_meta:
-            meta_ingreso = st.number_input(
-                'Meta de ingreso a evaluar',
-                value=float(resultado.totales['ingreso_base']),
-                step=1000.0, key='meta_ingreso',
-                help='Por defecto, el ingreso base calculado arriba.'
-            )
-        with col_sim:
-            simulaciones = st.select_slider(
-                'Simulaciones', options=[500, 1000, 2000, 5000], value=2000,
-                key='simulaciones_ingreso'
-            )
-
-        try:
-            probabilidad = ingresos.simular_ingresos(
-                resultado,
-                catalogo=historico,
-                proyeccion=proyeccion,
-                errores_modelo=errores_modelo,
-                simulaciones=int(simulaciones),
-                escala_volatilidad_proyeccion=float(escala_volatilidad),
-            )
-        except Exception as exc:
-            st.error(f'No se pudo simular la probabilidad: {exc}')
-            probabilidad = None
-
-        if probabilidad is not None:
-            confianza = confianza_pct / 100.0
-            comprometible = probabilidad.ingreso_comprometible(confianza)
-            inferior, superior = probabilidad.intervalo(0.90)
-            p1, p2, p3 = st.columns(3)
-            p1.metric(f'Ingreso comprometible al {confianza_pct}%',
-                      f'{comprometible:,.0f}')
-            p2.metric('Probabilidad de alcanzar la meta',
-                      f'{probabilidad.probabilidad_de_superar(meta_ingreso):.1f}%')
-            p3.metric('Ingreso esperado', f'{probabilidad.media:,.0f}')
-            st.caption(
-                f'Con {confianza_pct}% de probabilidad el ingreso llega a '
-                f'{comprometible:,.0f} o mas. Intervalo 90%: {inferior:,.0f} a '
-                f'{superior:,.0f}.'
-            )
-
-            curva = probabilidad.curva_confianza()
-            st.write('Ingreso comprometible segun la confianza exigida')
-            st.line_chart(
-                curva.set_index('confianza_pct')['ingreso'], width='stretch')
-
-            conteo, bordes = np.histogram(probabilidad.distribucion, bins=30)
-            st.bar_chart(
-                pd.DataFrame(
-                    {'simulaciones': conteo},
-                    index=np.round(
-                        (bordes[:-1] + bordes[1:]) / 2.0).astype(np.int64)
-                ),
-                width='stretch'
-            )
-
-            if not probabilidad.cumplimiento.empty:
-                st.write(
-                    'Cumplimiento historico del modelo '
-                    f'({probabilidad.casos_evaluados} evaluaciones)'
-                )
-                st.dataframe(probabilidad.cumplimiento, width='stretch')
-            else:
-                st.info(
-                    'Sin los errores medidos del modelo, la probabilidad se apoya '
-                    'en supuestos declarados y no en mediciones.'
-                )
-
-            st.write('Rango de ingreso por variedad')
-            st.dataframe(probabilidad.por_variedad, width='stretch')
-            for concepto, fuente in probabilidad.supuestos.items():
-                st.caption(f'{concepto}: {fuente}')
-
-        # Este resumen es lo que viaja al modelo en lugar de filas crudas.
-        st.session_state['resumen_ingresos_llm'] = ingresos.resumen_para_llm(
-            resultado, tendencia, probabilidad=probabilidad)
-
 
 @st.cache_data(show_spinner=False)
 def leer_excel_subido(archivo_excel):
@@ -2059,8 +1730,7 @@ def render_preguntas_claude(df_base, selected_finca):
                     selected_finca,
                     st.session_state.get('base_proyeccion_anthropic'),
                     st.session_state.get('archivo_sesion_df'),
-                    st.session_state.get('archivo_sesion_nombre', ''),
-                    st.session_state.get('resumen_ingresos_llm', '')
+                    st.session_state.get('archivo_sesion_nombre', '')
                 )
                 st.session_state['respuesta_pregunta_claude'] = respuesta_negocio
                 st.session_state['error_pregunta_claude'] = ''
@@ -2810,30 +2480,27 @@ if file_path is not None:
         split_idx = len(x_train_df)
         split_idx = max(split_idx, 1)
 
-        # El modelo se entrena, se usa y se descarta. Guardarlo en session_state
-        # retenia un RandomForest por variedad durante toda la sesion: en
-        # ASTROFLORES son 114 modelos entrenables, 84 MB de arboles medidos mas
-        # 11.400 objetos de sklearn, y nunca se liberaban. En local sobra RAM y no
-        # se nota; en un contenedor de 512 MB con Streamlit y sklearn ya cargados
-        # no entra. La prediccion es identica: mismo random_state y mismos datos.
-        #
-        # De paso desaparece un bug: la clave del cache era solo el nombre de la
-        # variedad, sin huella de los datos, asi que al cargar un archivo base
-        # nuevo en la misma sesion se reusaba el modelo entrenado con el anterior.
-        modelo = RandomForestRegressor(
-            n_estimators=100,
-            random_state=42,
-            max_depth=16,
-            min_samples_leaf=1,
-            min_samples_split=2,
-            max_features='sqrt'
-        )
-        modelo.fit(x_train_df.iloc[:split_idx],
-                   y_train_df.iloc[:split_idx].values.ravel())
+        model_name = ''.join(
+            ch if ch.isalnum() else '_' for ch in str(var_proy))
+        train_key = f'entrenado_masivo_{model_name}_cal_v2'
+
+        if train_key not in st.session_state:
+            modelo = RandomForestRegressor(
+                n_estimators=100,
+                random_state=42,
+                max_depth=16,
+                min_samples_leaf=1,
+                min_samples_split=2,
+                max_features='sqrt'
+            )
+            modelo.fit(x_train_df.iloc[:split_idx],
+                       y_train_df.iloc[:split_idx].values.ravel())
+            st.session_state[train_key] = modelo
+        else:
+            modelo = st.session_state[train_key]
 
         y_pred = pd.DataFrame(modelo.predict(x_frame),
                               columns=['Estimado_modelo'])
-        del modelo
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
         prod_real_vals = y_frame.iloc[:len(proy_vals), 0].to_numpy(copy=True)
@@ -2990,10 +2657,6 @@ if file_path is not None:
                     'Variedad_proyectada': var_item,
                     'Error': str(e)
                 })
-            # Los estimadores de sklearn dejan ciclos de referencias que el
-            # contador no libera solo. Con 116 variedades seguidas eso se acumula.
-            if i % 25 == 0:
-                gc.collect()
             progreso.progress(i / len(variedades_todas))
 
         if resultados_export:
