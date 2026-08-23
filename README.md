@@ -117,6 +117,16 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - Se incorpora una bandera `sn_alto` para ajustar la sensibilidad de mezcla ante escenarios de alta relacion senal/ruido.
 - Se ajusta la media final de la prediccion para alinearla con la produccion real observada.
 
+### 3.6 Ajuste por Factor de Diferencia
+
+- Se calcula un factor por `Bloque&Varid` a partir de dos medias de 2025.
+- La primera media usa las semanas `1 a 17`.
+- La segunda media usa las semanas `22 a 52`.
+- El factor se define como `Media_2025_Sem22_52 / Media_2025_Sem1_17`.
+- Si no existe factor especifico para una variedad, se usa el factor global ponderado como respaldo.
+- El ajuste se aplica solo a la proyeccion de `2026` desde la semana `17` en adelante.
+- El valor aplicado queda trazado en la exportacion con el origen del factor (`variedad`, `global` o `neutral`).
+
 ## 4. Exportaciones
 
 ### 4.1 Individual
@@ -144,6 +154,7 @@ Contenido:
 - Hoja `MSE_por_BloqueVarid` con `Bloque&Varid`, `MSE`, `MSE_proy_patron` y `S/N` (si disponible).
 - En la hoja `Estimado_modelo` se exportan solo registros del anio 2026, solo las ultimas 4 semanas por variedad y solo filas con `Estimado_modelo > 0`.
 - `Estimado_modelo` se exporta redondeado a entero.
+- En la exportacion se incluyen tambien `Factor_diferencia_2025`, `Semanas_factor_2026_desde_17` y `Origen_factor_2025` para auditoria.
 
 Nota movil:
 

@@ -584,6 +584,100 @@ def construir_cache_patrones_semanales(df_base):
     return cache
 
 
+def cargar_factor_diferencia_por_variedad():
+    cache_key = 'factor_diferencia_2025_config_cache'
+    ruta_eval = Path(__file__).with_name('Evaluacion')
+    ruta_factor = ruta_eval / 'factor_diferencia_2025_por_variedad.csv'
+    ruta_resumen = ruta_eval / 'factor_diferencia_2025_resumen.csv'
+
+    factor_global = 1.0
+    mtime_factor = ruta_factor.stat().st_mtime if ruta_factor.exists() else None
+    mtime_resumen = ruta_resumen.stat().st_mtime if ruta_resumen.exists() else None
+
+    cache = st.session_state.get(cache_key)
+    if isinstance(cache, dict):
+        if (
+            cache.get('mtime_factor') == mtime_factor
+            and cache.get('mtime_resumen') == mtime_resumen
+        ):
+            return cache
+
+    factores = {}
+
+    if ruta_factor.exists():
+        try:
+            df_factor = pd.read_csv(ruta_factor, encoding='utf-8-sig')
+        except Exception:
+            df_factor = pd.DataFrame()
+        if {'Bloque&Varid', 'Factor_diferencia'}.issubset(df_factor.columns):
+            for _, fila in df_factor.iterrows():
+                variedad = str(fila.get('Bloque&Varid', '')).strip()
+                valor_factor = pd.to_numeric(
+                    fila.get('Factor_diferencia'), errors='coerce')
+                if variedad and pd.notna(valor_factor) and np.isfinite(valor_factor) and valor_factor > 0:
+                    factores[variedad] = float(valor_factor)
+
+    if ruta_resumen.exists():
+        try:
+            df_resumen = pd.read_csv(ruta_resumen, encoding='utf-8-sig')
+        except Exception:
+            df_resumen = pd.DataFrame()
+        if not df_resumen.empty and 'Factor_global_ponderado_sumas' in df_resumen.columns:
+            valor_global = pd.to_numeric(
+                df_resumen.loc[0,
+                               'Factor_global_ponderado_sumas'], errors='coerce'
+            )
+            if pd.notna(valor_global) and np.isfinite(valor_global) and valor_global > 0:
+                factor_global = float(valor_global)
+
+    config_factor = {
+        'factores_por_variedad': factores,
+        'factor_global': factor_global,
+        'mtime_factor': mtime_factor,
+        'mtime_resumen': mtime_resumen,
+    }
+    st.session_state[cache_key] = config_factor
+    return config_factor
+
+
+def aplicar_factor_diferencia_2026_sem17(pred_vals, eval_actual_df, var_proy, config_factor):
+    if pred_vals is None:
+        return pred_vals, 1.0, 0, 'neutral'
+
+    factores_por_variedad = config_factor.get('factores_por_variedad', {})
+    factor_global = config_factor.get('factor_global', 1.0)
+    variedad_key = str(var_proy)
+    origen_factor = 'global'
+    if variedad_key in factores_por_variedad:
+        factor_variedad = float(factores_por_variedad.get(variedad_key, 1.0))
+        origen_factor = 'variedad'
+    else:
+        factor_variedad = float(factor_global)
+    if not np.isfinite(factor_variedad) or factor_variedad <= 0:
+        factor_variedad = 1.0
+        origen_factor = 'neutral'
+
+    pred_ajustada = np.asarray(pred_vals, dtype=float).copy()
+    if pred_ajustada.size == 0 or eval_actual_df is None or eval_actual_df.empty:
+        return pred_ajustada, factor_variedad, 0, origen_factor
+
+    anio_eval = pd.to_numeric(
+        eval_actual_df['Anio'], errors='coerce').to_numpy()
+    semana_eval = pd.to_numeric(
+        eval_actual_df['Semana'], errors='coerce').to_numpy()
+    n = min(pred_ajustada.size, anio_eval.size, semana_eval.size)
+    if n <= 0:
+        return pred_ajustada, factor_variedad, 0, origen_factor
+
+    mask_objetivo = (anio_eval[:n] == 2026) & (semana_eval[:n] >= 17)
+    if np.any(mask_objetivo):
+        pred_ajustada[:n][mask_objetivo] = (
+            pred_ajustada[:n][mask_objetivo] * factor_variedad
+        )
+
+    return pred_ajustada, factor_variedad, int(mask_objetivo.sum()), origen_factor
+
+
 def cargar_archivo_a_dataframe(archivo_subido):
     if archivo_subido is None:
         return pd.DataFrame()
@@ -2399,6 +2493,8 @@ if file_path is not None:
             residual_weight=residual_weight,
         )
 
+    config_factor_diferencia = cargar_factor_diferencia_por_variedad()
+
     def proyectar_variedad_masiva(df_base, var_proy, cache_patrones=None):
         df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
         if df_filtered_.empty:
@@ -2562,6 +2658,13 @@ if file_path is not None:
         if media_modelo != 0 and not np.isclose(media_modelo, media_real):
             pred_vals = pred_vals * (media_real / media_modelo)
 
+        pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_sem17(
+            pred_vals,
+            eval_actual_df,
+            var_proy,
+            config_factor_diferencia
+        )
+
         y_pred['Estimado_modelo'] = pred_vals
 
         etiquetas_anio_semana = eval_actual_df.apply(
@@ -2580,6 +2683,9 @@ if file_path is not None:
             'Produccion_real': y_frame.iloc[:n_export, 0].values,
             'Proy_patron': proy.iloc[:n_export].values,
             'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
+            'Factor_diferencia_2025': [factor_variedad] * n_export,
+            'Semanas_factor_2026_desde_17': [semanas_factor_aplicadas] * n_export,
+            'Origen_factor_2025': [origen_factor] * n_export,
         })
         df_export['Error'] = (
             df_export['Produccion_real'] - df_export['Estimado_modelo']
@@ -2664,6 +2770,35 @@ if file_path is not None:
         else:
             df_export_todo = pd.DataFrame(
                 columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
+
+        if (
+            not df_export_todo.empty
+            and {'Variedad_proyectada', 'Origen_factor_2025', 'Factor_diferencia_2025'}.issubset(df_export_todo.columns)
+        ):
+            resumen_factor = (
+                df_export_todo[
+                    ['Variedad_proyectada', 'Origen_factor_2025',
+                        'Factor_diferencia_2025']
+                ]
+                .drop_duplicates(subset=['Variedad_proyectada'])
+            )
+            total_var_factor = int(len(resumen_factor))
+            var_factor_variedad = int(
+                (resumen_factor['Origen_factor_2025'] == 'variedad').sum()
+            )
+            var_factor_global = int(
+                (resumen_factor['Origen_factor_2025'] == 'global').sum()
+            )
+            var_factor_neutral = int(
+                (resumen_factor['Origen_factor_2025'] == 'neutral').sum()
+            )
+            st.caption(
+                'Factor 2025 aplicado en proyeccion 2026 semana >=17: '
+                f'{total_var_factor} variedades | '
+                f'por_variedad={var_factor_variedad}, '
+                f'global={var_factor_global}, '
+                f'neutral={var_factor_neutral}'
+            )
 
         df_sn_por_caso = pd.DataFrame(columns=['Bloque&Varid', 'S/N'])
         if tablas_mse_masivo:
@@ -3056,6 +3191,14 @@ if file_path is not None:
     if media_modelo != 0 and not np.isclose(media_modelo, media_real):
         pred_vals = pred_vals * (media_real / media_modelo)
 
+    config_factor_diferencia = cargar_factor_diferencia_por_variedad()
+    pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_sem17(
+        pred_vals,
+        eval_actual_df,
+        var_proy,
+        config_factor_diferencia
+    )
+
     y_pred['Estimado_modelo'] = pred_vals
 
     # Etiquetas eje X: Anio-Semana alineadas con x_frame
@@ -3156,6 +3299,14 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
+    st.write(
+        'Factor diferencia 2025 aplicado (2026 semana >=17)',
+        round(factor_variedad, 6),
+        'origen:',
+        origen_factor,
+        'semanas afectadas:',
+        semanas_factor_aplicadas
+    )
     with st.expander('Promedio semanal Tallos/m2 por anio', expanded=False):
         st.dataframe(promedio_semanal_anual, use_container_width=True)
 
@@ -3174,6 +3325,9 @@ if file_path is not None:
         'Proy_patron': proy.iloc[:n_export].values,
         'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
         'Factor_correccion': [factor_correccion] * n_export,
+        'Factor_diferencia_2025': [factor_variedad] * n_export,
+        'Semanas_factor_2026_desde_17': [semanas_factor_aplicadas] * n_export,
+        'Origen_factor_2025': [origen_factor] * n_export,
     })
 
     base_proy_individual = df_export[[
