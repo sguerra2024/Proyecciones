@@ -33,7 +33,7 @@ load_dotenv(dotenv_path=dotenv_path if dotenv_path.exists() else None)
 
 anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 llm_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
-openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+openai_model = os.getenv("OPENAI_MODEL", "gpt-5.3-codex")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
 PATRON_FEATURE_WEIGHT = float(os.getenv("PATRON_FEATURE_WEIGHT", "1.5"))
 PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
@@ -136,6 +136,7 @@ def modelos_openai_candidatos(proveedor):
         for modelo in [
             os.getenv("OPENAI_MODEL", ""),
             openai_model,
+            'gpt-5.3-codex',
             'gpt-4.1-mini',
             'gpt-4o-mini'
         ]:
@@ -209,6 +210,18 @@ def consultar_openai_compatible(prompt_usuario, proveedor):
     ultimo_error = None
     for modelo in modelos_candidatos:
         try:
+            if proveedor == 'openai' and ('codex' in modelo.lower() or modelo.lower().startswith('gpt-5')):
+                respuesta = cliente.responses.create(
+                    model=modelo,
+                    input=prompt_usuario,
+                    max_output_tokens=512,
+                )
+                contenido = (
+                    getattr(respuesta, 'output_text', None) or '').strip()
+                if contenido:
+                    return contenido
+                raise RuntimeError('La respuesta del modelo llego vacia.')
+
             respuesta = cliente.chat.completions.create(
                 model=modelo,
                 max_tokens=512,
@@ -640,7 +653,7 @@ def cargar_factor_diferencia_por_variedad():
     return config_factor
 
 
-def aplicar_factor_diferencia_2026_sem17(pred_vals, eval_actual_df, var_proy, config_factor):
+def aplicar_factor_diferencia_2026_ultimas4_semana24(pred_vals, eval_actual_df, var_proy, config_factor):
     if pred_vals is None:
         return pred_vals, 1.0, 0, 'neutral'
 
@@ -669,8 +682,17 @@ def aplicar_factor_diferencia_2026_sem17(pred_vals, eval_actual_df, var_proy, co
     if n <= 0:
         return pred_ajustada, factor_variedad, 0, origen_factor
 
-    mask_objetivo = (anio_eval[:n] == 2026) & (semana_eval[:n] >= 17)
-    if np.any(mask_objetivo):
+    mask_candidata = (anio_eval[:n] == 2026) & (semana_eval[:n] > 24)
+    mask_objetivo = np.zeros(n, dtype=bool)
+    idx_candidatos = np.where(mask_candidata)[0]
+    if idx_candidatos.size > 0:
+        idx_ordenados = sorted(
+            idx_candidatos,
+            key=lambda idx: (semana_eval[idx], idx),
+            reverse=True
+        )
+        idx_aplicacion = idx_ordenados[:4]
+        mask_objetivo[idx_aplicacion] = True
         pred_ajustada[:n][mask_objetivo] = (
             pred_ajustada[:n][mask_objetivo] * factor_variedad
         )
@@ -1214,7 +1236,8 @@ def _ajustar_patron_con_extremos_real_modulo(trabajo, refuerzo_tallos_m2=None):
     return trabajo
 
 
-ajustar_patron_con_extremos_real = _ajustar_patron_con_extremos_real_modulo
+def ajustar_patron_con_extremos_real(trabajo, refuerzo_tallos_m2=None):
+    return trabajo.copy() if trabajo is not None else trabajo
 
 
 def ajustar_prediccion_modelo_con_patron(
@@ -1225,63 +1248,7 @@ def ajustar_prediccion_modelo_con_patron(
     sn_alto=False,
     residual_weight=0.0
 ):
-    pred = np.array(pred_vals, dtype=float, copy=True)
-    proy = np.array(proy_vals, dtype=float, copy=True)
-    n_blend = min(len(pred), len(proy))
-    if n_blend <= 0:
-        return pred
-
-    def _get_numeric_array(df, col_name):
-        if df is None or df.empty:
-            return np.full(0, np.nan, dtype=float)
-        if col_name in df.columns:
-            return pd.to_numeric(df[col_name], errors='coerce').to_numpy(copy=False)
-        return np.full(len(df), np.nan, dtype=float)
-
-    produccion_hist = _get_numeric_array(eval_actual_df, 'Produccion')
-
-    media_hist = float(np.nanmean(produccion_hist)
-                       ) if produccion_hist.size else np.nan
-    std_hist = float(np.nanstd(produccion_hist, ddof=0)
-                     ) if produccion_hist.size else np.nan
-    patron_weight = float(np.clip(patron_prediction_weight, 0.0, 0.55))
-    real_weight = 0.30 if sn_alto else 0.16
-    residual_weight = float(np.clip(residual_weight, 0.0, 0.60))
-
-    for i in range(n_blend):
-        if i == 0:
-            continue
-
-        valor_real = produccion_hist[i] if i < len(produccion_hist) else np.nan
-
-        if np.isfinite(valor_real) and np.isfinite(media_hist) and np.isfinite(std_hist) and std_hist > 0:
-            z_score = (float(valor_real) - media_hist) / std_hist
-            if abs(z_score) > 1.0:
-                pred[i] = (1.0 - real_weight) * pred[i] + \
-                    real_weight * float(valor_real)
-
-        if np.isfinite(proy[i]) and patron_weight > 0:
-            pred[i] = (1.0 - patron_weight) * pred[i] + patron_weight * proy[i]
-
-    if produccion_hist.size:
-        n_residual = min(len(pred), len(produccion_hist))
-        if n_residual > 0:
-            if residual_weight > 0:
-                pred[1:n_residual] = (
-                    (1.0 - residual_weight) * pred[1:n_residual]
-                    + residual_weight * produccion_hist[1:n_residual]
-                )
-
-            if n_residual >= 4:
-                refuerzo_ultimas = 0.08
-                ultimas_idx = slice(n_residual - 4, n_residual)
-                if n_residual > 4:
-                    pred[ultimas_idx] = pred[ultimas_idx] * \
-                        (1.0 + refuerzo_ultimas)
-                else:
-                    pred[ultimas_idx] = pred[ultimas_idx]
-
-    return pred
+    return np.array(pred_vals, dtype=float, copy=True)
 
 
 def construir_objetivo_entrenamiento_con_patron(
@@ -2402,9 +2369,6 @@ if file_path is not None:
             return bool(mse_equivalente > 10**6.5)
         return False
 
-    def ajustar_patron_con_extremos_real(trabajo):
-        return _ajustar_patron_con_extremos_real_modulo(trabajo)
-
     def preparar_dataset_modelo(df_variedad_base, patron_weekly, patron_feature_weight):
         trabajo = (
             df_variedad_base[['Anio', 'Semana', 'Tallos/m2', 'Produccion']]
@@ -2434,7 +2398,6 @@ if file_path is not None:
         trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
             trabajo['Produccion']
         )
-        trabajo = ajustar_patron_con_extremos_real(trabajo)
         trabajo['Incremento_tallos_patron'] = trabajo[
             'Incremento_tallos_patron'
         ].fillna(0.0)
@@ -2475,23 +2438,6 @@ if file_path is not None:
         'Incremento_produccion_patron',
         'sn_alto',
     ]
-
-    def ajustar_prediccion_con_sensibilidad_picos(
-        pred_vals,
-        proy_vals,
-        eval_actual_df,
-        patron_prediction_weight,
-        sn_alto=False,
-        residual_weight=0.0
-    ):
-        return ajustar_prediccion_modelo_con_patron(
-            pred_vals,
-            proy_vals,
-            eval_actual_df,
-            patron_prediction_weight=patron_prediction_weight,
-            sn_alto=sn_alto,
-            residual_weight=residual_weight,
-        )
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
 
@@ -2605,50 +2551,6 @@ if file_path is not None:
             proy_vals,
             prod_real_vals,
         )
-        media_real = float(np.nanmean(prod_real_vals)
-                           ) if prod_real_vals.size else np.nan
-        std_real = float(np.nanstd(prod_real_vals, ddof=0)
-                         ) if prod_real_vals.size else np.nan
-        if np.isfinite(media_real) and np.isfinite(std_real) and std_real > 0:
-            z_score = (prod_real_vals - media_real) / std_real
-            mask_extremo = np.abs(z_score) > 2.0
-            mask_positiva_mod = (z_score >= 1.0) & (z_score <= 2.0)
-            proy_vals_adj = proy_vals.copy()
-            if mask_extremo.any():
-                fuerza = np.clip(
-                    0.20 + 0.15 * (np.abs(z_score[mask_extremo]) - 2.0), 0.20, 0.45)
-                proy_vals_adj[mask_extremo] = (
-                    (1.0 - fuerza) * proy_vals_adj[mask_extremo]
-                    + fuerza * prod_real_vals[mask_extremo]
-                )
-            if mask_positiva_mod.any():
-                fuerza_mod = 0.20
-                proy_vals_adj[mask_positiva_mod] = (
-                    (1.0 - fuerza_mod) * proy_vals_adj[mask_positiva_mod]
-                    + fuerza_mod * prod_real_vals[mask_positiva_mod]
-                )
-                for idx in np.where(mask_positiva_mod)[0]:
-                    for offset in [10, 11, 12]:
-                        future_idx = idx + offset
-                        if 0 <= future_idx < len(proy_vals_adj):
-                            proy_vals_adj[future_idx] = min(
-                                proy_vals_adj[future_idx],
-                                proy_vals_adj[idx] * (1.0 - 0.12)
-                            )
-            proy_vals = proy_vals_adj
-
-        sn_alto = bool(
-            pd.notna(calcular_sn_patron(eval_actual_df))
-            and calcular_sn_patron(eval_actual_df) > 13.0
-        )
-        pred_vals = ajustar_prediccion_con_sensibilidad_picos(
-            pred_vals,
-            proy_vals,
-            eval_actual_df,
-            patron_prediction_weight,
-            sn_alto=sn_alto,
-            residual_weight=AJUSTE_RESIDUAL_WEIGHT
-        )
 
         prod_real_vals = y_frame.iloc[:len(pred_vals), 0].to_numpy()
         media_real = float(np.nanmean(prod_real_vals)
@@ -2658,7 +2560,7 @@ if file_path is not None:
         if media_modelo != 0 and not np.isclose(media_modelo, media_real):
             pred_vals = pred_vals * (media_real / media_modelo)
 
-        pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_sem17(
+        pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_ultimas4_semana24(
             pred_vals,
             eval_actual_df,
             var_proy,
@@ -2684,7 +2586,7 @@ if file_path is not None:
             'Proy_patron': proy.iloc[:n_export].values,
             'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
             'Factor_diferencia_2025': [factor_variedad] * n_export,
-            'Semanas_factor_2026_desde_17': [semanas_factor_aplicadas] * n_export,
+            'Semanas_factor_2026_ultimas4_desde_24': [semanas_factor_aplicadas] * n_export,
             'Origen_factor_2025': [origen_factor] * n_export,
         })
         df_export['Error'] = (
@@ -2793,7 +2695,7 @@ if file_path is not None:
                 (resumen_factor['Origen_factor_2025'] == 'neutral').sum()
             )
             st.caption(
-                'Factor 2025 aplicado en proyeccion 2026 semana >=17: '
+                'Factor 2025 aplicado en proyeccion 2026 (ultimas 4 semanas con semana >24): '
                 f'{total_var_factor} variedades | '
                 f'por_variedad={var_factor_variedad}, '
                 f'global={var_factor_global}, '
@@ -2895,6 +2797,42 @@ if file_path is not None:
         df_export_estimado = df_estimado_ordenado[
             columnas_export
         ].reset_index(drop=True)
+
+        variedades_unicas_proyectadas = (
+            df_export_estimado['Variedad']
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace('', np.nan)
+            .dropna()
+            .nunique()
+            if 'Variedad' in df_export_estimado.columns else 0
+        )
+        casos_unicos_proyectados = (
+            df_export_estimado['Bloque&Varid']
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace('', np.nan)
+            .dropna()
+            .nunique()
+            if 'Bloque&Varid' in df_export_estimado.columns else 0
+        )
+        registros_proyectados = len(df_export_estimado)
+
+        col_variedades, col_casos, col_registros = st.columns(3)
+        col_variedades.metric(
+            'Variedades unicas proyectadas',
+            int(variedades_unicas_proyectadas)
+        )
+        col_casos.metric(
+            'Casos Bloque&Varid',
+            int(casos_unicos_proyectados)
+        )
+        col_registros.metric(
+            'Registros proyectados',
+            int(registros_proyectados)
+        )
 
         base_proy_masiva = df_estimado_ordenado[[
             'Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'
@@ -3166,22 +3104,9 @@ if file_path is not None:
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
     y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
 
-    # Regla agronomica (completamente vectorizada para velocidad)
     pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
 
-    # Mezcla dirigida con la proyeccion del patron (vectorizada)
     proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
-    sn_alto = bool(
-        pd.notna(calcular_sn_patron(eval_actual_df))
-        and calcular_sn_patron(eval_actual_df) > 13.0
-    )
-    pred_vals = ajustar_prediccion_con_sensibilidad_picos(
-        pred_vals,
-        proy_vals,
-        eval_actual_df,
-        patron_prediction_weight,
-        sn_alto=sn_alto
-    )
 
     # Ajuste de media: si la media del modelo difiere de la media de produccion,
     # escalar las predicciones para igualarlas.
@@ -3192,7 +3117,7 @@ if file_path is not None:
         pred_vals = pred_vals * (media_real / media_modelo)
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
-    pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_sem17(
+    pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_ultimas4_semana24(
         pred_vals,
         eval_actual_df,
         var_proy,
@@ -3300,7 +3225,7 @@ if file_path is not None:
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
     st.write(
-        'Factor diferencia 2025 aplicado (2026 semana >=17)',
+        'Factor diferencia 2025 aplicado (ultimas 4 semanas 2026 con semana >24)',
         round(factor_variedad, 6),
         'origen:',
         origen_factor,
@@ -3326,7 +3251,7 @@ if file_path is not None:
         'Estimado_modelo': y_pred.iloc[:n_export, 0].values,
         'Factor_correccion': [factor_correccion] * n_export,
         'Factor_diferencia_2025': [factor_variedad] * n_export,
-        'Semanas_factor_2026_desde_17': [semanas_factor_aplicadas] * n_export,
+        'Semanas_factor_2026_ultimas4_desde_24': [semanas_factor_aplicadas] * n_export,
         'Origen_factor_2025': [origen_factor] * n_export,
     })
 

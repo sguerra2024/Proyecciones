@@ -4,7 +4,6 @@ Aplicacion para estimar produccion semanal por variedad (`Bloque&Varid`) usando:
 
 - patrones historicos similares,
 - un modelo `RandomForestRegressor`,
-- reglas agronomicas de suavizado y control de picos,
 - exportacion de resultados a Excel.
 
 Incluye dos modos:
@@ -112,9 +111,6 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 ### 3.5 Ajustes Aplicados
 
 - Se construye un dataset con variables de nivel, cambios y ciclo semanal.
-- Se mezcla la prediccion del modelo con la proyeccion del patron mediante `patron_prediction_weight` y un ajuste residual configurable.
-- Se aplican ajustes sobre la serie del patron en semanas con desviaciones altas (z-score) para amortiguar picos.
-- Se incorpora una bandera `sn_alto` para ajustar la sensibilidad de mezcla ante escenarios de alta relacion senal/ruido.
 - Se ajusta la media final de la prediccion para alinearla con la produccion real observada.
 
 ### 3.6 Ajuste por Factor de Diferencia
@@ -184,7 +180,7 @@ Endpoints principales:
 
 El proyecto mantiene conectividad con proveedores de IA para soporte de análisis y carga de archivos. La lógica está implementada en el archivo `ProyAst.py` y soporta los siguientes proveedores:
 
-- `anthropic`
+- `anthropic` con Claude como configuracion predeterminada
 - `openai`
 - `github` (GitHub Models)
 
@@ -192,13 +188,14 @@ El proyecto mantiene conectividad con proveedores de IA para soporte de análisi
 
 Se requieren las siguientes variables de entorno para habilitar las conexiones:
 
-- `LLM_PROVIDER`: proveedor activo (`anthropic`, `openai` o `github`)
+- `LLM_PROVIDER`: proveedor activo; el valor predeterminado es `anthropic`
+- `ANTHROPIC_MODEL`: modelo principal; el valor predeterminado es `claude-3-5-sonnet-latest`
 - `ANTHROPIC_API_KEY` o `ANTHROPIC_KEY`: clave para Anthropic
 - `OPENAI_API_KEY`: clave para OpenAI
 - `GITHUB_MODELS_TOKEN` o `GITHUB_TOKEN`: token para GitHub Models
 - `GITHUB_MODELS_BASE_URL`: URL base opcional para GitHub Models
 - `OPENAI_BASE_URL`: URL base opcional para OpenAI compatible
-- `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GITHUB_MODEL`: modelos preferidos por proveedor
+- `OPENAI_MODEL` y `GITHUB_MODEL`: modelos alternativos por proveedor
 
 ### 6.2 Funcionalidad soportada
 
