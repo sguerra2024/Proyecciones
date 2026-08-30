@@ -1,5 +1,4 @@
 from sklearn.metrics import mean_squared_error
-from sklearn.ensemble import RandomForestRegressor
 import pickle
 import io
 import importlib
@@ -13,6 +12,8 @@ from dotenv import load_dotenv, dotenv_values
 import os
 import sys
 import mimetypes
+
+from projection_core import fit_production_model
 
 agents_dir = Path(__file__).with_name("agents")
 if agents_dir.exists():
@@ -2524,19 +2525,13 @@ if file_path is not None:
 
         model_name = ''.join(
             ch if ch.isalnum() else '_' for ch in str(var_proy))
-        train_key = f'entrenado_masivo_{model_name}_cal_v2'
+        train_key = f'entrenado_masivo_{model_name}_cal_v3'
 
         if train_key not in st.session_state:
-            modelo = RandomForestRegressor(
-                n_estimators=100,
-                random_state=42,
-                max_depth=16,
-                min_samples_leaf=1,
-                min_samples_split=2,
-                max_features='sqrt'
+            modelo = fit_production_model(
+                x_train_df.iloc[:split_idx],
+                y_train_df.iloc[:split_idx].values.ravel()
             )
-            modelo.fit(x_train_df.iloc[:split_idx],
-                       y_train_df.iloc[:split_idx].values.ravel())
             st.session_state[train_key] = modelo
         else:
             modelo = st.session_state[train_key]
@@ -3065,18 +3060,10 @@ if file_path is not None:
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    train_key = f'entrenado_{model_name}_cal_v2'
+    train_key = f'entrenado_{model_name}_cal_v3'
 
     if train_key not in st.session_state:
-        modelo = RandomForestRegressor(
-            n_estimators=100,
-            random_state=42,
-            max_depth=20,
-            min_samples_leaf=1,
-            min_samples_split=2,
-            max_features='sqrt'
-        )
-        modelo.fit(X_train, y_train.values.ravel())
+        modelo = fit_production_model(X_train, y_train.values.ravel())
         st.session_state[train_key] = modelo
         with open(model_file, 'wb') as f:
             pickle.dump(modelo, f)

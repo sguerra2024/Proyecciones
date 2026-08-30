@@ -11,6 +11,9 @@ Incluye dos modos:
 - Proyeccion individual por variedad.
 - Proyeccion masiva por finca.
 
+Streamlit y FastAPI usan el mismo modelo de produccion definido en
+`projection_core.py`; no existe un modelo alternativo exclusivo para la API.
+
 ## 1. Requisitos de Entrada (Excel)
 
 La aplicacion espera un archivo `.xlsx` con al menos estas columnas:
@@ -120,7 +123,7 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - La segunda media usa las semanas `22 a 52`.
 - El factor se define como `Media_2025_Sem22_52 / Media_2025_Sem1_17`.
 - Si no existe factor especifico para una variedad, se usa el factor global ponderado como respaldo.
-- El ajuste se aplica solo a la proyeccion de `2026` desde la semana `17` en adelante.
+- El ajuste se aplica solo a las 4 semanas mas recientes de `2026` cuya semana sea mayor que `24`.
 - El valor aplicado queda trazado en la exportacion con el origen del factor (`variedad`, `global` o `neutral`).
 
 ## 4. Exportaciones
@@ -176,6 +179,10 @@ Endpoints principales:
 - `POST /api/v1/predict`
 - `POST /predict`
 
+Los endpoints de prediccion entrenan el mismo `RandomForestRegressor` de
+produccion usado por Streamlit y devuelven la variedad objetivo, el patron
+seleccionado, RMSE, promedio de produccion y trazabilidad del factor 2025.
+
 ## 6. Conexiones API con IA
 
 El proyecto mantiene conectividad con proveedores de IA para soporte de análisis y carga de archivos. La lógica está implementada en el archivo `ProyAst.py` y soporta los siguientes proveedores:
@@ -219,9 +226,9 @@ Incluye:
 
 ## 7. Estructura del Proyecto
 
-- `ProyAst.py`: interfaz Streamlit y flujo completo de proyeccion.
+- `ProyAst.py`: interfaz Streamlit, seleccion de patron y exportaciones.
 - `api_render.py`: API para consumo externo/despliegue.
-- `projection_core.py`: utilidades de validacion/proyeccion para API.
+- `projection_core.py`: modelo de produccion compartido por Streamlit y API.
 - `modelos/`: modelos serializados por variedad.
 
 ## 8. Observaciones Operativas
