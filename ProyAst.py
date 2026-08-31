@@ -38,15 +38,8 @@ openai_model = os.getenv("OPENAI_MODEL", "gpt-5.3-codex")
 github_model = os.getenv("GITHUB_MODEL", openai_model)
 PATRON_FEATURE_WEIGHT = float(os.getenv("PATRON_FEATURE_WEIGHT", "1.5"))
 PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
-PICO_NO_CICLO_UMBRAL_REL = float(os.getenv("PICO_NO_CICLO_UMBRAL_REL", "0.06"))
-PICO_NO_CICLO_UMBRAL_PENDIENTE = float(
-    os.getenv("PICO_NO_CICLO_UMBRAL_PENDIENTE", "0.02"))
-PICO_NO_CICLO_MAX_BLEND = float(os.getenv("PICO_NO_CICLO_MAX_BLEND", "0.75"))
-MINIMOS_MERCADO_CANTIDAD = 3
-PICO_MERCADO_INCREMENTO = float(os.getenv("PICO_MERCADO_INCREMENTO", "0.12"))
 REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
 TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.0"))
-AJUSTE_RESIDUAL_WEIGHT = float(os.getenv("AJUSTE_RESIDUAL_WEIGHT", "0.30"))
 PATRON_TRAIN_TARGET_WEIGHT = float(
     os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.50")
 )
@@ -188,8 +181,8 @@ def normalizar_error_github_models(exc):
         or ('error code: 410' in texto_error_lower and 'retirement' in texto_error_lower)
     ):
         return RuntimeError(
-            'GitHub Models no esta disponible por su proceso de retiro. '
-            'Configura LLM_PROVIDER=anthropic u openai para continuar.'
+            'GitHub Models no esta disponible temporalmente por su proceso '
+            'de retiro. La consulta se mantuvo en el proveedor GitHub.'
         )
     if (
         'models permission is required' in texto_error_lower
@@ -1281,7 +1274,7 @@ def construir_objetivo_entrenamiento_con_patron(
 models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
 
-logo_path = Path(__file__).with_name("Denmar.jpeg")
+logo_path = Path(__file__).with_name("agromejora_data_logo.jpg")
 if logo_path.exists():
     st.image(str(logo_path), width=100)
 

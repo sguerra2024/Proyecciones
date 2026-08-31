@@ -204,6 +204,23 @@ def test_sincronizar_archivo_llm_anthropic_marca_modo_remoto(monkeypatch):
     assert info["file_id"] == "file-abc"
 
 
+def test_proveedor_predeterminado_sincroniza_remoto_con_anthropic(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setattr(ProyAst, "llm_provider", "anthropic")
+    monkeypatch.setattr(
+        ProyAst,
+        "subir_archivo_anthropic",
+        lambda archivo: {"file_id": "file-default", "nombre": archivo.name},
+    )
+
+    assert ProyAst.obtener_llm_provider() == "anthropic"
+    info = ProyAst.sincronizar_archivo_llm(
+        ProyAst.ArchivoEnMemoria("presentacion.xlsx", b"datos"))
+
+    assert info["modo"] == "remoto"
+    assert info["file_id"] == "file-default"
+
+
 # --- registrar_sincronizacion_en_sesion -----------------------------------
 
 def test_registrar_sincronizacion_en_sesion_modo_local(st_falso):
@@ -378,7 +395,7 @@ def test_normalizar_error_github_models_detecta_retiro():
     )
 
     assert "proceso de retiro" in str(error)
-    assert "LLM_PROVIDER=anthropic" in str(error)
+    assert "proveedor GitHub" in str(error)
 
 
 def test_normalizar_error_github_models_detecta_410_con_retirement():
@@ -399,3 +416,23 @@ def test_normalizar_error_github_models_devuelve_el_error_original():
     original = RuntimeError("Error code: 500 - internal server error")
 
     assert ProyAst.normalizar_error_github_models(original) is original
+
+
+def test_consultar_llm_no_cambia_de_github_si_esta_en_retiro(monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "github")
+
+    def fake_consultar_openai_compatible(prompt, proveedor):
+        llamadas.append((prompt, proveedor))
+        raise RuntimeError(
+            "GitHub Models no esta disponible temporalmente por su proceso "
+            "de retiro. La consulta se mantuvo en el proveedor GitHub."
+        )
+
+    monkeypatch.setattr(
+        ProyAst, "consultar_openai_compatible", fake_consultar_openai_compatible)
+
+    with pytest.raises(RuntimeError, match="proveedor GitHub"):
+        ProyAst.consultar_llm("analiza estos datos")
+
+    assert llamadas == [("analiza estos datos", "github")]
