@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 REQUIRED_COLUMNS = {"Bloque&Varid", "Tallos/m2", "Produccion"}
 PRODUCTION_REQUIRED_COLUMNS = REQUIRED_COLUMNS | {
@@ -30,6 +30,51 @@ MODEL_PARAMS = {
     "min_samples_split": 2,
     "max_features": "sqrt",
 }
+BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
+DEFAULT_MAX_BUFFER_RATE = 0.10
+BUFFER_RISK_THRESHOLD = 0.60
+
+
+def load_overestimation_calibration(
+    evaluation_path: "Path | None" = None,
+) -> dict[str, float | int | str]:
+    """Calibra el amortiguador usando solo errores relativos negativos."""
+    path = evaluation_path or (
+        Path(__file__).with_name("Evaluacion")
+        / "errores_evaluacion_modelo.csv"
+    )
+    fallback = {
+        "max_buffer_rate": DEFAULT_MAX_BUFFER_RATE,
+        "risk_threshold": BUFFER_RISK_THRESHOLD,
+        "overestimation_cases": 0,
+        "source": "fallback",
+    }
+    if not path.exists():
+        return fallback
+
+    try:
+        evaluation = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return fallback
+    if "error_relativo" not in evaluation.columns:
+        return fallback
+
+    relative_error = pd.to_numeric(
+        evaluation["error_relativo"], errors="coerce"
+    ).dropna()
+    overestimation_on_real = -relative_error[relative_error < 0]
+    if overestimation_on_real.empty:
+        return fallback
+
+    overestimation_on_prediction = (
+        overestimation_on_real / (1.0 + overestimation_on_real)
+    )
+    return {
+        "max_buffer_rate": float(overestimation_on_prediction.median()),
+        "risk_threshold": BUFFER_RISK_THRESHOLD,
+        "overestimation_cases": int(len(overestimation_on_real)),
+        "source": str(path),
+    }
 
 
 def load_excel_dataframe(source: Any) -> pd.DataFrame:
@@ -89,6 +134,167 @@ def fit_production_model(
     model = build_production_model()
     model.fit(features, np.asarray(target, dtype=float).reshape(-1))
     return model
+
+
+def apply_overestimation_buffer(
+    production_model: RandomForestRegressor,
+    training_features: pd.DataFrame,
+    training_df: pd.DataFrame,
+    evaluation_df: pd.DataFrame,
+    predictions: np.ndarray,
+    m2_variedad: float,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Calcula un amortiguador informativo sin alterar la prediccion oficial."""
+    base_predictions = np.asarray(predictions, dtype=float).reshape(-1)
+    historical_predictions = production_model.predict(training_features)
+    actual = training_df["Produccion"].to_numpy(dtype=float)
+    overestimation = np.maximum(historical_predictions - actual, 0.0)
+    average_error = float(np.mean(overestimation)
+                          ) if overestimation.size else 0.0
+    valid_area = float(m2_variedad)
+    if not np.isfinite(valid_area) or valid_area <= 0:
+        raise ValueError("m2Variedad debe ser un numero mayor que cero.")
+
+    if overestimation.size < 5 or not np.any(overestimation > 0):
+        return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
+
+    calibration = load_overestimation_calibration()
+    max_buffer_rate = float(calibration["max_buffer_rate"])
+    risk_threshold = float(calibration["risk_threshold"])
+
+    overestimation_per_m2 = overestimation / valid_area
+
+    train_buffer_features = pd.DataFrame({
+        "Prediccion_base": historical_predictions,
+        "m2Variedad": np.full(len(historical_predictions), valid_area),
+        "Tallos/m2": training_df["Tallos/m2"].to_numpy(dtype=float),
+        "Semana": training_df["Semana"].to_numpy(dtype=float),
+    })
+    prediction_buffer_features = pd.DataFrame({
+        "Prediccion_base": base_predictions,
+        "m2Variedad": np.full(len(base_predictions), valid_area),
+        "Tallos/m2": evaluation_df["Tallos/m2"].to_numpy(dtype=float),
+        "Semana": evaluation_df["Semana"].to_numpy(dtype=float),
+    })
+    buffer_model = RandomForestRegressor(**MODEL_PARAMS)
+    buffer_model.fit(
+        train_buffer_features[BUFFER_COLUMNS], overestimation_per_m2
+    )
+    risk_model = RandomForestClassifier(
+        **MODEL_PARAMS, class_weight="balanced")
+    risk_model.fit(
+        train_buffer_features[BUFFER_COLUMNS], overestimation > 0
+    )
+    positive_class_index = int(np.where(risk_model.classes_ == True)[0][0])
+    overestimation_risk = risk_model.predict_proba(
+        prediction_buffer_features[BUFFER_COLUMNS]
+    )[:, positive_class_index]
+    estimated_buffer = np.clip(
+        buffer_model.predict(
+            prediction_buffer_features[BUFFER_COLUMNS]
+        ) * valid_area,
+        0.0,
+        np.maximum(base_predictions, 0.0) * max_buffer_rate,
+    )
+    buffer = np.where(
+        overestimation_risk >= risk_threshold, estimated_buffer, 0.0
+    )
+    prediction_mean = float(np.mean(base_predictions)
+                            ) if base_predictions.size else 0.0
+    buffer_rate = float(
+        np.mean(buffer) / prediction_mean) if prediction_mean > 0 else 0.0
+    return base_predictions.copy(), buffer, average_error, buffer_rate
+
+
+def calculate_additional_buffer_area(
+    buffer_stems: "pd.Series | np.ndarray",
+    stems_per_m2: "pd.Series | np.ndarray",
+) -> np.ndarray:
+    """Convierte tallos de amortiguador en m2 adicionales, redondeando arriba."""
+    buffer_values = np.asarray(buffer_stems, dtype=float).reshape(-1)
+    productivity = np.asarray(stems_per_m2, dtype=float).reshape(-1)
+    if buffer_values.size != productivity.size:
+        raise ValueError(
+            "Amortiguador y Tallos/m2 deben tener igual longitud.")
+
+    area = np.where(buffer_values <= 0, 0.0, np.nan)
+    valid = (
+        np.isfinite(buffer_values)
+        & np.isfinite(productivity)
+        & (productivity > 0)
+    )
+    area[valid] = np.ceil(np.maximum(
+        buffer_values[valid], 0.0) / productivity[valid])
+    return area
+
+
+def calculate_buffer_area_from_projection(
+    buffer_stems: "pd.Series | np.ndarray",
+    projected_stems: "pd.Series | np.ndarray",
+    total_area_m2: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calcula productividad proyectada y la fraccion de area amortiguadora."""
+    total_area = float(total_area_m2)
+    if not np.isfinite(total_area) or total_area <= 0:
+        raise ValueError(
+            "El area total de la variedad debe ser mayor que cero.")
+
+    projected_values = np.asarray(projected_stems, dtype=float).reshape(-1)
+    projected_productivity = projected_values / total_area
+    buffer_area = calculate_additional_buffer_area(
+        buffer_stems, projected_productivity
+    )
+    valid_area = np.isfinite(buffer_area)
+    buffer_area[valid_area] = np.minimum(
+        buffer_area[valid_area], np.floor(total_area)
+    )
+    return projected_productivity, buffer_area
+
+
+def add_buffer_projection_columns(
+    projection_df: pd.DataFrame,
+    total_area_m2: float,
+) -> pd.DataFrame:
+    """Agrega el mismo escenario amortiguado a proyecciones individuales o masivas."""
+    required = {"Estimado_modelo", "Amortiguador_sobreestimacion"}
+    missing = required - set(projection_df.columns)
+    if missing:
+        raise ValueError(
+            "Faltan columnas para calcular el amortiguador: "
+            + ", ".join(sorted(missing))
+        )
+
+    result = projection_df.copy()
+    result["Estimado_con_amortiguador_IA"] = np.maximum(
+        pd.to_numeric(result["Estimado_modelo"], errors="coerce")
+        - pd.to_numeric(
+            result["Amortiguador_sobreestimacion"], errors="coerce"
+        ),
+        0.0,
+    )
+    projected_productivity, buffer_area = calculate_buffer_area_from_projection(
+        result["Amortiguador_sobreestimacion"],
+        result["Estimado_modelo"],
+        total_area_m2,
+    )
+    result["Tallos_m2_variedad"] = projected_productivity
+    result["M2_amortiguador_adicional"] = buffer_area
+    result["M2_variedad_disponibles"] = float(total_area_m2)
+    result["Estado_M2_amortiguador"] = np.select(
+        [
+            result["M2_amortiguador_adicional"].isna()
+            & (result["Amortiguador_sobreestimacion"] > 0),
+            result["M2_amortiguador_adicional"] > float(total_area_m2),
+            result["Amortiguador_sobreestimacion"] <= 0,
+        ],
+        [
+            "No calculable: Tallos/m2 es cero",
+            "Supera M2 disponibles",
+            "Sin amortiguador requerido",
+        ],
+        default="Viable con area disponible",
+    )
+    return result
 
 
 def _exclude_latest_four_weeks(df: pd.DataFrame) -> pd.DataFrame:
@@ -210,9 +416,9 @@ def _apply_difference_factor(
     adjusted = np.asarray(predictions, dtype=float).copy()
     years = pd.to_numeric(evaluation_df["Anio"], errors="coerce").to_numpy()
     weeks = pd.to_numeric(evaluation_df["Semana"], errors="coerce").to_numpy()
-    candidates = np.where((years == 2026) & (weeks > 24))[0]
-    selected = sorted(candidates, key=lambda index: (
-        weeks[index], index), reverse=True)[:4]
+    selected = np.where(
+        (years == 2026) & (weeks >= 24) & (weeks <= 52)
+    )[0]
     adjusted[selected] *= factor
     return adjusted, factor, len(selected), origin
 
@@ -268,6 +474,17 @@ def train_projection_model(
     predictions, factor, affected_weeks, factor_origin = _apply_difference_factor(
         predictions, evaluation_df, str(selected_var)
     )
+    m2_values = pd.to_numeric(subset["m2Variedad"], errors="coerce").dropna()
+    if m2_values.empty:
+        raise ValueError("m2Variedad no contiene valores numericos validos.")
+    predictions, buffer, average_overestimation, buffer_rate = apply_overestimation_buffer(
+        model,
+        features,
+        training_df,
+        evaluation_df,
+        predictions,
+        float(m2_values.iloc[0]),
+    )
     metric_df = _exclude_latest_four_weeks(
         evaluation_df.assign(Estimado_modelo=predictions)
     )
@@ -282,6 +499,10 @@ def train_projection_model(
             "produccion_real": real_production.round(2),
             "produccion_patron": evaluation_df["Produccion_patron"].round(2),
             "estimado_modelo": np.round(predictions, 2),
+            "amortiguador_sobreestimacion": np.round(buffer, 2),
+            "estimado_con_amortiguador_ia": np.round(
+                np.maximum(predictions - buffer, 0.0), 2
+            ),
         }
     )
 
@@ -295,6 +516,8 @@ def train_projection_model(
         "factor_diferencia_2025": factor,
         "factor_origin": factor_origin,
         "factor_affected_weeks": affected_weeks,
+        "amortiguador_promedio_historico": average_overestimation,
+        "amortiguador_porcentaje": buffer_rate * 100.0,
         "preview": chart_df.tail(20).to_dict(orient="records"),
     }
     if include_chart_df:
