@@ -33,6 +33,8 @@ MODEL_PARAMS = {
 BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
+REAL_PRODUCTION_TARGET_WEIGHT = 0.70
+PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
 
 
 def load_overestimation_calibration(
@@ -455,8 +457,10 @@ def train_projection_model(
         raise ValueError("No hay datos validos para generar la proyeccion.")
 
     target = (
-        0.5 * training_df["Produccion"].to_numpy(dtype=float)
-        + 0.5 * training_df["Produccion_patron"].to_numpy(dtype=float)
+        REAL_PRODUCTION_TARGET_WEIGHT
+        * training_df["Produccion"].to_numpy(dtype=float)
+        + PATTERN_PRODUCTION_TARGET_WEIGHT
+        * training_df["Produccion_patron"].to_numpy(dtype=float)
     )
     features = training_df[MODEL_COLUMNS].reset_index(drop=True)
     features["Semana_orden"] = np.arange(len(features), dtype=float)
