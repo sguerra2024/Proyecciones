@@ -457,6 +457,34 @@ def test_export_masivo_solo_incluye_proyeccion_original():
     assert salida.iloc[0].tolist() == [2026, 35, "001RED", 1000]
 
 
+def test_excel_masivo_agrega_tabla_analisis_avanzado():
+    proyeccion_original = pd.DataFrame({
+        "Bloque&Varid": ["001RED"],
+        "Estimado_modelo": [1000],
+    })
+    analisis_avanzado = pd.DataFrame({
+        "Variedad_proyectada": ["001RED"],
+        "area_calculada_m2": [14],
+        "promedio_tallos_m2_ultimas_12_semanas": [7.5],
+        "producto_m2_por_promedio_tallos_m2": [105.0],
+    })
+
+    contenido = ProyAst.crear_excel_proyeccion_masiva(
+        proyeccion_original,
+        analisis_avanzado,
+    )
+    libro = pd.ExcelFile(io.BytesIO(contenido))
+
+    assert libro.sheet_names == ["Proyeccion_original", "Analisis_avanzado"]
+    assert pd.read_excel(
+        io.BytesIO(contenido), sheet_name="Proyeccion_original"
+    ).columns.tolist() == ["Bloque&Varid", "Estimado_modelo"]
+    tabla_analisis = pd.read_excel(
+        io.BytesIO(contenido), sheet_name="Analisis_avanzado"
+    )
+    assert tabla_analisis.iloc[0].tolist() == ["001RED", 14, 7.5, 105]
+
+
 # --- construir_cache_patrones_semanales -----------------------------------
 
 def test_construir_cache_patrones_semanales_reutiliza_patrones():

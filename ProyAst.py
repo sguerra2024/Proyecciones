@@ -591,6 +591,21 @@ def preparar_salida_proyeccion_masiva(df_proyeccion, columnas_identificacion):
     return salida[identificadores + ['Estimado_modelo']].reset_index(drop=True)
 
 
+def crear_excel_proyeccion_masiva(
+    df_proyeccion_original,
+    df_analisis_avanzado,
+):
+    buffer_excel = io.BytesIO()
+    with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
+        df_proyeccion_original.to_excel(
+            writer, sheet_name='Proyeccion_original', index=False
+        )
+        df_analisis_avanzado.to_excel(
+            writer, sheet_name='Analisis_avanzado', index=False
+        )
+    return buffer_excel.getvalue()
+
+
 def construir_cache_patrones_semanales(df_base):
     cache = {}
     if df_base is None or df_base.empty:
@@ -2951,6 +2966,9 @@ if file_path is not None:
             df_estimado_ordenado['Tallos_m2_variedad'].reset_index(drop=True),
             errors='coerce',
         )
+        resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
+            base_proy_masiva
+        )
         st.session_state['base_proyeccion_anthropic'] = base_proy_masiva
         st.session_state['dashboard_finca_activo'] = True
 
@@ -2972,20 +2990,19 @@ if file_path is not None:
             if detalle_fallos:
                 st.info(f'Motivos de no proyeccion:\n{detalle_fallos}')
 
-        buffer_masivo = io.BytesIO()
-        with pd.ExcelWriter(buffer_masivo, engine='openpyxl') as writer:
-            df_export_estimado.to_excel(
-                writer, sheet_name='Proyeccion_original', index=False
-            )
+        bytes_excel_masivo = crear_excel_proyeccion_masiva(
+            df_export_estimado,
+            resumen_ultimo_ciclo,
+        )
         st.download_button(
             'Exportar datos a Excel',
-            data=buffer_masivo.getvalue(),
+            data=bytes_excel_masivo,
             file_name='Proyecto_todas_variedades.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             key='descargar_masivo'
         )
 
-        st.session_state['dashboard_export_bytes'] = buffer_masivo.getvalue()
+        st.session_state['dashboard_export_bytes'] = bytes_excel_masivo
         st.session_state['dashboard_export_name'] = 'Proyecto_todas_variedades.xlsx'
         st.session_state['dashboard_export_mime'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         sincronizar_export_generado_automatico(
@@ -3005,9 +3022,6 @@ if file_path is not None:
                 df_export_amortiguado['M2 Amortiguador'],
                 errors='coerce'
             ).mean())
-            resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
-                base_proy_masiva
-            )
             promedio_tallos_m2 = pd.to_numeric(
                 resumen_ultimo_ciclo[
                     'promedio_tallos_m2_ultimas_12_semanas'
