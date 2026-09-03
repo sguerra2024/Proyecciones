@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+import unicodedata
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv, dotenv_values
@@ -580,21 +581,14 @@ def simplificar_salida_amortiguada(df_proyeccion, columnas_identificacion):
 
 def preparar_salida_proyeccion_masiva(df_proyeccion, columnas_identificacion):
     salida = df_proyeccion.copy()
-    salida['Proyeccion_con_amortiguador_IA'] = pd.to_numeric(
-        salida['Estimado_con_amortiguador_IA'], errors='coerce'
-    )
-    columnas_proyeccion = [
-        'Estimado_modelo', 'Proyeccion_con_amortiguador_IA'
-    ]
-    for columna in columnas_proyeccion:
-        salida[columna] = np.rint(
-            pd.to_numeric(salida[columna], errors='coerce')
-        ).astype('Int64')
+    salida['Estimado_modelo'] = np.rint(
+        pd.to_numeric(salida['Estimado_modelo'], errors='coerce')
+    ).astype('Int64')
     identificadores = [
         columna for columna in columnas_identificacion
         if columna in salida.columns
     ]
-    return salida[identificadores + columnas_proyeccion].reset_index(drop=True)
+    return salida[identificadores + ['Estimado_modelo']].reset_index(drop=True)
 
 
 def construir_cache_patrones_semanales(df_base):
@@ -833,6 +827,81 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
     return consultar_llm(prompt)
 
 
+def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
+    columnas_salida = [
+        'Variedad_proyectada',
+        'area_calculada_m2',
+        'promedio_tallos_m2_ultimas_12_semanas',
+        'producto_m2_por_promedio_tallos_m2',
+    ]
+    if df_proyeccion is None or df_proyeccion.empty:
+        return pd.DataFrame(columns=columnas_salida)
+
+    trabajo = df_proyeccion.copy()
+    columna_tallos = next(
+        (
+            columna for columna in ['Tallos_por_m2', 'Tallos_m2_variedad']
+            if columna in trabajo.columns
+        ),
+        None,
+    )
+    requeridas = {'Variedad_proyectada', 'M2 Amortiguador'}
+    if columna_tallos is None or not requeridas.issubset(trabajo.columns):
+        return pd.DataFrame(columns=columnas_salida)
+
+    if 'Anio_Semana' in trabajo.columns:
+        partes = trabajo['Anio_Semana'].astype(str).str.split(
+            '-', n=1, expand=True
+        )
+        trabajo['__anio'] = pd.to_numeric(partes[0], errors='coerce')
+        trabajo['__semana'] = pd.to_numeric(partes[1], errors='coerce')
+    elif {'Anio', 'Semana'}.issubset(trabajo.columns):
+        trabajo['__anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
+        trabajo['__semana'] = pd.to_numeric(
+            trabajo['Semana'], errors='coerce'
+        )
+    else:
+        return pd.DataFrame(columns=columnas_salida)
+
+    trabajo['__tallos_m2'] = pd.to_numeric(
+        trabajo[columna_tallos], errors='coerce'
+    )
+    trabajo['__area_m2'] = pd.to_numeric(
+        trabajo['M2 Amortiguador'], errors='coerce'
+    )
+    trabajo = trabajo[
+        (trabajo['__anio'] >= 2026)
+        & trabajo['__semana'].between(1, 53)
+    ].sort_values(
+        ['Variedad_proyectada', '__anio', '__semana']
+    )
+
+    filas = []
+    for variedad, grupo in trabajo.groupby('Variedad_proyectada'):
+        ultimas = grupo.tail(12)
+        areas_validas = ultimas['__area_m2'].dropna()
+        tallos_validos = ultimas['__tallos_m2'].dropna()
+        area_actual = areas_validas.iloc[-1] if not areas_validas.empty else np.nan
+        if pd.notna(area_actual) and float(area_actual).is_integer():
+            area_actual = int(area_actual)
+        promedio_tallos = (
+            float(tallos_validos.mean())
+            if not tallos_validos.empty else np.nan
+        )
+        producto_area_tallos = (
+            float(area_actual) * promedio_tallos
+            if pd.notna(area_actual) and pd.notna(promedio_tallos)
+            else np.nan
+        )
+        filas.append({
+            'Variedad_proyectada': variedad,
+            'area_calculada_m2': area_actual,
+            'promedio_tallos_m2_ultimas_12_semanas': promedio_tallos,
+            'producto_m2_por_promedio_tallos_m2': producto_area_tallos,
+        })
+    return pd.DataFrame(filas, columns=columnas_salida)
+
+
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                                  df_proyeccion=None, df_archivo_sincronizado=None,
                                  nombre_archivo_sincronizado=''):
@@ -841,19 +910,37 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         raise ValueError(
             'Escribe una pregunta antes de consultar a Anthropic.')
 
-    columnas = [str(col) for col in df_base.columns]
-    precio_cols = [
-        col for col in columnas
-        if re.search(r'precio|price|valor', col, flags=re.IGNORECASE)
-    ]
-    ocasion_cols = [
-        col for col in columnas
-        if re.search(r'ocasi|occasion|evento|uso|segmento|canal|cliente', col, flags=re.IGNORECASE)
-    ]
-
-    col_variedad = 'Bloque&Varid' if 'Bloque&Varid' in df_base.columns else (
-        'Variedad' if 'Variedad' in df_base.columns else None
+    pregunta_normalizada = ''.join(
+        caracter
+        for caracter in unicodedata.normalize(
+            'NFKD', pregunta_limpia.casefold()
+        )
+        if not unicodedata.combining(caracter)
     )
+    definicion_amortiguador = (
+        'ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR '
+        'EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO.'
+    )
+    recomendacion_amortiguador = (
+        'PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO '
+        'EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE.'
+    )
+    consulta_sobre_amortiguador = bool(
+        re.search(r'\bamortiguador\b', pregunta_normalizada)
+    )
+    consulta_definicion = bool(re.search(
+        r'\bfuncion\b|\bque\s+es\b|\bsignifica\w*\b|'
+        r'\bexplica\w*\b|\bdefin\w*\b|\bconcepto\b',
+        pregunta_normalizada,
+    ))
+    if consulta_sobre_amortiguador and consulta_definicion:
+        return definicion_amortiguador + ' ' + recomendacion_amortiguador
+    if (
+        re.search(r'\brecomiend\w*\b', pregunta_normalizada)
+        and consulta_sobre_amortiguador
+    ):
+        return recomendacion_amortiguador
+
     col_finca = 'Finca' if 'Finca' in df_base.columns else None
 
     contexto_df = df_base.copy()
@@ -866,26 +953,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         raise ValueError(
             'No hay datos en el contexto seleccionado para responder.')
 
-    fincas_disponibles = []
-    if col_finca is not None:
-        fincas_disponibles = sorted(
-            contexto_df[col_finca].dropna().astype(str).unique().tolist()
-        )
-
-    top_variedades_csv = 'No disponible'
-    if col_variedad is not None:
-        top_variedades = (
-            contexto_df[col_variedad]
-            .dropna()
-            .astype(str)
-            .value_counts()
-            .head(20)
-            .reset_index()
-        )
-        top_variedades.columns = ['Variedad', 'Registros']
-        top_variedades_csv = top_variedades.to_csv(index=False)
-
-    proyeccion_info = 'No disponible en esta sesion.'
+    resumen_info = 'No disponible en esta sesion.'
     if df_proyeccion is not None and not df_proyeccion.empty:
         proy_ctx = df_proyeccion.copy()
         if 'Finca_proyectada' in proy_ctx.columns and finca_contexto is not None:
@@ -893,101 +961,25 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                 proy_ctx['Finca_proyectada'].astype(str) == str(finca_contexto)
             ].copy()
 
-        if not proy_ctx.empty and all(
-            col in proy_ctx.columns
-            for col in ['Variedad_proyectada', 'Estimado_modelo']
-        ):
-            resumen_proy = (
-                proy_ctx
-                .groupby('Variedad_proyectada', as_index=False)
-                .agg(
-                    semanas=('Estimado_modelo', 'count'),
-                    estimado_promedio=('Estimado_modelo', 'mean')
-                )
-                .sort_values('estimado_promedio', ascending=False)
-                .head(50)
-            )
-            muestra_cols = [
-                col for col in ['Finca_proyectada', 'Variedad_proyectada',
-                                'Anio_Semana', 'Estimado_modelo',
-                                'Amortiguador_tallos', 'Tallos_por_m2',
-                                'M2 Amortiguador', 'M2 Disponibles',
-                                'Estado M2 Amortiguador',
-                                'Proyeccion_con_amortiguador_IA']
-                if col in proy_ctx.columns
-            ]
-            muestra_proy = proy_ctx[muestra_cols].head(150)
-            amortiguador_info = 'No disponible en esta proyeccion.'
-            columnas_amortiguador = {
-                'M2 Amortiguador', 'Proyeccion_con_amortiguador_IA'
-            }
-            if columnas_amortiguador.issubset(proy_ctx.columns):
-                resumen_amortiguador = (
-                    proy_ctx
-                    .groupby('Variedad_proyectada', as_index=False)
-                    .agg(
-                        m2_amortiguador_promedio=('M2 Amortiguador', 'mean'),
-                        proyeccion_amortiguada_promedio=(
-                            'Proyeccion_con_amortiguador_IA', 'mean'
-                        ),
-                    )
-                    .head(50)
-                )
-                amortiguador_info = resumen_amortiguador.to_csv(index=False)
-            proyeccion_info = (
-                f'Filas proyeccion en contexto: {len(proy_ctx)}\n'
-                'Resumen proyeccion por variedad (csv):\n'
-                f'{resumen_proy.to_csv(index=False)}\n'
-                'Resumen del amortiguador IA por variedad (csv):\n'
-                f'{amortiguador_info}\n'
-                'Muestra de base proyectada (csv):\n'
-                f'{muestra_proy.to_csv(index=False)}'
-            )
-
-    archivo_sync_info = 'No hay archivo sincronizado activo en la sesion.'
-    if df_archivo_sincronizado is not None and not df_archivo_sincronizado.empty:
-        sync_df = df_archivo_sincronizado.copy()
-        col_finca_sync = 'Finca' if 'Finca' in sync_df.columns else None
-        if finca_contexto is not None and col_finca_sync is not None:
-            sync_filtrado = sync_df[
-                sync_df[col_finca_sync].astype(str) == str(finca_contexto)
-            ].copy()
-            if sync_filtrado.empty:
-                sync_filtrado = sync_df
-        else:
-            sync_filtrado = sync_df
-
-        sample_sync = sync_filtrado.head(150)
-        archivo_sync_info = (
-            f'Archivo sincronizado activo: {nombre_archivo_sincronizado or "sin nombre"}\n'
-            f'Filas disponibles: {len(sync_filtrado)}\n'
-            f'Columnas disponibles: {", ".join([str(c) for c in sync_filtrado.columns])}\n'
-            'Muestra de archivo sincronizado (csv):\n'
-            f'{sample_sync.to_csv(index=False)}'
-        )
+        resumen = resumir_area_y_tallos_m2_ultimas_12_semanas(proy_ctx)
+        if not resumen.empty:
+            resumen_info = resumen.to_csv(index=False)
 
     prompt = (
         'Eres un analista de datos del negocio floricola. '
-        'Responde SOLO con informacion disponible en la base cargada, '
-        'la base de proyeccion y el archivo sincronizado activo de esta sesion. '
-        'Distingue Estimado_modelo como proyeccion oficial y '
-        'Proyeccion_con_amortiguador_IA como escenario informativo. '
-        'Para recomendaciones operativas usa M2 Amortiguador. '
-        'Si un dato no existe (por ejemplo precio u ocasion), di exactamente: '
-        '"No disponible en esta base". No inventes datos ni supuestos. '
-        'Responde en espanol, claro y en bullets cuando aplique.\n\n'
+        'Responde en espanol usando unicamente el resumen y la definicion de '
+        'negocio suministrados. '
+        'Definicion autorizada de AMORTIGUADOR M2: '
+        f'{definicion_amortiguador} '
+        f'{recomendacion_amortiguador} '
+        'Nunca afirmes que el amortiguador no forma parte de la informacion. '
+        'Despliega exclusivamente el area calculada en M2, el promedio de '
+        'Tallos/m2 de las ultimas 12 semanas disponibles de 2026 o posteriores '
+        'y el producto de ambos valores. '
+        'No muestres otras metricas ni inventes datos.\n\n'
         f'Finca en contexto: {finca_contexto}\n'
-        f'Filas en contexto: {len(contexto_df)}\n'
-        f'Columnas disponibles: {", ".join(columnas)}\n'
-        f'Columnas de precio detectadas: {precio_cols if precio_cols else "Ninguna"}\n'
-        f'Columnas de ocasion/uso detectadas: {ocasion_cols if ocasion_cols else "Ninguna"}\n'
-        f'Fincas detectadas en contexto: {fincas_disponibles[:20]}\n'
-        'Top variedades por registros (csv):\n'
-        f'{top_variedades_csv}\n'
-        'Base de proyeccion del modelo:\n'
-        f'{proyeccion_info}\n'
-        'Archivo sincronizado de la sesion:\n'
-        f'{archivo_sync_info}\n'
+        'Resumen exclusivo de Analisis Avanzado (csv):\n'
+        f'{resumen_info}\n'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
@@ -1835,6 +1827,31 @@ def render_preguntas_claude(df_base, selected_finca):
         st.caption(
             'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
+
+        base_proyeccion = st.session_state.get('base_proyeccion_anthropic')
+        if base_proyeccion is not None and not base_proyeccion.empty:
+            contexto_proyeccion = base_proyeccion.copy()
+            if (
+                selected_finca is not None
+                and 'Finca_proyectada' in contexto_proyeccion.columns
+            ):
+                contexto_proyeccion = contexto_proyeccion[
+                    contexto_proyeccion['Finca_proyectada'].astype(str)
+                    == str(selected_finca)
+                ]
+            resumen_amortiguador = resumir_area_y_tallos_m2_ultimas_12_semanas(
+                contexto_proyeccion
+            )
+            for _, fila in resumen_amortiguador.iterrows():
+                producto = fila['producto_m2_por_promedio_tallos_m2']
+                if pd.notna(producto):
+                    st.metric(
+                        label=(
+                            'M2 amortiguador x promedio Tallos/m2 - '
+                            f"{fila['Variedad_proyectada']}"
+                        ),
+                        value=f'{float(producto):,.2f} tallos',
+                    )
 
         if st.session_state.get('mostrar_dashboard_ia', False):
             render_dashboard_base(df_base, usar_expander=False)
@@ -2882,11 +2899,6 @@ if file_path is not None:
             df_estimado_ordenado.reset_index(drop=True),
             columnas_base_export,
         )
-        buffer_masivo_amortiguado = io.BytesIO()
-        with pd.ExcelWriter(buffer_masivo_amortiguado, engine='openpyxl') as writer:
-            df_export_amortiguado.to_excel(
-                writer, sheet_name='Proyeccion_amortiguada', index=False
-            )
 
         variedades_unicas_proyectadas = (
             df_export_estimado['Variedad']
@@ -2935,6 +2947,10 @@ if file_path is not None:
         base_proy_masiva['Estimado_modelo'] = (
             df_estimado_ordenado['Estimado_modelo'].reset_index(drop=True)
         )
+        base_proy_masiva['Tallos_por_m2'] = pd.to_numeric(
+            df_estimado_ordenado['Tallos_m2_variedad'].reset_index(drop=True),
+            errors='coerce',
+        )
         st.session_state['base_proyeccion_anthropic'] = base_proy_masiva
         st.session_state['dashboard_finca_activo'] = True
 
@@ -2958,31 +2974,8 @@ if file_path is not None:
 
         buffer_masivo = io.BytesIO()
         with pd.ExcelWriter(buffer_masivo, engine='openpyxl') as writer:
-            # Exportar columnas base mas Estimado_modelo.
             df_export_estimado.to_excel(
-                writer, sheet_name='Estimado_modelo', index=False)
-            df_mse_export = pd.DataFrame(resumen)
-            if not df_mse_export.empty:
-                df_mse_export = df_mse_export.rename(columns={
-                    'Variedad_proyectada': 'Bloque&Varid',
-                    'MSE_modelo': 'MSE'
-                })
-                df_mse_export = df_mse_export.merge(
-                    df_sn_por_caso,
-                    on='Bloque&Varid',
-                    how='left'
-                )
-                columnas_mse = [
-                    col for col in ['Bloque&Varid', 'MSE', 'MSE_proy_patron', 'S/N']
-                    if col in df_mse_export.columns
-                ]
-                df_mse_export = df_mse_export[columnas_mse]
-            else:
-                df_mse_export = pd.DataFrame(
-                    columns=['Bloque&Varid', 'MSE', 'MSE_proy_patron', 'S/N']
-                )
-            df_mse_export.to_excel(
-                writer, sheet_name='MSE_por_BloqueVarid', index=False
+                writer, sheet_name='Proyeccion_original', index=False
             )
         st.download_button(
             'Exportar datos a Excel',
@@ -3002,17 +2995,8 @@ if file_path is not None:
             dataframe=df_export_estimado,
             state=st.session_state
         )
-        sincronizar_export_generado_automatico(
-            buffer_masivo_amortiguado.getvalue(),
-            'Proyecto_todas_variedades_amortiguado.xlsx',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            dataframe=df_export_amortiguado,
-            state=st.session_state
-        )
-
         st.divider()
         with st.expander('Análisis Avanzado', expanded=False):
-            st.subheader('Amortiguador de sobreestimacion')
             st.caption(
                 'Escenario informativo de IA. El archivo oficial conserva '
                 'Estimado_modelo sin aplicar el amortiguador.'
@@ -3021,29 +3005,23 @@ if file_path is not None:
                 df_export_amortiguado['M2 Amortiguador'],
                 errors='coerce'
             ).mean())
-            promedio_proyeccion_amortiguada = float(pd.to_numeric(
-                df_export_amortiguado['Proyeccion_con_amortiguador_IA'],
-                errors='coerce'
-            ).mean())
-            col_m2, col_proyeccion = st.columns(2)
+            resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
+                base_proy_masiva
+            )
+            promedio_tallos_m2 = pd.to_numeric(
+                resumen_ultimo_ciclo[
+                    'promedio_tallos_m2_ultimas_12_semanas'
+                ],
+                errors='coerce',
+            ).mean()
+            col_m2, col_tallos_m2 = st.columns(2)
             col_m2.metric(
-                'Area adicional promedio', f'{promedio_m2_adicional:.0f} m²'
+                'AMORTIGUADOR CALCULADO M2', f'{promedio_m2_adicional:.0f} m²'
             )
-            col_proyeccion.metric(
-                'Proyeccion amortiguada promedio',
-                f'{promedio_proyeccion_amortiguada:.0f} tallos'
-            )
-            st.dataframe(
-                df_export_amortiguado.tail(20),
-                use_container_width=True,
-                hide_index=True
-            )
-            st.download_button(
-                'Exportar proyeccion con amortiguador',
-                data=buffer_masivo_amortiguado.getvalue(),
-                file_name='Proyecto_todas_variedades_amortiguado.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key='descargar_masivo_amortiguado'
+            col_tallos_m2.metric(
+                'Tallos/m2 promedio ultimo ciclo',
+                f'{promedio_tallos_m2:.2f} tallos/m²'
+                if pd.notna(promedio_tallos_m2) else 'Sin datos'
             )
             render_subida_archivo_anthropic(file_path)
             render_preguntas_claude(df, selected_finca)
@@ -3437,43 +3415,28 @@ if file_path is not None:
         pares_patron_ind['Proy_patron']
     ) if not pares_patron_ind.empty else np.nan
 
+    df_export_original = preparar_salida_proyeccion_masiva(
+        df_export,
+        ['Variedad_proyectada', 'Anio_Semana'],
+    )
     buffer_individual = io.BytesIO()
     with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
-        df_export.to_excel(writer, sheet_name='Datos_modelo', index=False)
-        df_export[
-            ['Anio_Semana', 'Produccion_real', 'Estimado_modelo',
-             'Error', 'Error_abs', 'Error_pct']
-        ].to_excel(writer, sheet_name='Errores_modelo', index=False)
-        promedio_semanal_anual.to_excel(
-            writer, sheet_name='Promedio_anual', index=False)
-        pd.DataFrame([
-            {'metrica': 'MSE_modelo', 'valor': mse_modelo},
-            {'metrica': 'MSE_proy_patron', 'valor': mse_patron},
-            {'metrica': 'factor_correccion', 'valor': factor_correccion},
-            {'metrica': 'MAE_modelo',
-                'valor': df_metricas_ind['Error_abs'].mean() if not df_metricas_ind.empty else np.nan},
-            {'metrica': 'MAPE_modelo_pct',
-                'valor': df_metricas_ind['Error_pct'].mean() if not df_metricas_ind.empty else np.nan},
-            {'metrica': 'variedad_proyectada', 'valor': var_proy}
-        ]).to_excel(writer, sheet_name='Resumen', index=False)
+        df_export_original.to_excel(
+            writer, sheet_name='Proyeccion_original', index=False
+        )
 
     df_export_amortiguado_individual = simplificar_salida_amortiguada(
         df_export,
         ['Variedad_proyectada', 'Anio_Semana'],
     )
-    buffer_individual_amortiguado = io.BytesIO()
-    with pd.ExcelWriter(
-        buffer_individual_amortiguado, engine='openpyxl'
-    ) as writer:
-        df_export_amortiguado_individual.to_excel(
-            writer, sheet_name='Proyeccion_amortiguada', index=False
-        )
-
     base_proy_individual = df_export_amortiguado_individual.copy()
     base_proy_individual['Finca_proyectada'] = str(selected_finca)
     base_proy_individual['Estimado_modelo'] = np.rint(pd.to_numeric(
         df_export['Estimado_modelo'], errors='coerce'
     )).astype('Int64')
+    base_proy_individual['Tallos_por_m2'] = pd.to_numeric(
+        df_export['Tallos_m2_variedad'], errors='coerce'
+    ).reset_index(drop=True)
     base_actual = st.session_state.get('base_proyeccion_anthropic')
     if base_actual is None or base_actual.empty:
         st.session_state['base_proyeccion_anthropic'] = base_proy_individual
@@ -3503,13 +3466,6 @@ if file_path is not None:
         st.session_state['dashboard_export_name'],
         st.session_state['dashboard_export_mime']
     )
-    sincronizar_export_generado_automatico(
-        buffer_individual_amortiguado.getvalue(),
-        'Proyecto_amortiguado.xlsx',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        dataframe=df_export_amortiguado_individual,
-        state=st.session_state
-    )
     y_pred_tail = y_pred.tail(4).round(0).copy()
     etiquetas_tail = etiquetas_anio_semana.iloc[:len(
         y_pred)].tail(len(y_pred_tail)).values
@@ -3519,7 +3475,6 @@ if file_path is not None:
     if not mostrar_analisis_avanzado:
         st.divider()
         with st.expander('Análisis Avanzado', expanded=False):
-            st.subheader('Amortiguador de sobreestimacion')
             st.caption(
                 'Escenario informativo de IA. No modifica Estimado_modelo, '
                 'los graficos ni las metricas oficiales.'
@@ -3528,31 +3483,23 @@ if file_path is not None:
                 df_export_amortiguado_individual['M2 Amortiguador'],
                 errors='coerce'
             ).mean())
-            promedio_proyeccion_individual = float(pd.to_numeric(
-                df_export_amortiguado_individual[
-                    'Proyeccion_con_amortiguador_IA'
+            resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
+                base_proy_individual
+            )
+            promedio_tallos_m2 = pd.to_numeric(
+                resumen_ultimo_ciclo[
+                    'promedio_tallos_m2_ultimas_12_semanas'
                 ],
-                errors='coerce'
-            ).mean())
-            col_m2, col_proyeccion = st.columns(2)
+                errors='coerce',
+            ).mean()
+            col_m2, col_tallos_m2 = st.columns(2)
             col_m2.metric(
-                'Area adicional promedio', f'{promedio_m2_individual:.0f} m²'
+                'AMORTIGUADOR CALCULADO M2', f'{promedio_m2_individual:.0f} m²'
             )
-            col_proyeccion.metric(
-                'Proyeccion amortiguada promedio',
-                f'{promedio_proyeccion_individual:.0f} tallos'
-            )
-            st.dataframe(
-                df_export_amortiguado_individual.tail(12),
-                use_container_width=True,
-                hide_index=True
-            )
-            st.download_button(
-                'Exportar proyeccion con amortiguador',
-                data=buffer_individual_amortiguado.getvalue(),
-                file_name='Proyecto_amortiguado.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key='descargar_individual_amortiguado'
+            col_tallos_m2.metric(
+                'Tallos/m2 promedio ultimo ciclo',
+                f'{promedio_tallos_m2:.2f} tallos/m²'
+                if pd.notna(promedio_tallos_m2) else 'Sin datos'
             )
             render_subida_archivo_anthropic(file_path)
             render_preguntas_claude(df, selected_finca)

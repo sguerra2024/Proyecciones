@@ -7,10 +7,36 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ProyAst import (  # noqa: E402
+    aplicar_factor_diferencia_2026_semanas_24_52,
     ajustar_patron_con_extremos_real,
     ajustar_prediccion_modelo_con_patron,
     alinear_series_para_ajuste,
+    construir_objetivo_entrenamiento_con_patron,
 )
+from projection_core import _apply_difference_factor  # noqa: E402
+
+
+def test_factor_media_2025_se_aplica_solo_semanas_24_a_52_de_2026(monkeypatch):
+    evaluacion = pd.DataFrame({
+        'Anio': [2025, 2026, 2026, 2026, 2026],
+        'Semana': [24, 23, 24, 52, 53],
+    })
+    predicciones = np.full(5, 100.0)
+    config = {'factores_por_variedad': {'VARIEDAD': 0.8}, 'factor_global': 0.9}
+
+    ajustadas, factor, afectadas, origen = aplicar_factor_diferencia_2026_semanas_24_52(
+        predicciones, evaluacion, 'VARIEDAD', config)
+
+    np.testing.assert_array_equal(ajustadas, [100.0, 100.0, 80.0, 80.0, 100.0])
+    assert (factor, afectadas, origen) == (0.8, 2, 'variedad')
+
+    monkeypatch.setattr(
+        'projection_core._load_difference_factors', lambda: config)
+    ajustadas_core, _, afectadas_core, _ = _apply_difference_factor(
+        predicciones, evaluacion, 'VARIEDAD')
+
+    np.testing.assert_array_equal(ajustadas_core, ajustadas)
+    assert afectadas_core == 2
 
 
 def test_prediccion_no_se_mezcla_con_patron_ni_produccion_real():
@@ -88,3 +114,17 @@ def test_alineacion_de_series_para_ajuste():
     )
 
     assert len(pred_alineado) == len(proy_alineado) == len(real_alineado) == 2
+
+
+def test_objetivo_entrenamiento_pondera_70_real_y_30_patron():
+    entrenamiento = pd.DataFrame({
+        'Produccion': [100.0, 200.0],
+        'Produccion_patron': [300.0, 400.0],
+    })
+
+    objetivo = construir_objetivo_entrenamiento_con_patron(
+        entrenamiento,
+        patron_train_target_weight=0.30,
+    )
+
+    np.testing.assert_array_equal(objetivo, [160.0, 260.0])

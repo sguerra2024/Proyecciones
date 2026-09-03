@@ -40,7 +40,7 @@ PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
 def load_overestimation_calibration(
     evaluation_path: "Path | None" = None,
 ) -> dict[str, float | int | str]:
-    """Calibra el amortiguador usando solo errores relativos negativos."""
+    """Calibra el limite con errores relativos positivos y negativos."""
     path = evaluation_path or (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
@@ -48,7 +48,9 @@ def load_overestimation_calibration(
     fallback = {
         "max_buffer_rate": DEFAULT_MAX_BUFFER_RATE,
         "risk_threshold": BUFFER_RISK_THRESHOLD,
+        "error_cases": 0,
         "overestimation_cases": 0,
+        "underestimation_cases": 0,
         "source": "fallback",
     }
     if not path.exists():
@@ -64,17 +66,19 @@ def load_overestimation_calibration(
     relative_error = pd.to_numeric(
         evaluation["error_relativo"], errors="coerce"
     ).dropna()
-    overestimation_on_real = -relative_error[relative_error < 0]
-    if overestimation_on_real.empty:
+    relative_error = relative_error[relative_error < 1.0]
+    if relative_error.empty:
         return fallback
 
-    overestimation_on_prediction = (
-        overestimation_on_real / (1.0 + overestimation_on_real)
+    absolute_error_on_prediction = (
+        relative_error.abs() / (1.0 - relative_error)
     )
     return {
-        "max_buffer_rate": float(overestimation_on_prediction.median()),
+        "max_buffer_rate": float(absolute_error_on_prediction.median()),
         "risk_threshold": BUFFER_RISK_THRESHOLD,
-        "overestimation_cases": int(len(overestimation_on_real)),
+        "error_cases": int(len(relative_error)),
+        "overestimation_cases": int((relative_error < 0).sum()),
+        "underestimation_cases": int((relative_error > 0).sum()),
         "source": str(path),
     }
 
@@ -146,25 +150,25 @@ def apply_overestimation_buffer(
     predictions: np.ndarray,
     m2_variedad: float,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
-    """Calcula un amortiguador informativo sin alterar la prediccion oficial."""
+    """Estima un amortiguador bilateral sin alterar la prediccion oficial."""
     base_predictions = np.asarray(predictions, dtype=float).reshape(-1)
     historical_predictions = production_model.predict(training_features)
     actual = training_df["Produccion"].to_numpy(dtype=float)
-    overestimation = np.maximum(historical_predictions - actual, 0.0)
-    average_error = float(np.mean(overestimation)
-                          ) if overestimation.size else 0.0
+    signed_error = historical_predictions - actual
+    average_error = float(np.mean(signed_error)
+                          ) if signed_error.size else 0.0
     valid_area = float(m2_variedad)
     if not np.isfinite(valid_area) or valid_area <= 0:
         raise ValueError("m2Variedad debe ser un numero mayor que cero.")
 
-    if overestimation.size < 5 or not np.any(overestimation > 0):
+    if signed_error.size < 5 or not np.any(~np.isclose(signed_error, 0.0)):
         return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
 
     calibration = load_overestimation_calibration()
     max_buffer_rate = float(calibration["max_buffer_rate"])
     risk_threshold = float(calibration["risk_threshold"])
 
-    overestimation_per_m2 = overestimation / valid_area
+    signed_error_per_m2 = signed_error / valid_area
 
     train_buffer_features = pd.DataFrame({
         "Prediccion_base": historical_predictions,
@@ -180,31 +184,46 @@ def apply_overestimation_buffer(
     })
     buffer_model = RandomForestRegressor(**MODEL_PARAMS)
     buffer_model.fit(
-        train_buffer_features[BUFFER_COLUMNS], overestimation_per_m2
+        train_buffer_features[BUFFER_COLUMNS], signed_error_per_m2
     )
-    risk_model = RandomForestClassifier(
-        **MODEL_PARAMS, class_weight="balanced")
-    risk_model.fit(
-        train_buffer_features[BUFFER_COLUMNS], overestimation > 0
-    )
-    positive_class_index = int(np.where(risk_model.classes_ == True)[0][0])
-    overestimation_risk = risk_model.predict_proba(
+    estimated_error = buffer_model.predict(
         prediction_buffer_features[BUFFER_COLUMNS]
-    )[:, positive_class_index]
-    estimated_buffer = np.clip(
-        buffer_model.predict(
+    ) * valid_area
+
+    direction_labels = signed_error > 0
+    if np.unique(direction_labels).size == 1:
+        direction_probability = np.ones_like(base_predictions)
+    else:
+        risk_model = RandomForestClassifier(
+            **MODEL_PARAMS, class_weight="balanced")
+        risk_model.fit(
+            train_buffer_features[BUFFER_COLUMNS], direction_labels
+        )
+        positive_class_index = int(np.where(risk_model.classes_ == True)[0][0])
+        overestimation_probability = risk_model.predict_proba(
             prediction_buffer_features[BUFFER_COLUMNS]
-        ) * valid_area,
-        0.0,
-        np.maximum(base_predictions, 0.0) * max_buffer_rate,
+        )[:, positive_class_index]
+        direction_probability = np.where(
+            estimated_error >= 0,
+            overestimation_probability,
+            1.0 - overestimation_probability,
+        )
+
+    maximum_buffer = np.maximum(base_predictions, 0.0) * max_buffer_rate
+    estimated_buffer = np.clip(
+        estimated_error * direction_probability,
+        -maximum_buffer,
+        maximum_buffer,
     )
     buffer = np.where(
-        overestimation_risk >= risk_threshold, estimated_buffer, 0.0
+        direction_probability >= risk_threshold, estimated_buffer, 0.0
     )
     prediction_mean = float(np.mean(base_predictions)
                             ) if base_predictions.size else 0.0
     buffer_rate = float(
-        np.mean(buffer) / prediction_mean) if prediction_mean > 0 else 0.0
+        np.mean(np.abs(buffer)) / prediction_mean
+        if prediction_mean > 0 else 0.0
+    )
     return base_predictions.copy(), buffer, average_error, buffer_rate
 
 
@@ -212,21 +231,23 @@ def calculate_additional_buffer_area(
     buffer_stems: "pd.Series | np.ndarray",
     stems_per_m2: "pd.Series | np.ndarray",
 ) -> np.ndarray:
-    """Convierte tallos de amortiguador en m2 adicionales, redondeando arriba."""
+    """Convierte el amortiguador firmado en m2, redondeando su magnitud arriba."""
     buffer_values = np.asarray(buffer_stems, dtype=float).reshape(-1)
     productivity = np.asarray(stems_per_m2, dtype=float).reshape(-1)
     if buffer_values.size != productivity.size:
         raise ValueError(
             "Amortiguador y Tallos/m2 deben tener igual longitud.")
 
-    area = np.where(buffer_values <= 0, 0.0, np.nan)
+    area = np.where(np.isclose(buffer_values, 0.0), 0.0, np.nan)
     valid = (
         np.isfinite(buffer_values)
         & np.isfinite(productivity)
         & (productivity > 0)
     )
-    area[valid] = np.ceil(np.maximum(
-        buffer_values[valid], 0.0) / productivity[valid])
+    area[valid] = (
+        np.sign(buffer_values[valid])
+        * np.ceil(np.abs(buffer_values[valid]) / productivity[valid])
+    )
     return area
 
 
@@ -247,8 +268,8 @@ def calculate_buffer_area_from_projection(
         buffer_stems, projected_productivity
     )
     valid_area = np.isfinite(buffer_area)
-    buffer_area[valid_area] = np.minimum(
-        buffer_area[valid_area], np.floor(total_area)
+    buffer_area[valid_area] = np.sign(buffer_area[valid_area]) * np.minimum(
+        np.abs(buffer_area[valid_area]), np.floor(total_area)
     )
     return projected_productivity, buffer_area
 
@@ -285,16 +306,16 @@ def add_buffer_projection_columns(
     result["Estado_M2_amortiguador"] = np.select(
         [
             result["M2_amortiguador_adicional"].isna()
-            & (result["Amortiguador_sobreestimacion"] > 0),
-            result["M2_amortiguador_adicional"] > float(total_area_m2),
-            result["Amortiguador_sobreestimacion"] <= 0,
+            & ~np.isclose(result["Amortiguador_sobreestimacion"], 0.0),
+            result["M2_amortiguador_adicional"] > 0,
+            result["M2_amortiguador_adicional"] < 0,
         ],
         [
             "No calculable: Tallos/m2 es cero",
-            "Supera M2 disponibles",
-            "Sin amortiguador requerido",
+            "Sobreestimacion: liberar area",
+            "Subestimacion: reservar area",
         ],
-        default="Viable con area disponible",
+        default="Sin amortiguador requerido",
     )
     return result
 

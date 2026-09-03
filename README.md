@@ -58,7 +58,8 @@ Recomendaciones de calidad de datos:
 3. Clic en `PROYECTAR FINCA`.
 4. Proyecta todas las `Bloque&Varid` de la finca respetando el orden original de entrada.
 5. Si alguna variedad no se puede proyectar, se registra el error y el proceso continua con el resto.
-6. Descarga por navegador del archivo `Proyecto_todas_variedades.xlsx`.
+6. Calcula el escenario informativo con amortiguador para cada variedad.
+7. Descarga por navegador del archivo `Proyecto_todas_variedades.xlsx`.
 
 ## 3. Reglas de Negocio del Modelo
 
@@ -126,6 +127,18 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - El ajuste se aplica solo a las 4 semanas mas recientes de `2026` cuya semana sea mayor que `24`.
 - El valor aplicado queda trazado en la exportacion con el origen del factor (`variedad`, `global` o `neutral`).
 
+### 3.7 Amortiguador de Sobreestimacion
+
+- El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
+- Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
+- El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.
+- El limite se obtiene de la mediana historica de la sobreestimacion expresada como proporcion de la prediccion. Con la evaluacion actual es aproximadamente `11%`, en lugar de un limite fijo de `30%`.
+- El amortiguador solo se aplica al escenario informativo cuando la probabilidad estimada de sobreestimacion es al menos `60%`.
+- `Estimado_modelo` permanece como proyeccion oficial y no es modificado.
+- `Proyeccion_con_amortiguador_IA` se calcula como `Estimado_modelo - Amortiguador`, con minimo cero.
+- `M2 Amortiguador` representa la proporcion de area requerida por el amortiguador y se redondea hacia arriba.
+- En `Analisis Avanzado` la salida se simplifica a `M2 Amortiguador` y `Proyeccion_con_amortiguador_IA`.
+
 ## 4. Exportaciones
 
 ### 4.1 Individual
@@ -141,6 +154,10 @@ Hojas generadas:
 - `Promedio_anual`
 - `Resumen`
 
+Desde `Analisis Avanzado` tambien se puede descargar:
+
+- `Proyecto_amortiguado.xlsx`, con los identificadores de la proyeccion, `M2 Amortiguador` y `Proyeccion_con_amortiguador_IA`.
+
 ### 4.2 Masiva
 
 Descarga por navegador con nombre:
@@ -149,11 +166,14 @@ Descarga por navegador con nombre:
 
 Contenido:
 
-- Hoja `Estimado_modelo` con columnas base (`Anio`, `Semana`, `Producto`, `Finca`, `Bloque`, `Variedad`, `Bloque&Varid`) mas `Estimado_modelo`.
+- Hoja `Estimado_modelo` con columnas base (`Anio`, `Semana`, `Producto`, `Finca`, `Bloque`, `Variedad`, `Bloque&Varid`), `Estimado_modelo` y `Proyeccion_con_amortiguador_IA`.
 - Hoja `MSE_por_BloqueVarid` con `Bloque&Varid`, `MSE`, `MSE_proy_patron` y `S/N` (si disponible).
 - En la hoja `Estimado_modelo` se exportan solo registros del anio 2026, solo las ultimas 4 semanas por variedad y solo filas con `Estimado_modelo > 0`.
-- `Estimado_modelo` se exporta redondeado a entero.
-- En la exportacion se incluyen tambien `Factor_diferencia_2025`, `Semanas_factor_2026_desde_17` y `Origen_factor_2025` para auditoria.
+- `Estimado_modelo` y `Proyeccion_con_amortiguador_IA` se exportan redondeados a enteros.
+
+Desde `Analisis Avanzado` tambien se puede descargar:
+
+- `Proyecto_todas_variedades_amortiguado.xlsx`, con las columnas base, `M2 Amortiguador` y `Proyeccion_con_amortiguador_IA`.
 
 Nota movil:
 
@@ -229,12 +249,14 @@ Incluye:
 - `ProyAst.py`: interfaz Streamlit, seleccion de patron y exportaciones.
 - `api_render.py`: API para consumo externo/despliegue.
 - `projection_core.py`: modelo de produccion compartido por Streamlit y API.
+- `Evaluacion/errores_evaluacion_modelo.csv`: errores relativos usados para calibrar el amortiguador.
 - `modelos/`: modelos serializados por variedad.
 
 ## 8. Observaciones Operativas
 
 - Si en masiva no hay datos suficientes para una variedad, el sistema no detiene el proceso global.
 - En esos casos, reporta motivo en el resumen de errores y continua con las demas variedades.
+- La proyeccion amortiguada es un escenario operativo informativo; las graficas, metricas y proyeccion oficial conservan `Estimado_modelo`.
 - Para mejores resultados, mantener historial actualizado y consistente por semana.
 
 ## 9. Contacto

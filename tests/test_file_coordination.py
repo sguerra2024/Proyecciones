@@ -299,6 +299,164 @@ def test_cargar_archivo_a_dataframe_devuelve_vacio_en_casos_no_soportados():
         ProyAst.ArchivoEnMemoria("roto.xlsx", b"no-es-excel")).empty
 
 
+def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
+    capturado = {}
+
+    def fake_consultar_llm(prompt, max_tokens=None):
+        capturado["prompt"] = prompt
+        return "respuesta"
+
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar_llm)
+    base = pd.DataFrame({
+        "Finca": ["BL25"],
+        "Bloque&Varid": ["001RED"],
+        "Produccion": [1000],
+    })
+    semanas = ["2025-52"] + [f"2026-{semana:02d}" for semana in range(1, 14)]
+    proyeccion = pd.DataFrame({
+        "Finca_proyectada": ["BL25"] * 14,
+        "Variedad_proyectada": ["001RED"] * 14,
+        "Anio_Semana": semanas,
+        "Estimado_modelo": [1000] * 14,
+        "Tallos_por_m2": [999.0] + list(range(1, 14)),
+        "M2 Amortiguador": list(range(1, 15)),
+        "Proyeccion_con_amortiguador_IA": [800] * 14,
+    })
+
+    ProyAst.responder_pregunta_anthropic(
+        base,
+        "Cuantos M2 de amortiguador necesito?",
+        "BL25",
+        df_proyeccion=proyeccion,
+    )
+
+    assert "area_calculada_m2" in capturado["prompt"]
+    assert "promedio_tallos_m2_ultimas_12_semanas" in capturado["prompt"]
+    assert "producto_m2_por_promedio_tallos_m2" in capturado["prompt"]
+    assert ",14,7.5" in capturado["prompt"]
+    assert ",105.0" in capturado["prompt"]
+    assert "999.0" not in capturado["prompt"]
+    assert "Estimado_modelo" not in capturado["prompt"]
+    assert "Proyeccion_con_amortiguador_IA" not in capturado["prompt"]
+    assert "Estado M2 Amortiguador" not in capturado["prompt"]
+    assert (
+        "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR "
+        "EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO"
+    ) in capturado["prompt"]
+
+
+def test_pregunta_funcion_amortiguador_devuelve_respuesta_definida(monkeypatch):
+    def fake_consultar_llm(*args, **kwargs):
+        pytest.fail("No debe consultar el LLM para esta respuesta definida")
+
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar_llm)
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        pd.DataFrame({"Finca": ["BL25"]}),
+        "¿Qué función tiene el amortiguador?",
+        "BL25",
+    )
+
+    assert respuesta == (
+        "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR "
+        "EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO. "
+        "PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO "
+        "EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE."
+    )
+
+
+def test_recomendacion_amortiguador_devuelve_respuesta_definida(monkeypatch):
+    def fake_consultar_llm(*args, **kwargs):
+        pytest.fail("No debe consultar el LLM para esta respuesta definida")
+
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar_llm)
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        pd.DataFrame({"Finca": ["BL25"]}),
+        "¿Qué recomiendas para administrar este amortiguador?",
+        "BL25",
+    )
+
+    assert respuesta == (
+        "PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO "
+        "EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE."
+    )
+
+
+@pytest.mark.parametrize(
+    "pregunta",
+    [
+        "¿Qué es el amortiguador M2?",
+        "Que significa amortiguador m2",
+        "Explícame el amortiguador",
+        "Define el amortiguador M2",
+    ],
+)
+def test_definicion_amortiguador_reconoce_variantes(monkeypatch, pregunta):
+    def fake_consultar_llm(*args, **kwargs):
+        pytest.fail("No debe consultar el LLM para esta respuesta definida")
+
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar_llm)
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        pd.DataFrame({"Finca": ["ASTROFLORES"]}),
+        pregunta,
+        "ASTROFLORES",
+    )
+
+    assert respuesta.startswith(
+        "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR"
+    )
+    assert "TANTO EN POSITIVO COMO EN NEGATIVO" in respuesta
+
+
+def test_salida_amortiguada_solo_expone_m2_y_proyeccion():
+    proyeccion = pd.DataFrame({
+        "Finca": ["BL25"],
+        "Bloque&Varid": ["001RED"],
+        "Estimado_modelo": [1000.0],
+        "Amortiguador_sobreestimacion": [110.0],
+        "M2_amortiguador_adicional": [11.2],
+        "Estimado_con_amortiguador_IA": [890.4],
+    })
+
+    salida = ProyAst.simplificar_salida_amortiguada(
+        proyeccion,
+        ["Finca", "Bloque&Varid"],
+    )
+
+    assert salida.columns.tolist() == [
+        "Finca",
+        "Bloque&Varid",
+        "M2 Amortiguador",
+        "Proyeccion_con_amortiguador_IA",
+    ]
+    assert salida.iloc[0].tolist() == ["BL25", "001RED", 11, 890]
+
+
+def test_export_masivo_solo_incluye_proyeccion_original():
+    proyeccion = pd.DataFrame({
+        "Anio": [2026],
+        "Semana": [35],
+        "Bloque&Varid": ["001RED"],
+        "Estimado_modelo": [1000.4],
+        "Estimado_con_amortiguador_IA": [890.4],
+    })
+
+    salida = ProyAst.preparar_salida_proyeccion_masiva(
+        proyeccion,
+        ["Anio", "Semana", "Bloque&Varid"],
+    )
+
+    assert salida.columns.tolist() == [
+        "Anio",
+        "Semana",
+        "Bloque&Varid",
+        "Estimado_modelo",
+    ]
+    assert salida.iloc[0].tolist() == [2026, 35, "001RED", 1000]
+
+
 # --- construir_cache_patrones_semanales -----------------------------------
 
 def test_construir_cache_patrones_semanales_reutiliza_patrones():
