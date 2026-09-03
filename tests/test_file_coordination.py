@@ -336,7 +336,7 @@ def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
     assert "producto_m2_por_promedio_tallos_m2" in capturado["prompt"]
     assert "porcentaje_amortiguador_sobre_m2_variedad" in capturado["prompt"]
     assert ",14,100.0,14.0,7.5" in capturado["prompt"]
-    assert ",105.0" in capturado["prompt"]
+    assert ",105" in capturado["prompt"]
     assert "999.0" not in capturado["prompt"]
     assert "Estimado_modelo" not in capturado["prompt"]
     assert "Proyeccion_con_amortiguador_IA" not in capturado["prompt"]
@@ -494,7 +494,7 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
         "m2_variedad": [100.0],
         "porcentaje_amortiguador_sobre_m2_variedad": [14.0],
         "promedio_tallos_m2_ultimas_12_semanas": [7.5],
-        "producto_m2_por_promedio_tallos_m2": [105.0],
+        "producto_m2_por_promedio_tallos_m2": [105],
     })
 
     contenido = ProyAst.crear_excel_proyeccion_masiva(

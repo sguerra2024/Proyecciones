@@ -927,7 +927,7 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
             if not tallos_validos.empty else np.nan
         )
         producto_area_tallos = (
-            float(area_actual) * promedio_tallos
+            int(np.rint(float(area_actual) * promedio_tallos))
             if pd.notna(area_actual) and pd.notna(promedio_tallos)
             else np.nan
         )
@@ -2662,8 +2662,8 @@ if file_path is not None:
         )
         pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
             modelo,
-            x_train_df.iloc[:split_idx],
-            entrenamiento_df.iloc[:split_idx],
+            x_frame,
+            eval_actual_df,
             eval_actual_df.iloc[:len(pred_vals)],
             pred_vals,
             float(m2_1),
@@ -3231,8 +3231,8 @@ if file_path is not None:
     )
     pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
         modelo,
-        X_train,
-        entrenamiento_df.iloc[:split_idx],
+        x_frame,
+        eval_actual_df,
         eval_actual_df.iloc[:len(pred_vals)],
         pred_vals,
         float(m2_1),
@@ -3521,7 +3521,7 @@ if file_path is not None:
             )
             col_producto.metric(
                 f'TALLOS AMORTIGUADOR - {var_proy}',
-                f'{tallos_amortiguador:,.2f} tallos'
+                f'{tallos_amortiguador:,.0f} tallos'
                 if pd.notna(tallos_amortiguador) else 'Sin datos',
             )
             render_subida_archivo_anthropic(file_path)

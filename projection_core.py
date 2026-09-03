@@ -152,9 +152,33 @@ def apply_overestimation_buffer(
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     """Estima un amortiguador bilateral sin alterar la prediccion oficial."""
     base_predictions = np.asarray(predictions, dtype=float).reshape(-1)
-    historical_predictions = production_model.predict(training_features)
-    actual = training_df["Produccion"].to_numpy(dtype=float)
-    signed_error = historical_predictions - actual
+    history = training_df.reset_index(drop=True).copy()
+    history_features = training_features.reset_index(drop=True).copy()
+    if len(history) != len(history_features):
+        raise ValueError(
+            "Datos y variables historicas del amortiguador deben tener igual longitud."
+        )
+
+    if {"Anio", "Semana"}.issubset(history.columns):
+        order = history.assign(
+            __position=np.arange(len(history)),
+            __anio=pd.to_numeric(history["Anio"], errors="coerce"),
+            __semana=pd.to_numeric(history["Semana"], errors="coerce"),
+        ).dropna(subset=["__anio", "__semana"])
+        positions = order.sort_values(["__anio", "__semana"])[
+            "__position"
+        ].to_numpy(dtype=int)
+        positions = positions[-20:-4]
+        history = history.iloc[positions].reset_index(drop=True)
+        history_features = history_features.iloc[positions].reset_index(
+            drop=True)
+    else:
+        history = history.tail(16).reset_index(drop=True)
+        history_features = history_features.tail(16).reset_index(drop=True)
+
+    historical_predictions = production_model.predict(history_features)
+    actual = history["Produccion"].to_numpy(dtype=float)
+    signed_error = actual - historical_predictions
     average_error = float(np.mean(signed_error)
                           ) if signed_error.size else 0.0
     valid_area = float(m2_variedad)
@@ -173,8 +197,8 @@ def apply_overestimation_buffer(
     train_buffer_features = pd.DataFrame({
         "Prediccion_base": historical_predictions,
         "m2Variedad": np.full(len(historical_predictions), valid_area),
-        "Tallos/m2": training_df["Tallos/m2"].to_numpy(dtype=float),
-        "Semana": training_df["Semana"].to_numpy(dtype=float),
+        "Tallos/m2": history["Tallos/m2"].to_numpy(dtype=float),
+        "Semana": history["Semana"].to_numpy(dtype=float),
     })
     prediction_buffer_features = pd.DataFrame({
         "Prediccion_base": base_predictions,
@@ -200,13 +224,13 @@ def apply_overestimation_buffer(
             train_buffer_features[BUFFER_COLUMNS], direction_labels
         )
         positive_class_index = int(np.where(risk_model.classes_ == True)[0][0])
-        overestimation_probability = risk_model.predict_proba(
+        underestimation_probability = risk_model.predict_proba(
             prediction_buffer_features[BUFFER_COLUMNS]
         )[:, positive_class_index]
         direction_probability = np.where(
             estimated_error >= 0,
-            overestimation_probability,
-            1.0 - overestimation_probability,
+            underestimation_probability,
+            1.0 - underestimation_probability,
         )
 
     maximum_buffer = np.maximum(base_predictions, 0.0) * max_buffer_rate
@@ -288,12 +312,8 @@ def add_buffer_projection_columns(
         )
 
     result = projection_df.copy()
-    result["Estimado_con_amortiguador_IA"] = np.maximum(
-        pd.to_numeric(result["Estimado_modelo"], errors="coerce")
-        - pd.to_numeric(
-            result["Amortiguador_sobreestimacion"], errors="coerce"
-        ),
-        0.0,
+    result["Estimado_con_amortiguador_IA"] = pd.to_numeric(
+        result["Estimado_modelo"], errors="coerce"
     )
     projected_productivity, buffer_area = calculate_buffer_area_from_projection(
         result["Amortiguador_sobreestimacion"],
@@ -312,8 +332,8 @@ def add_buffer_projection_columns(
         ],
         [
             "No calculable: Tallos/m2 es cero",
-            "Sobreestimacion: liberar area",
             "Subestimacion: reservar area",
+            "Sobreestimacion: liberar area",
         ],
         default="Sin amortiguador requerido",
     )
@@ -504,8 +524,8 @@ def train_projection_model(
         raise ValueError("m2Variedad no contiene valores numericos validos.")
     predictions, buffer, average_overestimation, buffer_rate = apply_overestimation_buffer(
         model,
-        features,
-        training_df,
+        prediction_features,
+        evaluation_df,
         evaluation_df,
         predictions,
         float(m2_values.iloc[0]),
@@ -525,9 +545,7 @@ def train_projection_model(
             "produccion_patron": evaluation_df["Produccion_patron"].round(2),
             "estimado_modelo": np.round(predictions, 2),
             "amortiguador_sobreestimacion": np.round(buffer, 2),
-            "estimado_con_amortiguador_ia": np.round(
-                np.maximum(predictions - buffer, 0.0), 2
-            ),
+            "estimado_con_amortiguador_ia": np.round(predictions, 2),
         }
     )
 

@@ -63,13 +63,47 @@ def test_train_projection_model_predicts_production_with_reference_pattern():
         "amortiguador_sobreestimacion",
         "estimado_con_amortiguador_ia",
     } == set(result["chart_df"].columns)
-    assert result["amortiguador_promedio_historico"] >= 0
+    assert np.isfinite(result["amortiguador_promedio_historico"])
     assert result["amortiguador_porcentaje"] >= 0
 
 
 class _FixedProductionModel:
     def predict(self, features: pd.DataFrame) -> np.ndarray:
         return features["prediccion_prueba"].to_numpy(dtype=float)
+
+
+def test_amortiguador_usa_16_semanas_anteriores_a_las_4_ultimas(monkeypatch):
+    semanas_usadas = []
+
+    class RecordingProductionModel:
+        def predict(self, features):
+            semanas_usadas.extend(features["Semana_orden"].tolist())
+            return np.full(len(features), 100.0)
+
+    training_df = pd.DataFrame({
+        "Anio": [2026] * 25,
+        "Semana": list(range(1, 26)),
+        "Produccion": [80.0, 120.0] * 12 + [80.0],
+        "Tallos/m2": np.linspace(10.0, 20.0, 25),
+    })
+    training_features = pd.DataFrame({
+        "Semana_orden": list(range(25)),
+    })
+    evaluation_df = pd.DataFrame({
+        "Tallos/m2": [15.0],
+        "Semana": [26],
+    })
+
+    apply_overestimation_buffer(
+        RecordingProductionModel(),
+        training_features,
+        training_df,
+        evaluation_df,
+        np.array([100.0]),
+        100.0,
+    )
+
+    assert semanas_usadas == list(range(5, 21))
 
 
 def test_amortiguador_pondera_magnitud_por_probabilidad_y_umbral(monkeypatch):
@@ -230,7 +264,7 @@ def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():
     result = add_buffer_projection_columns(projection, total_area_m2=100.0)
 
     np.testing.assert_array_equal(
-        result["Estimado_con_amortiguador_IA"], [890.0, 600.0]
+        result["Estimado_con_amortiguador_IA"], result["Estimado_modelo"]
     )
     np.testing.assert_array_equal(result["Tallos_m2_variedad"], [10.0, 5.0])
     np.testing.assert_array_equal(
@@ -238,6 +272,6 @@ def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():
     np.testing.assert_array_equal(
         result["M2_variedad_disponibles"], [100.0, 100.0])
     assert result["Estado_M2_amortiguador"].tolist() == [
-        "Sobreestimacion: liberar area",
         "Subestimacion: reservar area",
+        "Sobreestimacion: liberar area",
     ]
