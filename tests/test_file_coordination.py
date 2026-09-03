@@ -320,6 +320,7 @@ def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
         "Estimado_modelo": [1000] * 14,
         "Tallos_por_m2": [999.0] + list(range(1, 14)),
         "M2 Amortiguador": list(range(1, 15)),
+        "M2_variedad_disponibles": [100.0] * 14,
         "Proyeccion_con_amortiguador_IA": [800] * 14,
     })
 
@@ -333,7 +334,8 @@ def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
     assert "area_calculada_m2" in capturado["prompt"]
     assert "promedio_tallos_m2_ultimas_12_semanas" in capturado["prompt"]
     assert "producto_m2_por_promedio_tallos_m2" in capturado["prompt"]
-    assert ",14,7.5" in capturado["prompt"]
+    assert "porcentaje_amortiguador_sobre_m2_variedad" in capturado["prompt"]
+    assert ",14,100.0,14.0,7.5" in capturado["prompt"]
     assert ",105.0" in capturado["prompt"]
     assert "999.0" not in capturado["prompt"]
     assert "Estimado_modelo" not in capturado["prompt"]
@@ -343,6 +345,24 @@ def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
         "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR "
         "EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO"
     ) in capturado["prompt"]
+
+
+def test_porcentaje_amortiguador_conserva_signo_y_evitar_division_por_cero():
+    proyeccion = pd.DataFrame({
+        "Variedad_proyectada": ["NEGATIVA", "SIN_AREA"],
+        "Anio_Semana": ["2026-35", "2026-35"],
+        "Tallos_por_m2": [10.0, 10.0],
+        "M2 Amortiguador": [-20.0, 5.0],
+        "M2_variedad_disponibles": [100.0, 0.0],
+    })
+
+    resumen = ProyAst.resumir_area_y_tallos_m2_ultimas_12_semanas(proyeccion)
+    porcentajes = resumen.set_index("Variedad_proyectada")[
+        "porcentaje_amortiguador_sobre_m2_variedad"
+    ]
+
+    assert porcentajes["NEGATIVA"] == -20.0
+    assert pd.isna(porcentajes["SIN_AREA"])
 
 
 def test_pregunta_funcion_amortiguador_devuelve_respuesta_definida(monkeypatch):
@@ -360,6 +380,8 @@ def test_pregunta_funcion_amortiguador_devuelve_respuesta_definida(monkeypatch):
     assert respuesta == (
         "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR "
         "EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO. "
+        "EL AMORTIGUADOR ES POSITIVO CUANDO EL MODELO SUBESTIMA Y ES NEGATIVO "
+        "CUANDO EL MODELO SOBREESTIMA. "
         "PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO "
         "EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE."
     )
@@ -408,6 +430,10 @@ def test_definicion_amortiguador_reconoce_variantes(monkeypatch, pregunta):
         "ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR"
     )
     assert "TANTO EN POSITIVO COMO EN NEGATIVO" in respuesta
+    assert (
+        "ES POSITIVO CUANDO EL MODELO SUBESTIMA Y ES NEGATIVO CUANDO EL "
+        "MODELO SOBREESTIMA"
+    ) in respuesta
 
 
 def test_salida_amortiguada_solo_expone_m2_y_proyeccion():
@@ -465,6 +491,8 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
     analisis_avanzado = pd.DataFrame({
         "Variedad_proyectada": ["001RED"],
         "area_calculada_m2": [14],
+        "m2_variedad": [100.0],
+        "porcentaje_amortiguador_sobre_m2_variedad": [14.0],
         "promedio_tallos_m2_ultimas_12_semanas": [7.5],
         "producto_m2_por_promedio_tallos_m2": [105.0],
     })
@@ -482,7 +510,9 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
     tabla_analisis = pd.read_excel(
         io.BytesIO(contenido), sheet_name="Analisis_avanzado"
     )
-    assert tabla_analisis.iloc[0].tolist() == ["001RED", 14, 7.5, 105]
+    assert tabla_analisis.iloc[0].tolist() == [
+        "001RED", 14, 100, 14, 7.5, 105
+    ]
 
 
 # --- construir_cache_patrones_semanales -----------------------------------

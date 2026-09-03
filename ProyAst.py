@@ -846,6 +846,8 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     columnas_salida = [
         'Variedad_proyectada',
         'area_calculada_m2',
+        'm2_variedad',
+        'porcentaje_amortiguador_sobre_m2_variedad',
         'promedio_tallos_m2_ultimas_12_semanas',
         'producto_m2_por_promedio_tallos_m2',
     ]
@@ -860,7 +862,11 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
         ),
         None,
     )
-    requeridas = {'Variedad_proyectada', 'M2 Amortiguador'}
+    requeridas = {
+        'Variedad_proyectada',
+        'M2 Amortiguador',
+        'M2_variedad_disponibles',
+    }
     if columna_tallos is None or not requeridas.issubset(trabajo.columns):
         return pd.DataFrame(columns=columnas_salida)
 
@@ -884,6 +890,9 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     trabajo['__area_m2'] = pd.to_numeric(
         trabajo['M2 Amortiguador'], errors='coerce'
     )
+    trabajo['__m2_variedad'] = pd.to_numeric(
+        trabajo['M2_variedad_disponibles'], errors='coerce'
+    )
     trabajo = trabajo[
         (trabajo['__anio'] >= 2026)
         & trabajo['__semana'].between(1, 53)
@@ -895,10 +904,24 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     for variedad, grupo in trabajo.groupby('Variedad_proyectada'):
         ultimas = grupo.tail(12)
         areas_validas = ultimas['__area_m2'].dropna()
+        m2_variedad_validos = ultimas['__m2_variedad'].dropna()
         tallos_validos = ultimas['__tallos_m2'].dropna()
         area_actual = areas_validas.iloc[-1] if not areas_validas.empty else np.nan
+        m2_variedad = (
+            float(m2_variedad_validos.iloc[-1])
+            if not m2_variedad_validos.empty else np.nan
+        )
         if pd.notna(area_actual) and float(area_actual).is_integer():
             area_actual = int(area_actual)
+        porcentaje_amortiguador = (
+            round(float(area_actual) / m2_variedad * 100.0, 2)
+            if (
+                pd.notna(area_actual)
+                and pd.notna(m2_variedad)
+                and m2_variedad > 0
+            )
+            else np.nan
+        )
         promedio_tallos = (
             float(tallos_validos.mean())
             if not tallos_validos.empty else np.nan
@@ -911,6 +934,8 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
         filas.append({
             'Variedad_proyectada': variedad,
             'area_calculada_m2': area_actual,
+            'm2_variedad': m2_variedad,
+            'porcentaje_amortiguador_sobre_m2_variedad': porcentaje_amortiguador,
             'promedio_tallos_m2_ultimas_12_semanas': promedio_tallos,
             'producto_m2_por_promedio_tallos_m2': producto_area_tallos,
         })
@@ -934,7 +959,9 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
     )
     definicion_amortiguador = (
         'ES EL AREA QUE EL TECNICO DE CULTIVO DEBE ADMINISTAR PARA CUBRIR '
-        'EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO.'
+        'EL ERROR DEL MODELO TANTO EN POSITIVO COMO EN NEGATIVO. '
+        'EL AMORTIGUADOR ES POSITIVO CUANDO EL MODELO SUBESTIMA Y ES NEGATIVO '
+        'CUANDO EL MODELO SOBREESTIMA.'
     )
     recomendacion_amortiguador = (
         'PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO '
@@ -988,7 +1015,8 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'{definicion_amortiguador} '
         f'{recomendacion_amortiguador} '
         'Nunca afirmes que el amortiguador no forma parte de la informacion. '
-        'Despliega exclusivamente el area calculada en M2, el promedio de '
+        'Despliega exclusivamente el area calculada en M2, su porcentaje '
+        'sobre los M2 de la variedad, el promedio de '
         'Tallos/m2 de las ultimas 12 semanas disponibles de 2026 o posteriores '
         'y el producto de ambos valores. '
         'No muestres otras metricas ni inventes datos.\n\n'
@@ -1842,31 +1870,6 @@ def render_preguntas_claude(df_base, selected_finca):
         st.caption(
             'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
-
-        base_proyeccion = st.session_state.get('base_proyeccion_anthropic')
-        if base_proyeccion is not None and not base_proyeccion.empty:
-            contexto_proyeccion = base_proyeccion.copy()
-            if (
-                selected_finca is not None
-                and 'Finca_proyectada' in contexto_proyeccion.columns
-            ):
-                contexto_proyeccion = contexto_proyeccion[
-                    contexto_proyeccion['Finca_proyectada'].astype(str)
-                    == str(selected_finca)
-                ]
-            resumen_amortiguador = resumir_area_y_tallos_m2_ultimas_12_semanas(
-                contexto_proyeccion
-            )
-            for _, fila in resumen_amortiguador.iterrows():
-                producto = fila['producto_m2_por_promedio_tallos_m2']
-                if pd.notna(producto):
-                    st.metric(
-                        label=(
-                            'M2 amortiguador x promedio Tallos/m2 - '
-                            f"{fila['Variedad_proyectada']}"
-                        ),
-                        value=f'{float(producto):,.2f} tallos',
-                    )
 
         if st.session_state.get('mostrar_dashboard_ia', False):
             render_dashboard_base(df_base, usar_expander=False)
@@ -2962,6 +2965,12 @@ if file_path is not None:
         base_proy_masiva['Estimado_modelo'] = (
             df_estimado_ordenado['Estimado_modelo'].reset_index(drop=True)
         )
+        base_proy_masiva['M2_variedad_disponibles'] = pd.to_numeric(
+            df_estimado_ordenado[
+                'M2_variedad_disponibles'
+            ].reset_index(drop=True),
+            errors='coerce',
+        )
         base_proy_masiva['Tallos_por_m2'] = pd.to_numeric(
             df_estimado_ordenado['Tallos_m2_variedad'].reset_index(drop=True),
             errors='coerce',
@@ -3014,29 +3023,6 @@ if file_path is not None:
         )
         st.divider()
         with st.expander('Análisis Avanzado', expanded=False):
-            st.caption(
-                'Escenario informativo de IA. El archivo oficial conserva '
-                'Estimado_modelo sin aplicar el amortiguador.'
-            )
-            promedio_m2_adicional = float(pd.to_numeric(
-                df_export_amortiguado['M2 Amortiguador'],
-                errors='coerce'
-            ).mean())
-            promedio_tallos_m2 = pd.to_numeric(
-                resumen_ultimo_ciclo[
-                    'promedio_tallos_m2_ultimas_12_semanas'
-                ],
-                errors='coerce',
-            ).mean()
-            col_m2, col_tallos_m2 = st.columns(2)
-            col_m2.metric(
-                'AMORTIGUADOR CALCULADO M2', f'{promedio_m2_adicional:.0f} m²'
-            )
-            col_tallos_m2.metric(
-                'Tallos/m2 promedio ultimo ciclo',
-                f'{promedio_tallos_m2:.2f} tallos/m²'
-                if pd.notna(promedio_tallos_m2) else 'Sin datos'
-            )
             render_subida_archivo_anthropic(file_path)
             render_preguntas_claude(df, selected_finca)
 
@@ -3448,6 +3434,9 @@ if file_path is not None:
     base_proy_individual['Estimado_modelo'] = np.rint(pd.to_numeric(
         df_export['Estimado_modelo'], errors='coerce'
     )).astype('Int64')
+    base_proy_individual['M2_variedad_disponibles'] = pd.to_numeric(
+        df_export['M2_variedad_disponibles'], errors='coerce'
+    ).reset_index(drop=True)
     base_proy_individual['Tallos_por_m2'] = pd.to_numeric(
         df_export['Tallos_m2_variedad'], errors='coerce'
     ).reset_index(drop=True)
@@ -3489,14 +3478,10 @@ if file_path is not None:
     if not mostrar_analisis_avanzado:
         st.divider()
         with st.expander('Análisis Avanzado', expanded=False):
-            st.caption(
-                'Escenario informativo de IA. No modifica Estimado_modelo, '
-                'los graficos ni las metricas oficiales.'
-            )
-            promedio_m2_individual = float(pd.to_numeric(
+            promedio_m2_individual = pd.to_numeric(
                 df_export_amortiguado_individual['M2 Amortiguador'],
-                errors='coerce'
-            ).mean())
+                errors='coerce',
+            ).mean()
             resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
                 base_proy_individual
             )
@@ -3506,14 +3491,38 @@ if file_path is not None:
                 ],
                 errors='coerce',
             ).mean()
-            col_m2, col_tallos_m2 = st.columns(2)
+            porcentaje_amortiguador = pd.to_numeric(
+                resumen_ultimo_ciclo[
+                    'porcentaje_amortiguador_sobre_m2_variedad'
+                ],
+                errors='coerce',
+            ).mean()
+            tallos_amortiguador = pd.to_numeric(
+                resumen_ultimo_ciclo[
+                    'producto_m2_por_promedio_tallos_m2'
+                ],
+                errors='coerce',
+            ).mean()
+            col_m2, col_porcentaje, col_tallos_m2, col_producto = st.columns(4)
             col_m2.metric(
-                'AMORTIGUADOR CALCULADO M2', f'{promedio_m2_individual:.0f} m²'
+                'AMORTIGUADOR CALCULADO M2',
+                f'{promedio_m2_individual:.0f} m²'
+                if pd.notna(promedio_m2_individual) else 'Sin datos',
+            )
+            col_porcentaje.metric(
+                '% M2 AMORTIGUADOR',
+                f'{porcentaje_amortiguador:.2f}%'
+                if pd.notna(porcentaje_amortiguador) else 'Sin datos',
             )
             col_tallos_m2.metric(
                 'Tallos/m2 promedio ultimo ciclo',
                 f'{promedio_tallos_m2:.2f} tallos/m²'
-                if pd.notna(promedio_tallos_m2) else 'Sin datos'
+                if pd.notna(promedio_tallos_m2) else 'Sin datos',
+            )
+            col_producto.metric(
+                f'TALLOS AMORTIGUADOR - {var_proy}',
+                f'{tallos_amortiguador:,.2f} tallos'
+                if pd.notna(tallos_amortiguador) else 'Sin datos',
             )
             render_subida_archivo_anthropic(file_path)
             render_preguntas_claude(df, selected_finca)
