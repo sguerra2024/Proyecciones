@@ -20,7 +20,6 @@ MODEL_COLUMNS = [
     "Produccion_patron_ponderado",
     "Incremento_tallos_patron",
     "Incremento_produccion_patron",
-    "sn_alto",
 ]
 MODEL_PARAMS = {
     "n_estimators": 100,
@@ -33,6 +32,7 @@ MODEL_PARAMS = {
 BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
+DEFAULT_EVALUATED_WEEKS = 16
 REAL_PRODUCTION_TARGET_WEIGHT = 0.70
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
 
@@ -51,6 +51,7 @@ def load_overestimation_calibration(
         "error_cases": 0,
         "overestimation_cases": 0,
         "underestimation_cases": 0,
+        "evaluated_weeks": DEFAULT_EVALUATED_WEEKS,
         "source": "fallback",
     }
     if not path.exists():
@@ -60,11 +61,18 @@ def load_overestimation_calibration(
         evaluation = pd.read_csv(path, encoding="utf-8-sig")
     except Exception:
         return fallback
-    if "error_relativo" not in evaluation.columns:
+    error_column = next(
+        (
+            column for column in evaluation.columns
+            if str(column).strip().casefold() in {"error_relativo", "%dif"}
+        ),
+        None,
+    )
+    if error_column is None:
         return fallback
 
     relative_error = pd.to_numeric(
-        evaluation["error_relativo"], errors="coerce"
+        evaluation[error_column], errors="coerce"
     ).dropna()
     relative_error = relative_error[relative_error < 1.0]
     if relative_error.empty:
@@ -73,13 +81,71 @@ def load_overestimation_calibration(
     absolute_error_on_prediction = (
         relative_error.abs() / (1.0 - relative_error)
     )
+    evaluated_weeks = DEFAULT_EVALUATED_WEEKS
+    if {"Anio", "Semana"}.issubset(evaluation.columns):
+        evaluated_periods = evaluation[["Anio", "Semana"]].copy()
+        evaluated_periods["Anio"] = pd.to_numeric(
+            evaluated_periods["Anio"], errors="coerce"
+        )
+        evaluated_periods["Semana"] = pd.to_numeric(
+            evaluated_periods["Semana"], errors="coerce"
+        )
+        evaluated_periods = evaluated_periods.dropna().drop_duplicates()
+        if not evaluated_periods.empty:
+            evaluated_weeks = int(len(evaluated_periods))
+
     return {
         "max_buffer_rate": float(absolute_error_on_prediction.median()),
         "risk_threshold": BUFFER_RISK_THRESHOLD,
         "error_cases": int(len(relative_error)),
         "overestimation_cases": int((relative_error < 0).sum()),
         "underestimation_cases": int((relative_error > 0).sum()),
+        "evaluated_weeks": evaluated_weeks,
         "source": str(path),
+    }
+
+
+def save_buffer_evaluation_report(
+    excel_path: "str | Path",
+    sheet_name: "str | int" = 0,
+    destination_path: "str | Path | None" = None,
+) -> dict[str, Any]:
+    """Recalcula %dif desde un Excel y persiste el informe del amortiguador."""
+    evaluation = pd.read_excel(excel_path, sheet_name=sheet_name)
+    normalized_columns = {
+        str(column).strip().casefold(): column for column in evaluation.columns
+    }
+    production_column = normalized_columns.get("produccion")
+    estimate_column = normalized_columns.get("estimado_modelo")
+    if production_column is None or estimate_column is None:
+        raise ValueError(
+            "El informe requiere Produccion y Estimado_modelo para calcular %dif."
+        )
+
+    report = evaluation.copy()
+    error_report = calculate_model_error_report(
+        report[production_column], report[estimate_column]
+    )
+    report["%dif"] = error_report["%dif"].to_numpy()
+    report["error_relativo"] = report["%dif"]
+
+    destination = Path(destination_path) if destination_path else (
+        Path(__file__).with_name("Evaluacion")
+        / "errores_evaluacion_modelo.csv"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    report.to_csv(destination, index=False, encoding="utf-8-sig")
+
+    periods = pd.DataFrame()
+    if {"anio", "semana"}.issubset(normalized_columns):
+        periods = report[[
+            normalized_columns["anio"], normalized_columns["semana"]
+        ]].apply(pd.to_numeric, errors="coerce").dropna().drop_duplicates()
+    return {
+        "rows": int(report["%dif"].notna().sum()),
+        "evaluated_weeks": int(len(periods)),
+        "source": str(destination),
+        "values": report["%dif"].dropna().tolist(),
     }
 
 
@@ -142,6 +208,39 @@ def fit_production_model(
     return model
 
 
+def calculate_model_error_report(
+    actual_values: "pd.Series | np.ndarray",
+    estimated_values: "pd.Series | np.ndarray",
+) -> pd.DataFrame:
+    """Calcula el error real firmado: %dif = (real - estimado) / real."""
+    actual = pd.to_numeric(
+        pd.Series(actual_values).reset_index(drop=True), errors="coerce"
+    )
+    estimated = pd.to_numeric(
+        pd.Series(estimated_values).reset_index(drop=True), errors="coerce"
+    )
+    if len(actual) != len(estimated):
+        raise ValueError(
+            "Produccion real y estimado deben tener igual longitud."
+        )
+
+    report = pd.DataFrame({
+        "Produccion": actual,
+        "Estimado_modelo": estimated,
+    })
+    valid = (
+        report["Produccion"].notna()
+        & report["Estimado_modelo"].notna()
+        & ~np.isclose(report["Produccion"], 0.0)
+    )
+    report["%dif"] = np.nan
+    report.loc[valid, "%dif"] = (
+        report.loc[valid, "Produccion"]
+        - report.loc[valid, "Estimado_modelo"]
+    ) / report.loc[valid, "Produccion"]
+    return report
+
+
 def apply_overestimation_buffer(
     production_model: RandomForestRegressor,
     training_features: pd.DataFrame,
@@ -159,6 +258,12 @@ def apply_overestimation_buffer(
             "Datos y variables historicas del amortiguador deben tener igual longitud."
         )
 
+    calibration = load_overestimation_calibration()
+    evaluated_weeks = max(
+        1,
+        int(calibration.get("evaluated_weeks", DEFAULT_EVALUATED_WEEKS)),
+    )
+
     if {"Anio", "Semana"}.issubset(history.columns):
         order = history.assign(
             __position=np.arange(len(history)),
@@ -168,27 +273,42 @@ def apply_overestimation_buffer(
         positions = order.sort_values(["__anio", "__semana"])[
             "__position"
         ].to_numpy(dtype=int)
-        positions = positions[-20:-4]
+        positions = positions[-evaluated_weeks:]
         history = history.iloc[positions].reset_index(drop=True)
         history_features = history_features.iloc[positions].reset_index(
             drop=True)
     else:
-        history = history.tail(16).reset_index(drop=True)
-        history_features = history_features.tail(16).reset_index(drop=True)
+        history = history.tail(evaluated_weeks).reset_index(drop=True)
+        history_features = history_features.tail(
+            evaluated_weeks
+        ).reset_index(drop=True)
 
     historical_predictions = production_model.predict(history_features)
-    actual = history["Produccion"].to_numpy(dtype=float)
-    signed_error = actual - historical_predictions
-    average_error = float(np.mean(signed_error)
-                          ) if signed_error.size else 0.0
+    error_report = calculate_model_error_report(
+        history["Produccion"], historical_predictions
+    )
+    actual = error_report["Produccion"].to_numpy(dtype=float)
+    relative_error = error_report["%dif"].to_numpy(dtype=float)
+    signed_error = relative_error * actual
+    finite_signed_error = signed_error[np.isfinite(signed_error)]
+    average_error = float(np.mean(finite_signed_error)
+                          ) if finite_signed_error.size else 0.0
     valid_area = float(m2_variedad)
     if not np.isfinite(valid_area) or valid_area <= 0:
         raise ValueError("m2Variedad debe ser un numero mayor que cero.")
 
-    if signed_error.size < 5 or not np.any(~np.isclose(signed_error, 0.0)):
+    valid_errors = np.isfinite(signed_error)
+    if not np.all(valid_errors):
+        history = history.loc[valid_errors].reset_index(drop=True)
+        history_features = history_features.loc[valid_errors].reset_index(
+            drop=True
+        )
+        historical_predictions = historical_predictions[valid_errors]
+        signed_error = signed_error[valid_errors]
+
+    if signed_error.size == 0 or not np.any(~np.isclose(signed_error, 0.0)):
         return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
 
-    calibration = load_overestimation_calibration()
     max_buffer_rate = float(calibration["max_buffer_rate"])
     risk_threshold = float(calibration["risk_threshold"])
 
@@ -412,7 +532,6 @@ def _prepare_production_dataset(
         (1.0 - weight) * working["Produccion"]
         + weight * working["Produccion_patron"]
     )
-    working["sn_alto"] = 0.0
     return working.reset_index(drop=True)
 
 
@@ -548,6 +667,10 @@ def train_projection_model(
             "estimado_con_amortiguador_ia": np.round(predictions, 2),
         }
     )
+    chart_df["%dif"] = calculate_model_error_report(
+        real_production,
+        predictions,
+    )["%dif"].to_numpy()
 
     result = {
         "selected_var": str(selected_var),
@@ -574,10 +697,6 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
 
     target_rows = df[df["Bloque&Varid"].astype(
         str) == str(selected_var)].copy()
-    target_series = pd.to_numeric(
-        target_rows["Tallos/m2"], errors="coerce").dropna().reset_index(drop=True)
-    if len(target_series) < 4:
-        return None
 
     candidates: list[dict[str, Any]] = []
     grouped = df.dropna(subset=["Bloque&Varid"]).groupby("Bloque&Varid")
@@ -585,22 +704,15 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
         candidate_name = str(candidate_var)
         if candidate_name == str(selected_var):
             continue
+        if not has_sufficient_pattern_history(target_rows, candidate_rows):
+            continue
+
+        mse = calculate_normalized_stems_mse(target_rows, candidate_rows)
+        if mse is None:
+            continue
 
         candidate_series = pd.to_numeric(
             candidate_rows["Tallos/m2"], errors="coerce").dropna().reset_index(drop=True)
-        common_length = min(len(target_series), len(candidate_series))
-        if common_length < 4:
-            continue
-
-        mse = float(
-            np.mean(
-                (
-                    target_series.iloc[:common_length].to_numpy()
-                    - candidate_series.iloc[:common_length].to_numpy()
-                )
-                ** 2
-            )
-        )
         candidates.append(
             {
                 "reference_var": candidate_name,
@@ -614,6 +726,85 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
 
     candidates.sort(key=lambda item: item["mse"])
     return candidates[0]
+
+
+def has_sufficient_pattern_history(
+    target_rows: pd.DataFrame,
+    candidate_rows: pd.DataFrame,
+    required_columns: tuple[str, ...] = ("Tallos/m2",),
+) -> bool:
+    if not set(required_columns).issubset(target_rows.columns):
+        return False
+    if not set(required_columns).issubset(candidate_rows.columns):
+        return False
+
+    target_length = len(target_rows.dropna(subset=list(required_columns)))
+    candidate_length = len(
+        candidate_rows.dropna(subset=list(required_columns))
+    )
+    return candidate_length >= target_length
+
+
+def calculate_normalized_stems_mse(
+    target_rows: pd.DataFrame,
+    candidate_rows: pd.DataFrame,
+) -> float | None:
+    def prepare_series(rows: pd.DataFrame) -> np.ndarray:
+        working = rows.copy()
+        if {"Anio", "Semana"}.issubset(working.columns):
+            working = working.sort_values(["Anio", "Semana"])
+        return pd.to_numeric(
+            working["Tallos/m2"], errors="coerce"
+        ).dropna().to_numpy(dtype=float)
+
+    target = prepare_series(target_rows)
+    candidate = prepare_series(candidate_rows)
+    common_length = min(len(target), len(candidate))
+    if common_length < 4:
+        return None
+
+    target = target[:common_length]
+    candidate = candidate[:common_length]
+    target_std = float(np.std(target, ddof=0))
+    candidate_std = float(np.std(candidate, ddof=0))
+    if np.isclose(target_std, 0.0) or np.isclose(candidate_std, 0.0):
+        return None
+
+    target_normalized = (target - np.mean(target)) / target_std
+    candidate_normalized = (candidate - np.mean(candidate)) / candidate_std
+    return float(np.mean((target_normalized - candidate_normalized) ** 2))
+
+
+def calculate_pattern_signal_to_noise(
+    pattern_values: "pd.Series | np.ndarray",
+    model_values: "pd.Series | np.ndarray",
+    actual_values: "pd.Series | np.ndarray",
+) -> tuple[float, float, float]:
+    values = pd.DataFrame({
+        "pattern": pd.to_numeric(
+            pd.Series(pattern_values).reset_index(drop=True), errors="coerce"
+        ),
+        "model": pd.to_numeric(
+            pd.Series(model_values).reset_index(drop=True), errors="coerce"
+        ),
+        "actual": pd.to_numeric(
+            pd.Series(actual_values).reset_index(drop=True), errors="coerce"
+        ),
+    }).dropna()
+    if values.empty:
+        return np.nan, np.nan, np.nan
+
+    signal_power = float(np.mean(values["pattern"].to_numpy() ** 2))
+    noise_power = float(np.mean(
+        (values["model"].to_numpy() - values["actual"].to_numpy()) ** 2
+    ))
+    if signal_power <= 0:
+        sn_ratio_db = np.nan
+    elif np.isclose(noise_power, 0.0):
+        sn_ratio_db = np.inf
+    else:
+        sn_ratio_db = float(10.0 * np.log10(signal_power / noise_power))
+    return signal_power, noise_power, sn_ratio_db
 
 
 def scale_reference_projection(reference_series: pd.Series, actual_series: pd.Series) -> pd.Series:

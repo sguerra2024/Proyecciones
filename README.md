@@ -11,6 +11,20 @@ Incluye dos modos:
 - Proyeccion individual por variedad.
 - Proyeccion masiva por finca.
 
+Las preguntas a la IA pueden consultar SerpAPI cuando el usuario solicita
+explicitamente informacion externa (por ejemplo, una busqueda en internet o
+precios, clima, mercados o noticias actuales). Los resultados se incorporan
+al prompt con titulo, fragmento, URL y una lista numerada de fuentes. Las
+preguntas sobre los datos internos no activan solicitudes web. Para habilitar
+esta funcion se debe configurar `SERPAPI_API_KEY` en `.env`; si la clave no
+existe o SerpAPI falla, la consulta continua sin inventar resultados ni fuentes.
+
+Cada llamada enviada a un proveedor de IA se registra en SQLite antes de salir
+de la aplicacion. La base predeterminada es `data/consultas_ia.db` y contiene el
+proveedor, modelo, prompt original y final, respuesta, estado, error y duracion.
+La ruta puede cambiarse con `AI_LOG_DB_PATH`. Las credenciales configuradas se
+reemplazan por `[REDACTADO]` antes de almacenar cualquier texto.
+
 Streamlit y FastAPI usan el mismo modelo de produccion definido en
 `projection_core.py`; no existe un modelo alternativo exclusivo para la API.
 
@@ -65,10 +79,17 @@ Recomendaciones de calidad de datos:
 
 ### 3.1 Seleccion de Patron
 
-- Se calcula una similitud entre la variedad objetivo y los otros patrones disponibles usando `Tallos/m2`.
+- Para la IA, `PATRON` es la mejor opcion historica distinta del mismo `Bloque&Varid` proyectado, cuyo ajuste (`FIT`) respecto a los `Tallos/m2` actuales permite realizar una proyeccion futura.
+- Cada serie de `Tallos/m2` se normaliza a media 0 y desviacion estandar 1.
+- Se selecciona como patron el candidato con menor MSE entre las series normalizadas.
+- Antes del ranking se descartan los candidatos con menos registros validos que
+	la variedad objetivo; en ese caso se selecciona el siguiente patron por MSE.
 - Nunca se permite usar como patron la misma `Bloque&Varid` proyectada.
-- Se prioriza un patron de la misma familia de nombre cuando existe (normalizando prefijos numericos).
+- Un `Bloque&Varid` diferente puede usarse como patron aunque corresponda al mismo nombre de variedad.
 - El flujo usa un solo patron seleccionado por variedad para construir las variables del modelo.
+- Despues de predecir, `S` es la potencia de la proyeccion del patron seleccionado.
+- `N` es el MSE entre la estimacion del modelo y la produccion real.
+- La relacion se expresa en decibelios como `S/N = 10 * log10(S / N)`.
 
 ### 3.2 Variables de Entrenamiento
 
@@ -81,7 +102,6 @@ El modelo de regresion recibe las siguientes variables de entrada:
 - `Produccion_patron_ponderado`
 - `Incremento_tallos_patron`
 - `Incremento_produccion_patron`
-- `sn_alto`
 
 Adicionalmente se agrega una variable temporal derivada para el entrenamiento/prediccion:
 
@@ -129,6 +149,16 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 
 ### 3.7 Amortiguador de Sobreestimacion
 
+- El error real del modelo se registra en la columna `%dif` con la formula
+	`(Produccion real - Estimado_modelo) / Produccion real`.
+- Un `%dif` positivo indica subestimacion y uno negativo indica
+	sobreestimacion; la columna usa proporcion decimal (`0.10` equivale a 10%).
+- `projection_core.py` usa este error firmado del Excel procesado para entrenar
+	la magnitud y direccion del amortiguador.
+- Al generar la evaluacion con `plot_series_evaluation.py`, el informe se guarda
+	en `Evaluacion/errores_evaluacion_modelo.csv`; el amortiguador usa exactamente
+	el numero de semanas `Anio-Semana` presentes en ese informe, no una ventana
+	fija de 16 semanas.
 - El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
 - Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
 - El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.

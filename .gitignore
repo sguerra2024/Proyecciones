@@ -40,7 +40,8 @@ Thumbs.db
 # Streamlit
 .streamlit/
 
-# Project specific
+# Project-specific
 Proyecciones/
 .env
 *.log
+*.db

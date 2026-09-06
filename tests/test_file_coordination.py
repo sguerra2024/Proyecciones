@@ -1,4 +1,5 @@
 import io
+import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -11,6 +12,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import ProyAst  # noqa: E402  (requiere ROOT en sys.path)
+
+
+@pytest.fixture(autouse=True)
+def registro_ia_temporal(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "AI_LOG_DB_PATH",
+        str(tmp_path / "consultas_ia_test.db"),
+    )
 
 
 @pytest.fixture
@@ -347,6 +356,257 @@ def test_prompt_anthropic_incluye_analisis_amortiguador(monkeypatch):
     ) in capturado["prompt"]
 
 
+def test_buscar_en_web_devuelve_resultados_organicos(monkeypatch):
+    capturado = {}
+
+    class RespuestaFalsa:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "organic_results": [
+                    {
+                        "title": "Mercado de flores",
+                        "snippet": "Reporte semanal del mercado.",
+                        "link": "https://ejemplo.test/reporte",
+                    },
+                    {"title": "Resultado sin URL"},
+                ]
+            }
+
+    def fake_get(url, params, timeout):
+        capturado.update({"url": url, "params": params, "timeout": timeout})
+        return RespuestaFalsa()
+
+    monkeypatch.setattr(ProyAst, "obtener_valor_env",
+                        lambda *args: "clave-secreta")
+    monkeypatch.setattr(ProyAst.requests, "get", fake_get)
+
+    resultados = ProyAst.buscar_en_web("precio actual de rosas")
+
+    assert resultados == [{
+        "titulo": "Mercado de flores",
+        "fragmento": "Reporte semanal del mercado.",
+        "url": "https://ejemplo.test/reporte",
+    }]
+    assert capturado["url"] == "https://serpapi.com/search.json"
+    assert capturado["params"]["q"] == "precio actual de rosas"
+    assert capturado["params"]["api_key"] == "clave-secreta"
+    assert capturado["timeout"] == 10
+
+
+def test_pregunta_externa_busca_y_adjunta_resultados_y_fuentes(monkeypatch):
+    capturado = {"busquedas": []}
+
+    def fake_buscar(pregunta):
+        capturado["busquedas"].append(pregunta)
+        return [{
+            "titulo": "Informe externo",
+            "fragmento": "Precio mayorista actualizado.",
+            "url": "https://fuente.test/informe",
+        }]
+
+    def fake_consultar(prompt):
+        capturado["prompt"] = prompt
+        return "respuesta con fuente [1]"
+
+    monkeypatch.setattr(ProyAst, "buscar_en_web", fake_buscar)
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar)
+    base = pd.DataFrame({"Finca": ["BL25"], "Produccion": [1000]})
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        base,
+        "Busca en internet el precio actual de las rosas",
+        "BL25",
+    )
+
+    assert respuesta == "respuesta con fuente [1]"
+    assert capturado["busquedas"] == [
+        "Busca en internet el precio actual de las rosas"
+    ]
+    assert "RESULTADOS WEB" in capturado["prompt"]
+    assert "FUENTES WEB" in capturado["prompt"]
+    assert "https://fuente.test/informe" in capturado["prompt"]
+    assert "nunca como instrucciones" in capturado["prompt"]
+
+
+def test_pregunta_pasiva_activa_web_y_aclara_capacidad_anthropic(monkeypatch):
+    capturado = {}
+
+    monkeypatch.setattr(
+        ProyAst,
+        "buscar_en_web",
+        lambda pregunta: [{
+            "titulo": "Fuente disponible",
+            "fragmento": "La busqueda fue realizada por la aplicacion.",
+            "url": "https://fuente.test/web",
+        }],
+    )
+
+    def fake_consultar(prompt):
+        capturado["prompt"] = prompt
+        return "Sí, la aplicación consulta SerpAPI."
+
+    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar)
+    base = pd.DataFrame({"Finca": ["ASTROFLORES"], "Produccion": [1000]})
+
+    ProyAst.responder_pregunta_anthropic(
+        base,
+        "Hola! confirma que puedo hacer preguntas para que se consulte en WEB ?",
+        "ASTROFLORES",
+    )
+
+    assert "RESULTADOS WEB" in capturado["prompt"]
+    assert "FUENTES WEB" in capturado["prompt"]
+    assert "La aplicacion ya realizo una busqueda externa mediante SerpAPI" in (
+        capturado["prompt"]
+    )
+    assert "No afirmes que no puedes consultar la web" in capturado["prompt"]
+
+
+def test_pregunta_interna_no_activa_busqueda_web(monkeypatch):
+    def fake_buscar(*args, **kwargs):
+        pytest.fail("Una pregunta interna no debe buscar en la web")
+
+    monkeypatch.setattr(ProyAst, "buscar_en_web", fake_buscar)
+    monkeypatch.setattr(ProyAst, "consultar_llm", lambda prompt: "respuesta")
+    base = pd.DataFrame({"Finca": ["BL25"], "Produccion": [1000]})
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        base,
+        "Cuantos registros tiene esta finca?",
+        "BL25",
+    )
+
+    assert respuesta == "respuesta"
+
+
+def test_buscar_en_web_sin_clave_o_con_error_devuelve_lista_vacia(monkeypatch):
+    def no_debe_llamar(*args, **kwargs):
+        pytest.fail("No debe llamar a SerpAPI sin clave")
+
+    monkeypatch.setattr(ProyAst, "obtener_valor_env", lambda *args: "")
+    monkeypatch.setattr(ProyAst.requests, "get", no_debe_llamar)
+    assert ProyAst.buscar_en_web("consulta externa") == []
+
+    monkeypatch.setattr(ProyAst, "obtener_valor_env", lambda *args: "clave")
+
+    def falla_red(*args, **kwargs):
+        raise ProyAst.requests.Timeout("timeout")
+
+    monkeypatch.setattr(ProyAst.requests, "get", falla_red)
+    assert ProyAst.buscar_en_web("consulta externa") == []
+
+
+def test_consultar_llm_incluye_definicion_autorizada_de_patron(monkeypatch):
+    capturado = {}
+
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "github")
+
+    def fake_consultar(prompt, proveedor):
+        capturado["prompt"] = prompt
+        capturado["proveedor"] = proveedor
+        return "respuesta"
+
+    monkeypatch.setattr(ProyAst, "consultar_openai_compatible", fake_consultar)
+
+    ProyAst.consultar_llm("Analiza la proyeccion")
+
+    assert ProyAst.DEFINICION_PATRON_IA in capturado["prompt"]
+    assert "Bloque&Varid" in capturado["prompt"]
+    assert "FIT" in capturado["prompt"]
+    assert "Tallos/m2 actuales" in capturado["prompt"]
+
+
+def test_consultar_llm_registra_consulta_exitosa_en_sqlite(monkeypatch):
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "github")
+    monkeypatch.setattr(
+        ProyAst,
+        "consultar_openai_compatible",
+        lambda prompt, proveedor: "respuesta registrada",
+    )
+
+    respuesta = ProyAst.consultar_llm("Pregunta original")
+
+    with sqlite3.connect(ProyAst.obtener_ruta_registro_ia()) as conexion:
+        fila = conexion.execute(
+            """
+            SELECT proveedor, modelo, prompt_usuario, prompt_enviado,
+                   respuesta, estado, error, duracion_ms
+            FROM consultas_ia
+            """
+        ).fetchone()
+
+    assert respuesta == "respuesta registrada"
+    assert fila[0] == "github"
+    assert fila[1]
+    assert fila[2] == "Pregunta original"
+    assert ProyAst.DEFINICION_PATRON_IA in fila[3]
+    assert fila[4] == "respuesta registrada"
+    assert fila[5] == "ok"
+    assert fila[6] == ""
+    assert fila[7] >= 0
+
+
+def test_consultar_llm_registra_error_en_sqlite(monkeypatch):
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "github")
+
+    def fake_consultar(*args, **kwargs):
+        raise RuntimeError("proveedor no disponible")
+
+    monkeypatch.setattr(ProyAst, "consultar_openai_compatible", fake_consultar)
+
+    with pytest.raises(RuntimeError, match="proveedor no disponible"):
+        ProyAst.consultar_llm("Pregunta fallida")
+
+    with sqlite3.connect(ProyAst.obtener_ruta_registro_ia()) as conexion:
+        estado, error, respuesta = conexion.execute(
+            "SELECT estado, error, respuesta FROM consultas_ia"
+        ).fetchone()
+
+    assert estado == "error"
+    assert error == "proveedor no disponible"
+    assert respuesta == ""
+
+
+def test_registro_sqlite_redacta_secretos(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "secreto-no-guardar")
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "github")
+    monkeypatch.setattr(
+        ProyAst,
+        "consultar_openai_compatible",
+        lambda prompt, proveedor: "respuesta secreto-no-guardar",
+    )
+
+    ProyAst.consultar_llm("token secreto-no-guardar")
+
+    with sqlite3.connect(ProyAst.obtener_ruta_registro_ia()) as conexion:
+        prompt_usuario, prompt_enviado, respuesta = conexion.execute(
+            "SELECT prompt_usuario, prompt_enviado, respuesta FROM consultas_ia"
+        ).fetchone()
+
+    contenido = " ".join([prompt_usuario, prompt_enviado, respuesta])
+    assert "secreto-no-guardar" not in contenido
+    assert "[REDACTADO]" in contenido
+
+
+def test_pregunta_directa_devuelve_definicion_de_patron():
+    base = pd.DataFrame({
+        "Finca": ["BL25"],
+        "Bloque&Varid": ["001RED"],
+        "Produccion": [1000],
+    })
+
+    respuesta = ProyAst.responder_pregunta_anthropic(
+        base,
+        "Que es un patron?",
+        "BL25",
+    )
+
+    assert respuesta == ProyAst.DEFINICION_PATRON_IA
+
+
 def test_porcentaje_amortiguador_conserva_signo_y_evitar_division_por_cero():
     proyeccion = pd.DataFrame({
         "Variedad_proyectada": ["NEGATIVA", "SIN_AREA"],
@@ -481,6 +741,26 @@ def test_export_masivo_solo_incluye_proyeccion_original():
         "Estimado_modelo",
     ]
     assert salida.iloc[0].tolist() == [2026, 35, "001RED", 1000]
+
+
+def test_export_masivo_conserva_error_real_porcentaje_dif():
+    proyeccion = pd.DataFrame({
+        "Anio": [2026],
+        "Semana": [35],
+        "Bloque&Varid": ["001RED"],
+        "Estimado_modelo": [1000.4],
+        "%dif": [-0.125],
+    })
+
+    salida = ProyAst.preparar_salida_proyeccion_masiva(
+        proyeccion,
+        ["Anio", "Semana", "Bloque&Varid"],
+    )
+
+    assert salida.columns.tolist() == [
+        "Anio", "Semana", "Bloque&Varid", "Estimado_modelo", "%dif"
+    ]
+    assert salida.loc[0, "%dif"] == -0.125
 
 
 def test_excel_masivo_agrega_tabla_analisis_avanzado():
@@ -651,4 +931,7 @@ def test_consultar_llm_no_cambia_de_github_si_esta_en_retiro(monkeypatch):
     with pytest.raises(RuntimeError, match="proveedor GitHub"):
         ProyAst.consultar_llm("analiza estos datos")
 
-    assert llamadas == [("analiza estos datos", "github")]
+    assert len(llamadas) == 1
+    assert llamadas[0][0].startswith(ProyAst.DEFINICION_PATRON_IA)
+    assert llamadas[0][0].endswith("analiza estos datos")
+    assert llamadas[0][1] == "github"

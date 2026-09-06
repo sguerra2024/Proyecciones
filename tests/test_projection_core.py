@@ -2,9 +2,15 @@ from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
     build_production_model,
+    calculate_model_error_report,
+    calculate_normalized_stems_mse,
+    calculate_pattern_signal_to_noise,
     calculate_additional_buffer_area,
     calculate_buffer_area_from_projection,
+    find_reference_pattern,
+    has_sufficient_pattern_history,
     load_overestimation_calibration,
+    save_buffer_evaluation_report,
     train_projection_model,
 )
 import projection_core
@@ -62,9 +68,97 @@ def test_train_projection_model_predicts_production_with_reference_pattern():
         "estimado_modelo",
         "amortiguador_sobreestimacion",
         "estimado_con_amortiguador_ia",
+        "%dif",
     } == set(result["chart_df"].columns)
     assert np.isfinite(result["amortiguador_promedio_historico"])
     assert result["amortiguador_porcentaje"] >= 0
+
+
+def test_pattern_selection_uses_normalized_mse_and_excludes_target():
+    rows = []
+    series = {
+        "001RED": [1.0, 2.0, 3.0, 4.0],
+        "002RED": [100.0, 200.0, 300.0, 400.0],
+        "003BLUE": [1.0, 2.0, 4.0, 3.0],
+    }
+    for variety, values in series.items():
+        for week, stems in enumerate(values, start=1):
+            rows.append({
+                "Anio": 2025,
+                "Semana": week,
+                "Bloque&Varid": variety,
+                "Tallos/m2": stems,
+            })
+    data = pd.DataFrame(rows)
+
+    pattern = find_reference_pattern(data, "001RED")
+
+    assert pattern is not None
+    assert pattern["reference_var"] == "002RED"
+    assert np.isclose(pattern["mse"], 0.0)
+    assert np.isclose(
+        calculate_normalized_stems_mse(
+            data[data["Bloque&Varid"] == "001RED"],
+            data[data["Bloque&Varid"] == "002RED"],
+        ),
+        0.0,
+    )
+
+
+def test_pattern_selection_descarta_candidato_mas_corto():
+    rows = []
+    series = {
+        "OBJETIVO": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "CORTO_MSE_PERFECTO": [10.0, 20.0, 30.0, 40.0],
+        "COMPLETO": [1.0, 2.0, 3.0, 5.0, 4.0, 6.0],
+    }
+    for variety, values in series.items():
+        for week, stems in enumerate(values, start=1):
+            rows.append({
+                "Anio": 2025,
+                "Semana": week,
+                "Bloque&Varid": variety,
+                "Tallos/m2": stems,
+            })
+
+    pattern = find_reference_pattern(pd.DataFrame(rows), "OBJETIVO")
+
+    assert pattern is not None
+    assert pattern["reference_var"] == "COMPLETO"
+
+
+def test_longitud_patron_cuenta_solo_filas_completas_del_modelo():
+    columnas = ("Anio", "Semana", "Tallos/m2", "Produccion")
+    objetivo = pd.DataFrame({
+        "Anio": [2025] * 4,
+        "Semana": [1, 2, 3, 4],
+        "Tallos/m2": [10.0, 11.0, 12.0, 13.0],
+        "Produccion": [100.0, 110.0, 120.0, 130.0],
+    })
+    candidato = pd.DataFrame({
+        "Anio": [2025] * 5,
+        "Semana": [1, 2, 3, 4, 5],
+        "Tallos/m2": [20.0, 21.0, 22.0, 23.0, 24.0],
+        "Produccion": [200.0, 210.0, np.nan, np.nan, 240.0],
+    })
+
+    assert not has_sufficient_pattern_history(
+        objetivo,
+        candidato,
+        required_columns=columnas,
+    )
+
+
+def test_signal_to_noise_uses_pattern_as_signal_and_model_error_as_noise():
+    signal, noise, sn_ratio = calculate_pattern_signal_to_noise(
+        pattern_values=np.array([10.0, 10.0]),
+        model_values=np.array([12.0, 8.0]),
+        actual_values=np.array([10.0, 10.0]),
+    )
+
+    assert np.isclose(signal, 100.0)
+    assert np.isclose(noise, 4.0)
+    assert np.isclose(sn_ratio, 10.0 * np.log10(25.0))
 
 
 class _FixedProductionModel:
@@ -72,7 +166,7 @@ class _FixedProductionModel:
         return features["prediccion_prueba"].to_numpy(dtype=float)
 
 
-def test_amortiguador_usa_16_semanas_anteriores_a_las_4_ultimas(monkeypatch):
+def test_amortiguador_usa_numero_de_semanas_evaluadas(monkeypatch):
     semanas_usadas = []
 
     class RecordingProductionModel:
@@ -93,6 +187,15 @@ def test_amortiguador_usa_16_semanas_anteriores_a_las_4_ultimas(monkeypatch):
         "Tallos/m2": [15.0],
         "Semana": [26],
     })
+    monkeypatch.setattr(
+        projection_core,
+        "load_overestimation_calibration",
+        lambda: {
+            "max_buffer_rate": 0.10,
+            "risk_threshold": 0.60,
+            "evaluated_weeks": 4,
+        },
+    )
 
     apply_overestimation_buffer(
         RecordingProductionModel(),
@@ -103,7 +206,7 @@ def test_amortiguador_usa_16_semanas_anteriores_a_las_4_ultimas(monkeypatch):
         100.0,
     )
 
-    assert semanas_usadas == list(range(5, 21))
+    assert semanas_usadas == [21, 22, 23, 24]
 
 
 def test_amortiguador_pondera_magnitud_por_probabilidad_y_umbral(monkeypatch):
@@ -188,12 +291,26 @@ def test_amortiguador_aprende_error_bilateral_sin_cambiar_prediccion_oficial():
         100.0,
     )
 
-    assert average_error == 0.0
+    assert average_error == 5.0
     np.testing.assert_array_equal(official, predictions)
     calibration = load_overestimation_calibration()
     assert np.all(np.abs(buffer) <= predictions *
                   calibration["max_buffer_rate"])
     assert np.isfinite(buffer_rate)
+
+
+def test_error_real_modelo_se_calcula_en_columna_porcentaje_dif():
+    report = calculate_model_error_report(
+        actual_values=np.array([7460.0, 2040.0, 0.0]),
+        estimated_values=np.array([9562.0, 1790.0, 100.0]),
+    )
+
+    assert report.columns.tolist() == [
+        "Produccion", "Estimado_modelo", "%dif"
+    ]
+    assert np.isclose(report.loc[0, "%dif"], -0.281769436997319)
+    assert np.isclose(report.loc[1, "%dif"], 0.12254901960784313)
+    assert np.isnan(report.loc[2, "%dif"])
 
 
 def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
@@ -210,6 +327,30 @@ def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
     assert calibration["underestimation_cases"] == 2
     assert np.isclose(calibration["max_buffer_rate"], expected_rate)
     assert calibration["risk_threshold"] == 0.60
+
+
+def test_informe_excel_recalcula_dif_y_conserva_semanas(tmp_path):
+    excel_path = tmp_path / "evaluacion.xlsx"
+    destination = tmp_path / "errores.csv"
+    pd.DataFrame({
+        "Anio": [2026, 2026, 2026],
+        "Semana": [31, 31, 32],
+        "Produccion": [7460.0, 2040.0, 1300.0],
+        "Estimado_modelo": [9562.0, 1790.0, 1200.0],
+        "%dif": [999.0, 999.0, 999.0],
+    }).to_excel(excel_path, index=False)
+
+    info = save_buffer_evaluation_report(
+        excel_path,
+        destination_path=destination,
+    )
+    report = pd.read_csv(destination)
+    calibration = load_overestimation_calibration(destination)
+
+    assert np.isclose(report.loc[0, "%dif"], -0.281769436997319)
+    assert np.isclose(report.loc[1, "%dif"], 0.12254901960784313)
+    assert info["evaluated_weeks"] == 2
+    assert calibration["evaluated_weeks"] == 2
 
 
 def test_amortiguador_rechaza_m2_variedad_no_valido():
