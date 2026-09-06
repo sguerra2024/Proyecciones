@@ -54,7 +54,7 @@ PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
 REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
 TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.0"))
 PATRON_TRAIN_TARGET_WEIGHT = float(
-    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.30")
+    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.45")
 )
 DEFINICION_PATRON_IA = (
     'Definicion autorizada de PATRON: PATRON es la mejor opcion historica '
@@ -70,6 +70,10 @@ DEFINICION_AMORTIGUADOR_IA = (
 RECOMENDACION_AMORTIGUADOR_IA = (
     'PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO '
     'EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE.'
+)
+MENSAJE_CONSULTA_EXTERNA_IA = (
+    'Anthropic solo responde consultas relacionadas con la informacion '
+    'almacenada en el contexto de la aplicacion.'
 )
 
 
@@ -490,8 +494,15 @@ def es_error_modelo_inexistente(exc):
     )
 
 
+def reemplazar_astroflores_por_finca(texto):
+    return re.sub(r'\bastroflores\b', 'Finca', str(texto), flags=re.IGNORECASE)
+
+
 def consultar_llm(prompt_usuario):
+    proveedor = obtener_llm_provider()
     prompt_original = str(prompt_usuario)
+    if proveedor == 'anthropic':
+        prompt_original = reemplazar_astroflores_por_finca(prompt_original)
     prompt_enviado = (
         f'{DEFINICION_PATRON_IA}\n'
         'Definicion autorizada de AMORTIGUADOR M2: '
@@ -499,7 +510,6 @@ def consultar_llm(prompt_usuario):
         f'{RECOMENDACION_AMORTIGUADOR_IA}\n\n'
         f'{prompt_original}'
     )
-    proveedor = obtener_llm_provider()
     modelo = modelo_principal_proveedor(proveedor)
     inicio = time.perf_counter()
     registro_id = iniciar_registro_consulta_ia(
@@ -526,6 +536,8 @@ def consultar_llm(prompt_usuario):
         )
         raise
 
+    if proveedor == 'anthropic':
+        respuesta = reemplazar_astroflores_por_finca(respuesta)
     finalizar_registro_consulta_ia(
         registro_id,
         'ok',
@@ -843,16 +855,19 @@ def preparar_salida_proyeccion_masiva(df_proyeccion, columnas_identificacion):
         columna for columna in columnas_identificacion
         if columna in salida.columns
     ]
-    columnas_resultado = ['Estimado_modelo']
-    if '%dif' in salida.columns:
-        columnas_resultado.append('%dif')
-    return salida[identificadores + columnas_resultado].reset_index(drop=True)
+    return salida[identificadores + ['Estimado_modelo']].reset_index(drop=True)
 
 
 def crear_excel_proyeccion_masiva(
     df_proyeccion_original,
     df_analisis_avanzado,
 ):
+    df_proyeccion_original = df_proyeccion_original.drop(
+        columns=['%dif'], errors='ignore'
+    )
+    df_analisis_avanzado = df_analisis_avanzado.drop(
+        columns=['%dif'], errors='ignore'
+    )
     buffer_excel = io.BytesIO()
     with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
         df_proyeccion_original.to_excel(
@@ -1207,6 +1222,8 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
     if not pregunta_limpia:
         raise ValueError(
             'Escribe una pregunta antes de consultar a Anthropic.')
+    if solicita_informacion_externa(pregunta_limpia):
+        return MENSAJE_CONSULTA_EXTERNA_IA
 
     pregunta_normalizada = ''.join(
         caracter
@@ -1263,25 +1280,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         if not resumen.empty:
             resumen_info = resumen.to_csv(index=False)
 
-    requiere_web = solicita_informacion_externa(pregunta_limpia)
-    contexto_web = ''
-    if requiere_web:
-        contexto_web = construir_contexto_web(
-            buscar_en_web(pregunta_limpia)
-        )
-
-    alcance_respuesta = (
-        'La aplicacion ya realizo una busqueda externa mediante SerpAPI y te '
-        'entrega sus resultados abajo. No afirmes que no puedes consultar la '
-        'web: usa el contexto web suministrado y cita sus fuentes. Distingue '
-        'los datos internos de la informacion web. '
-        if contexto_web else
-        'Usa unicamente el resumen y las definiciones de negocio suministrados. '
-    )
     restricciones_respuesta = (
-        'Responde la solicitud externa basandote en los resultados web. '
-        'Si no hay resultados web, indicalo claramente y no inventes fuentes. '
-        if requiere_web else
         'Despliega exclusivamente el area calculada en M2, su porcentaje '
         'sobre los M2 de la variedad, el promedio de Tallos/m2 de las ultimas '
         '12 semanas disponibles de 2026 o posteriores y el producto de ambos '
@@ -1291,7 +1290,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde en espanol. '
-        f'{alcance_respuesta}'
+        'Usa unicamente el resumen y las definiciones de negocio suministrados. '
         f'{DEFINICION_AMORTIGUADOR_IA} '
         f'{RECOMENDACION_AMORTIGUADOR_IA} '
         'Nunca afirmes que el amortiguador no forma parte de la informacion. '
@@ -1299,7 +1298,6 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'Finca en contexto: {finca_contexto}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
-        f'{contexto_web}\n'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
@@ -1727,7 +1725,13 @@ def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, p
 
 
 def consulta_solicita_dashboard(texto_consulta):
-    texto = (texto_consulta or '').strip().lower()
+    texto = ''.join(
+        caracter
+        for caracter in unicodedata.normalize(
+            'NFKD', str(texto_consulta or '').strip().casefold()
+        )
+        if not unicodedata.combining(caracter)
+    )
     if not texto:
         return False
 
@@ -1744,6 +1748,13 @@ def consulta_solicita_dashboard(texto_consulta):
         'kpis'
     ]
     return any(palabra in texto for palabra in palabras_clave)
+
+
+def preparar_estado_consulta_ia(state, pregunta):
+    state['respuesta_pregunta_claude'] = ''
+    state['error_pregunta_claude'] = ''
+    state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(pregunta)
+    return state
 
 
 @st.fragment
@@ -2145,12 +2156,8 @@ def render_dashboard_base(df_base, usar_expander=True):
 def render_preguntas_claude(df_base, selected_finca):
     with st.expander('Preguntas a la IA (Anthropic/GitHub Models/OpenAI)', expanded=True):
         st.caption(
-            'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
+            'Consulta sobre variedades, fincas, usos y precios presentes en los datos cargados.'
         )
-
-        if st.session_state.get('mostrar_dashboard_ia', False):
-            render_dashboard_base(df_base, usar_expander=False)
-            st.divider()
 
         st.write()
         with st.form('form_pregunta_IA', clear_on_submit=True):
@@ -2161,8 +2168,9 @@ def render_preguntas_claude(df_base, selected_finca):
             enviar_pregunta = st.form_submit_button('Preguntale a la IA')
 
         if enviar_pregunta:
-            st.session_state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(
-                pregunta_negocio
+            preparar_estado_consulta_ia(
+                st.session_state,
+                pregunta_negocio,
             )
             try:
                 respuesta_negocio = responder_pregunta_anthropic(
@@ -2178,6 +2186,10 @@ def render_preguntas_claude(df_base, selected_finca):
             except Exception as exc:
                 st.session_state['error_pregunta_claude'] = str(exc)
                 st.session_state['respuesta_pregunta_claude'] = ''
+
+        if st.session_state.get('mostrar_dashboard_ia', False):
+            render_dashboard_base(df_base, usar_expander=False)
+            st.divider()
 
         if st.session_state.get('error_pregunta_claude'):
             st.error(

@@ -11,13 +11,9 @@ Incluye dos modos:
 - Proyeccion individual por variedad.
 - Proyeccion masiva por finca.
 
-Las preguntas a la IA pueden consultar SerpAPI cuando el usuario solicita
-explicitamente informacion externa (por ejemplo, una busqueda en internet o
-precios, clima, mercados o noticias actuales). Los resultados se incorporan
-al prompt con titulo, fragmento, URL y una lista numerada de fuentes. Las
-preguntas sobre los datos internos no activan solicitudes web. Para habilitar
-esta funcion se debe configurar `SERPAPI_API_KEY` en `.env`; si la clave no
-existe o SerpAPI falla, la consulta continua sin inventar resultados ni fuentes.
+Las preguntas a la IA se limitan a la informacion almacenada en el contexto de
+la aplicacion. Las solicitudes de busqueda web o de datos externos se rechazan
+antes de llamar al proveedor de IA y no activan SerpAPI.
 
 Cada llamada enviada a un proveedor de IA se registra en SQLite antes de salir
 de la aplicacion. La base predeterminada es `data/consultas_ia.db` y contiene el
@@ -160,6 +156,8 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 	el numero de semanas `Anio-Semana` presentes en ese informe, no una ventana
 	fija de 16 semanas.
 - El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
+- La convención del amortiguador sigue el caso real del error del modelo:
+	positivo cuando el modelo subestima y negativo cuando sobreestima.
 - Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
 - El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.
 - El limite se obtiene de la mediana historica de la sobreestimacion expresada como proporcion de la prediccion. Con la evaluacion actual es aproximadamente `11%`, en lugar de un limite fijo de `30%`.

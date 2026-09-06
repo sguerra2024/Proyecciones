@@ -33,8 +33,8 @@ BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
-REAL_PRODUCTION_TARGET_WEIGHT = 0.70
-PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
+REAL_PRODUCTION_TARGET_WEIGHT = 0.55
+PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
 
 
 def load_overestimation_calibration(
@@ -263,6 +263,7 @@ def apply_overestimation_buffer(
         1,
         int(calibration.get("evaluated_weeks", DEFAULT_EVALUATED_WEEKS)),
     )
+    exclude_latest_weeks = 4 if evaluated_weeks >= DEFAULT_EVALUATED_WEEKS else 0
 
     if {"Anio", "Semana"}.issubset(history.columns):
         order = history.assign(
@@ -273,7 +274,12 @@ def apply_overestimation_buffer(
         positions = order.sort_values(["__anio", "__semana"])[
             "__position"
         ].to_numpy(dtype=int)
-        positions = positions[-evaluated_weeks:]
+        if len(positions) >= evaluated_weeks:
+            positions = positions[-evaluated_weeks:]
+            if exclude_latest_weeks and len(positions) > exclude_latest_weeks:
+                positions = positions[:-exclude_latest_weeks]
+        else:
+            positions = positions[-len(positions):]
         history = history.iloc[positions].reset_index(drop=True)
         history_features = history_features.iloc[positions].reset_index(
             drop=True)
@@ -282,6 +288,13 @@ def apply_overestimation_buffer(
         history_features = history_features.tail(
             evaluated_weeks
         ).reset_index(drop=True)
+        if len(history) >= evaluated_weeks:
+            if exclude_latest_weeks and len(history) > exclude_latest_weeks:
+                history = history.iloc[:-
+                                       exclude_latest_weeks].reset_index(drop=True)
+                history_features = history_features.iloc[
+                    :-exclude_latest_weeks
+                ].reset_index(drop=True)
 
     historical_predictions = production_model.predict(history_features)
     error_report = calculate_model_error_report(
@@ -333,9 +346,51 @@ def apply_overestimation_buffer(
     estimated_error = buffer_model.predict(
         prediction_buffer_features[BUFFER_COLUMNS]
     ) * valid_area
+    negative_error_ratio = float(np.mean(signed_error < 0.0))
+    positive_error_ratio = float(np.mean(signed_error > 0.0))
+    dominant_direction = None
+    if negative_error_ratio >= 0.75:
+        dominant_direction = -1.0
+        estimated_error = -np.abs(estimated_error)
+    elif positive_error_ratio >= 0.75:
+        dominant_direction = 1.0
+        estimated_error = np.abs(estimated_error)
+
+    if history["Produccion"].notna().any():
+        production_series = pd.to_numeric(
+            history["Produccion"], errors="coerce"
+        ).to_numpy(dtype=float)
+        finite_production = production_series[np.isfinite(production_series)]
+        if finite_production.size >= 3:
+            cycle_window = finite_production[-min(len(finite_production), 12):]
+            cycle_mean = float(np.mean(cycle_window))
+            under_weeks = int(np.count_nonzero(cycle_window < cycle_mean))
+            if 3 <= under_weeks <= 5:
+                deficit = cycle_mean - cycle_window[cycle_window < cycle_mean]
+                mean_deficit = float(np.mean(deficit)) if deficit.size else 0.0
+                if np.isfinite(mean_deficit) and mean_deficit > 0:
+                    extension_weeks = min(len(base_predictions), 6)
+                    if extension_weeks > 0:
+                        recovery_pressure = np.clip(
+                            mean_deficit / max(abs(cycle_mean), 1.0),
+                            0.0,
+                            1.0,
+                        )
+                        if recovery_pressure > 0:
+                            negative_mask = estimated_error < 0.0
+                            if np.any(negative_mask[:extension_weeks]):
+                                estimated_error = estimated_error.copy()
+                                estimated_error[:extension_weeks] = np.where(
+                                    negative_mask[:extension_weeks],
+                                    estimated_error[:extension_weeks]
+                                    * (1.0 + recovery_pressure * 0.35),
+                                    estimated_error[:extension_weeks],
+                                )
 
     direction_labels = signed_error > 0
-    if np.unique(direction_labels).size == 1:
+    if dominant_direction is not None:
+        direction_probability = np.ones_like(base_predictions)
+    elif np.unique(direction_labels).size == 1:
         direction_probability = np.ones_like(base_predictions)
     else:
         risk_model = RandomForestClassifier(
@@ -362,6 +417,7 @@ def apply_overestimation_buffer(
     buffer = np.where(
         direction_probability >= risk_threshold, estimated_buffer, 0.0
     )
+    buffer = -buffer
     prediction_mean = float(np.mean(base_predictions)
                             ) if base_predictions.size else 0.0
     buffer_rate = float(
@@ -447,8 +503,8 @@ def add_buffer_projection_columns(
         [
             result["M2_amortiguador_adicional"].isna()
             & ~np.isclose(result["Amortiguador_sobreestimacion"], 0.0),
-            result["M2_amortiguador_adicional"] > 0,
             result["M2_amortiguador_adicional"] < 0,
+            result["M2_amortiguador_adicional"] > 0,
         ],
         [
             "No calculable: Tallos/m2 es cero",

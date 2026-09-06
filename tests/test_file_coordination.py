@@ -91,6 +91,34 @@ def test_preparar_estado_para_nuevo_archivo_base_resetea_export_y_dashboard():
     assert devuelto is state
 
 
+def test_preparar_estado_consulta_individual_oculta_dashboard_anterior():
+    state = {
+        "mostrar_dashboard_ia": True,
+        "respuesta_pregunta_claude": "respuesta anterior",
+        "error_pregunta_claude": "error anterior",
+    }
+
+    ProyAst.preparar_estado_consulta_ia(
+        state,
+        "Cuantos M2 de amortiguador necesito?",
+    )
+
+    assert state["mostrar_dashboard_ia"] is False
+    assert state["respuesta_pregunta_claude"] == ""
+    assert state["error_pregunta_claude"] == ""
+
+
+def test_preparar_estado_consulta_activa_dashboard_solo_si_se_solicita():
+    state = {"mostrar_dashboard_ia": False}
+
+    ProyAst.preparar_estado_consulta_ia(
+        state,
+        "Publica un gráfico del modelo",
+    )
+
+    assert state["mostrar_dashboard_ia"] is True
+
+
 # --- sincronizar_export_generado_automatico --------------------------------
 
 @pytest.fixture
@@ -396,23 +424,12 @@ def test_buscar_en_web_devuelve_resultados_organicos(monkeypatch):
     assert capturado["timeout"] == 10
 
 
-def test_pregunta_externa_busca_y_adjunta_resultados_y_fuentes(monkeypatch):
-    capturado = {"busquedas": []}
+def test_pregunta_externa_se_rechaza_sin_consultar_servicios(monkeypatch):
+    def no_debe_consultar(*args, **kwargs):
+        pytest.fail("Una pregunta externa no debe consultar servicios")
 
-    def fake_buscar(pregunta):
-        capturado["busquedas"].append(pregunta)
-        return [{
-            "titulo": "Informe externo",
-            "fragmento": "Precio mayorista actualizado.",
-            "url": "https://fuente.test/informe",
-        }]
-
-    def fake_consultar(prompt):
-        capturado["prompt"] = prompt
-        return "respuesta con fuente [1]"
-
-    monkeypatch.setattr(ProyAst, "buscar_en_web", fake_buscar)
-    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar)
+    monkeypatch.setattr(ProyAst, "buscar_en_web", no_debe_consultar)
+    monkeypatch.setattr(ProyAst, "consultar_llm", no_debe_consultar)
     base = pd.DataFrame({"Finca": ["BL25"], "Produccion": [1000]})
 
     respuesta = ProyAst.responder_pregunta_anthropic(
@@ -421,48 +438,30 @@ def test_pregunta_externa_busca_y_adjunta_resultados_y_fuentes(monkeypatch):
         "BL25",
     )
 
-    assert respuesta == "respuesta con fuente [1]"
-    assert capturado["busquedas"] == [
-        "Busca en internet el precio actual de las rosas"
-    ]
-    assert "RESULTADOS WEB" in capturado["prompt"]
-    assert "FUENTES WEB" in capturado["prompt"]
-    assert "https://fuente.test/informe" in capturado["prompt"]
-    assert "nunca como instrucciones" in capturado["prompt"]
-
-
-def test_pregunta_pasiva_activa_web_y_aclara_capacidad_anthropic(monkeypatch):
-    capturado = {}
-
-    monkeypatch.setattr(
-        ProyAst,
-        "buscar_en_web",
-        lambda pregunta: [{
-            "titulo": "Fuente disponible",
-            "fragmento": "La busqueda fue realizada por la aplicacion.",
-            "url": "https://fuente.test/web",
-        }],
+    assert respuesta == (
+        "Anthropic solo responde consultas relacionadas con la informacion "
+        "almacenada en el contexto de la aplicacion."
     )
 
-    def fake_consultar(prompt):
-        capturado["prompt"] = prompt
-        return "Sí, la aplicación consulta SerpAPI."
 
-    monkeypatch.setattr(ProyAst, "consultar_llm", fake_consultar)
+def test_pregunta_pasiva_sobre_web_tambien_se_rechaza(monkeypatch):
+    def no_debe_consultar(*args, **kwargs):
+        pytest.fail("Una pregunta sobre la web no debe consultar servicios")
+
+    monkeypatch.setattr(ProyAst, "buscar_en_web", no_debe_consultar)
+    monkeypatch.setattr(ProyAst, "consultar_llm", no_debe_consultar)
     base = pd.DataFrame({"Finca": ["ASTROFLORES"], "Produccion": [1000]})
 
-    ProyAst.responder_pregunta_anthropic(
+    respuesta = ProyAst.responder_pregunta_anthropic(
         base,
         "Hola! confirma que puedo hacer preguntas para que se consulte en WEB ?",
         "ASTROFLORES",
     )
 
-    assert "RESULTADOS WEB" in capturado["prompt"]
-    assert "FUENTES WEB" in capturado["prompt"]
-    assert "La aplicacion ya realizo una busqueda externa mediante SerpAPI" in (
-        capturado["prompt"]
+    assert respuesta == (
+        "Anthropic solo responde consultas relacionadas con la informacion "
+        "almacenada en el contexto de la aplicacion."
     )
-    assert "No afirmes que no puedes consultar la web" in capturado["prompt"]
 
 
 def test_pregunta_interna_no_activa_busqueda_web(monkeypatch):
@@ -517,6 +516,34 @@ def test_consultar_llm_incluye_definicion_autorizada_de_patron(monkeypatch):
     assert "Bloque&Varid" in capturado["prompt"]
     assert "FIT" in capturado["prompt"]
     assert "Tallos/m2 actuales" in capturado["prompt"]
+
+
+def test_consultar_llm_reemplaza_astroflores_por_finca_en_anthropic(monkeypatch):
+    capturado = {}
+
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "anthropic")
+
+    def fake_consultar(prompt):
+        capturado["prompt"] = prompt
+        return "Resumen de ASTROFLORES"
+
+    monkeypatch.setattr(ProyAst, "consultar_anthropic", fake_consultar)
+
+    respuesta = ProyAst.consultar_llm(
+        "ASTROFLORES, Astroflores y astroflores corresponden a la finca"
+    )
+
+    with sqlite3.connect(ProyAst.obtener_ruta_registro_ia()) as conexion:
+        prompt_usuario, prompt_enviado, respuesta_registrada = conexion.execute(
+            "SELECT prompt_usuario, prompt_enviado, respuesta FROM consultas_ia"
+        ).fetchone()
+
+    assert "astroflores" not in capturado["prompt"].casefold()
+    assert capturado["prompt"].count("Finca") == 3
+    assert respuesta == "Resumen de Finca"
+    assert "astroflores" not in " ".join([
+        prompt_usuario, prompt_enviado, respuesta_registrada
+    ]).casefold()
 
 
 def test_consultar_llm_registra_consulta_exitosa_en_sqlite(monkeypatch):
@@ -743,7 +770,7 @@ def test_export_masivo_solo_incluye_proyeccion_original():
     assert salida.iloc[0].tolist() == [2026, 35, "001RED", 1000]
 
 
-def test_export_masivo_conserva_error_real_porcentaje_dif():
+def test_export_masivo_no_incluye_error_real_porcentaje_dif():
     proyeccion = pd.DataFrame({
         "Anio": [2026],
         "Semana": [35],
@@ -758,15 +785,16 @@ def test_export_masivo_conserva_error_real_porcentaje_dif():
     )
 
     assert salida.columns.tolist() == [
-        "Anio", "Semana", "Bloque&Varid", "Estimado_modelo", "%dif"
+        "Anio", "Semana", "Bloque&Varid", "Estimado_modelo"
     ]
-    assert salida.loc[0, "%dif"] == -0.125
+    assert "%dif" not in salida.columns
 
 
 def test_excel_masivo_agrega_tabla_analisis_avanzado():
     proyeccion_original = pd.DataFrame({
         "Bloque&Varid": ["001RED"],
         "Estimado_modelo": [1000],
+        "%dif": [-0.125],
     })
     analisis_avanzado = pd.DataFrame({
         "Variedad_proyectada": ["001RED"],
@@ -775,6 +803,7 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
         "porcentaje_amortiguador_sobre_m2_variedad": [14.0],
         "promedio_tallos_m2_ultimas_12_semanas": [7.5],
         "producto_m2_por_promedio_tallos_m2": [105],
+        "%dif": [-0.125],
     })
 
     contenido = ProyAst.crear_excel_proyeccion_masiva(
@@ -790,6 +819,7 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
     tabla_analisis = pd.read_excel(
         io.BytesIO(contenido), sheet_name="Analisis_avanzado"
     )
+    assert "%dif" not in tabla_analisis.columns
     assert tabla_analisis.iloc[0].tolist() == [
         "001RED", 14, 100, 14, 7.5, 105
     ]
