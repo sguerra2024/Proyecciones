@@ -106,6 +106,7 @@ def test_preparar_estado_consulta_individual_oculta_dashboard_anterior():
     assert state["mostrar_dashboard_ia"] is False
     assert state["respuesta_pregunta_claude"] == ""
     assert state["error_pregunta_claude"] == ""
+    assert state["mostrar_totales_modelo_ia"] is False
 
 
 def test_preparar_estado_consulta_activa_dashboard_solo_si_se_solicita():
@@ -117,6 +118,19 @@ def test_preparar_estado_consulta_activa_dashboard_solo_si_se_solicita():
     )
 
     assert state["mostrar_dashboard_ia"] is True
+    assert state["mostrar_totales_modelo_ia"] is False
+
+
+def test_preparar_estado_consulta_activa_totales_solo_si_se_solicitan():
+    state = {"mostrar_dashboard_ia": False}
+
+    ProyAst.preparar_estado_consulta_ia(
+        state,
+        "Muestra los totales del modelo vs produccion",
+    )
+
+    assert state["mostrar_dashboard_ia"] is False
+    assert state["mostrar_totales_modelo_ia"] is True
 
 
 # --- sincronizar_export_generado_automatico --------------------------------
@@ -424,12 +438,23 @@ def test_buscar_en_web_devuelve_resultados_organicos(monkeypatch):
     assert capturado["timeout"] == 10
 
 
-def test_pregunta_externa_se_rechaza_sin_consultar_servicios(monkeypatch):
-    def no_debe_consultar(*args, **kwargs):
-        pytest.fail("Una pregunta externa no debe consultar servicios")
-
-    monkeypatch.setattr(ProyAst, "buscar_en_web", no_debe_consultar)
-    monkeypatch.setattr(ProyAst, "consultar_llm", no_debe_consultar)
+def test_pregunta_externa_consulta_serpapi_y_llm(monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(ProyAst, "obtener_valor_env", lambda *args: "clave")
+    monkeypatch.setattr(
+        ProyAst,
+        "buscar_en_web",
+        lambda pregunta: [{
+            "titulo": "Resultado externo",
+            "fragmento": "Dato actualizado.",
+            "url": "https://ejemplo.test",
+        }],
+    )
+    monkeypatch.setattr(
+        ProyAst,
+        "consultar_llm",
+        lambda prompt: llamadas.append(prompt) or "respuesta externa",
+    )
     base = pd.DataFrame({"Finca": ["BL25"], "Produccion": [1000]})
 
     respuesta = ProyAst.responder_pregunta_anthropic(
@@ -438,18 +463,13 @@ def test_pregunta_externa_se_rechaza_sin_consultar_servicios(monkeypatch):
         "BL25",
     )
 
-    assert respuesta == (
-        "Anthropic solo responde consultas relacionadas con la informacion "
-        "almacenada en el contexto de la aplicacion."
-    )
+    assert respuesta == "respuesta externa"
+    assert len(llamadas) == 1
+    assert "Resultado externo" in llamadas[0]
 
 
-def test_pregunta_pasiva_sobre_web_tambien_se_rechaza(monkeypatch):
-    def no_debe_consultar(*args, **kwargs):
-        pytest.fail("Una pregunta sobre la web no debe consultar servicios")
-
-    monkeypatch.setattr(ProyAst, "buscar_en_web", no_debe_consultar)
-    monkeypatch.setattr(ProyAst, "consultar_llm", no_debe_consultar)
+def test_pregunta_externa_sin_clave_informa_configuracion_pendiente(monkeypatch):
+    monkeypatch.setattr(ProyAst, "obtener_valor_env", lambda *args: "")
     base = pd.DataFrame({"Finca": ["ASTROFLORES"], "Produccion": [1000]})
 
     respuesta = ProyAst.responder_pregunta_anthropic(
@@ -458,10 +478,7 @@ def test_pregunta_pasiva_sobre_web_tambien_se_rechaza(monkeypatch):
         "ASTROFLORES",
     )
 
-    assert respuesta == (
-        "Anthropic solo responde consultas relacionadas con la informacion "
-        "almacenada en el contexto de la aplicacion."
-    )
+    assert respuesta == ProyAst.MENSAJE_CONSULTA_EXTERNA_IA
 
 
 def test_pregunta_interna_no_activa_busqueda_web(monkeypatch):
@@ -498,6 +515,28 @@ def test_buscar_en_web_sin_clave_o_con_error_devuelve_lista_vacia(monkeypatch):
     assert ProyAst.buscar_en_web("consulta externa") == []
 
 
+def test_sincronizar_readme_con_anthropic_usa_cache_por_contenido(monkeypatch, tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text("Reglas de negocio", encoding="utf-8")
+    monkeypatch.setattr(ProyAst, "__file__", str(tmp_path / "ProyAst.py"))
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "anthropic")
+    llamadas = []
+
+    def fake_sync(archivo, dataframe=None, nombre_archivo=None):
+        llamadas.append((archivo.name, archivo.getvalue()))
+        return {"file_id": "file_readme", "modo": "remoto", "nombre": archivo.name}
+
+    monkeypatch.setattr(ProyAst, "sincronizar_archivo_llm", fake_sync)
+    state = {}
+
+    primera = ProyAst.sincronizar_readme_con_anthropic(state=state)
+    segunda = ProyAst.sincronizar_readme_con_anthropic(state=state)
+
+    assert primera["file_id"] == "file_readme"
+    assert segunda == primera
+    assert llamadas == [("README.md", b"Reglas de negocio")]
+
+
 def test_consultar_llm_incluye_definicion_autorizada_de_patron(monkeypatch):
     capturado = {}
 
@@ -513,6 +552,8 @@ def test_consultar_llm_incluye_definicion_autorizada_de_patron(monkeypatch):
     ProyAst.consultar_llm("Analiza la proyeccion")
 
     assert ProyAst.DEFINICION_PATRON_IA in capturado["prompt"]
+    assert "README.md es la fuente autorizada" in capturado["prompt"]
+    assert ProyAst.RESPUESTA_SIN_INFORMACION_IA in capturado["prompt"]
     assert "Bloque&Varid" in capturado["prompt"]
     assert "FIT" in capturado["prompt"]
     assert "Tallos/m2 actuales" in capturado["prompt"]
@@ -539,7 +580,7 @@ def test_consultar_llm_reemplaza_astroflores_por_finca_en_anthropic(monkeypatch)
         ).fetchone()
 
     assert "astroflores" not in capturado["prompt"].casefold()
-    assert capturado["prompt"].count("Finca") == 3
+    assert capturado["prompt"].count("Finca") >= 3
     assert respuesta == "Resumen de Finca"
     assert "astroflores" not in " ".join([
         prompt_usuario, prompt_enviado, respuesta_registrada

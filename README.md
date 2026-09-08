@@ -11,9 +11,10 @@ Incluye dos modos:
 - Proyeccion individual por variedad.
 - Proyeccion masiva por finca.
 
-Las preguntas a la IA se limitan a la informacion almacenada en el contexto de
-la aplicacion. Las solicitudes de busqueda web o de datos externos se rechazan
-antes de llamar al proveedor de IA y no activan SerpAPI.
+Las consultas a la IA utilizan este README como fuente autorizada de reglas y
+definiciones, junto con la informacion almacenada en el contexto de la
+aplicacion. Las consultas externas pueden usar SerpApi cuando se configura
+`SERPAPI_API_KEY` en el entorno.
 
 Cada llamada enviada a un proveedor de IA se registra en SQLite antes de salir
 de la aplicacion. La base predeterminada es `data/consultas_ia.db` y contiene el

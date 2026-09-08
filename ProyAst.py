@@ -1,6 +1,7 @@
 from sklearn.metrics import mean_squared_error
 import pickle
 import io
+import hashlib
 import importlib
 import pandas as pd
 import numpy as np
@@ -72,9 +73,10 @@ RECOMENDACION_AMORTIGUADOR_IA = (
     'EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE.'
 )
 MENSAJE_CONSULTA_EXTERNA_IA = (
-    'Anthropic solo responde consultas relacionadas con la informacion '
-    'almacenada en el contexto de la aplicacion.'
+    'Las consultas externas requieren configurar SERPAPI_API_KEY en el entorno '
+    'de la aplicacion.'
 )
+RESPUESTA_SIN_INFORMACION_IA = 'CONSULTA README PARA MAYOR INFORMACION'
 
 
 def obtener_valor_env(*claves):
@@ -498,6 +500,16 @@ def reemplazar_astroflores_por_finca(texto):
     return re.sub(r'\bastroflores\b', 'Finca', str(texto), flags=re.IGNORECASE)
 
 
+def cargar_contexto_readme_ia():
+    readme_path = Path(__file__).with_name('README.md')
+    if not readme_path.exists():
+        return 'README.md no disponible en el proyecto.'
+    try:
+        return readme_path.read_text(encoding='utf-8')
+    except OSError:
+        return readme_path.read_text(errors='ignore')
+
+
 def consultar_llm(prompt_usuario):
     proveedor = obtener_llm_provider()
     prompt_original = str(prompt_usuario)
@@ -508,6 +520,13 @@ def consultar_llm(prompt_usuario):
         'Definicion autorizada de AMORTIGUADOR M2: '
         f'{DEFINICION_AMORTIGUADOR_IA}\n'
         f'{RECOMENDACION_AMORTIGUADOR_IA}\n\n'
+        'README.md es la fuente autorizada para las reglas, definiciones y '
+        'comportamiento del proyecto. Consulta este contexto antes de responder '
+        'y no contradigas sus reglas. Si no encuentras la respuesta en README '
+        'o en el contexto suministrado, responde exactamente: '
+        f'{RESPUESTA_SIN_INFORMACION_IA}.\n\n'
+        'CONTEXTO README.md:\n'
+        f'{cargar_contexto_readme_ia()}\n\n'
         f'{prompt_original}'
     )
     modelo = modelo_principal_proveedor(proveedor)
@@ -779,6 +798,49 @@ class ArchivoEnMemoria:
 
     def getvalue(self):
         return self._data
+
+
+def sincronizar_readme_con_anthropic(state=None):
+    if obtener_llm_provider() != 'anthropic':
+        raise RuntimeError(
+            'La sincronizacion de README solo esta disponible con '
+            'LLM_PROVIDER=anthropic.'
+        )
+
+    readme_path = Path(__file__).with_name('README.md')
+    if not readme_path.exists():
+        raise FileNotFoundError('No se encontro README.md en el proyecto.')
+    contenido = readme_path.read_bytes()
+    if not contenido:
+        raise ValueError('README.md esta vacio.')
+
+    target_state = st.session_state if state is None else state
+    cache_key = '__readme_anthropic_sync_cache__'
+    contenido_hash = hashlib.sha256(contenido).hexdigest()
+    if target_state.get(cache_key) == contenido_hash:
+        return target_state.get('readme_anthropic_info', {
+            'nombre': readme_path.name,
+            'modo': 'remoto',
+        })
+
+    archivo_readme = ArchivoEnMemoria(
+        readme_path.name,
+        contenido,
+        'text/markdown',
+    )
+    info_carga = sincronizar_archivo_llm(
+        archivo_readme,
+        nombre_archivo=readme_path.name,
+    )
+    registrar_sincronizacion_en_sesion(
+        info_carga,
+        None,
+        readme_path.name,
+        readme_path.name + contenido_hash,
+    )
+    target_state[cache_key] = contenido_hash
+    target_state['readme_anthropic_info'] = info_carga
+    return info_carga
 
 
 def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export, dataframe=None, state=None):
@@ -1222,8 +1284,14 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
     if not pregunta_limpia:
         raise ValueError(
             'Escribe una pregunta antes de consultar a Anthropic.')
-    if solicita_informacion_externa(pregunta_limpia):
-        return MENSAJE_CONSULTA_EXTERNA_IA
+    consulta_externa = solicita_informacion_externa(pregunta_limpia)
+    contexto_web = ''
+    if consulta_externa:
+        if not obtener_valor_env('SERPAPI_API_KEY'):
+            return MENSAJE_CONSULTA_EXTERNA_IA
+        contexto_web = construir_contexto_web(buscar_en_web(pregunta_limpia))
+        if not contexto_web:
+            return 'No se encontraron resultados externos para esta consulta.'
 
     pregunta_normalizada = ''.join(
         caracter
@@ -1287,10 +1355,17 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         'valores. No muestres otras metricas ni inventes datos. '
     )
 
+    instruccion_web = (
+        'Integra los resultados externos como referencias informativas y '
+        'distingue claramente esos datos del contexto interno. '
+        if consulta_externa else ''
+    )
+    seccion_web = f'{contexto_web}\n' if contexto_web else ''
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde en espanol. '
-        'Usa unicamente el resumen y las definiciones de negocio suministrados. '
+        'Usa el resumen y las definiciones de negocio suministrados. '
+        f'{instruccion_web}'
         f'{DEFINICION_AMORTIGUADOR_IA} '
         f'{RECOMENDACION_AMORTIGUADOR_IA} '
         'Nunca afirmes que el amortiguador no forma parte de la informacion. '
@@ -1298,6 +1373,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'Finca en contexto: {finca_contexto}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
+        f'{seccion_web}'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
@@ -1750,10 +1826,30 @@ def consulta_solicita_dashboard(texto_consulta):
     return any(palabra in texto for palabra in palabras_clave)
 
 
+def consulta_solicita_totales_modelo(texto_consulta):
+    texto = ''.join(
+        caracter
+        for caracter in unicodedata.normalize(
+            'NFKD', str(texto_consulta or '').strip().casefold()
+        )
+        if not unicodedata.combining(caracter)
+    )
+    patrones = [
+        r'\btotales?\b.*\b(?:modelo|produccion)\b',
+        r'\b(?:modelo|produccion)\b.*\btotales?\b',
+        r'\bmodelo\s+vs\s+(?:produccion|real)\b',
+        r'\bcompar(?:a|ar|ativo|acion)\b.*\bmodelo\b',
+    ]
+    return any(re.search(patron, texto) for patron in patrones)
+
+
 def preparar_estado_consulta_ia(state, pregunta):
     state['respuesta_pregunta_claude'] = ''
     state['error_pregunta_claude'] = ''
     state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(pregunta)
+    state['mostrar_totales_modelo_ia'] = consulta_solicita_totales_modelo(
+        pregunta
+    )
     return state
 
 
@@ -1775,6 +1871,20 @@ def render_subida_archivo_anthropic(file_path):
 
     with st.expander(titulo):
         st.caption(mensaje)
+
+        if proveedor == 'anthropic':
+            if st.button(
+                'Sincronizar README con Anthropic',
+                key='btn_sync_readme_anthropic',
+            ):
+                try:
+                    info_readme = sincronizar_readme_con_anthropic()
+                    st.success(
+                        'README sincronizado con Anthropic: '
+                        f"{info_readme.get('file_id') or info_readme.get('nombre')}"
+                    )
+                except Exception as exc:
+                    st.error(f'Error sincronizando README: {exc}')
 
         st.write('**Seleccionar archivo a sincronizar**')
         archivo_personalizado = st.file_uploader(
@@ -1921,6 +2031,8 @@ def construir_prompt_dashboard_anthropic(df_base, base_modelo, instruccion_extra
 
 
 def render_dashboard_base(df_base, usar_expander=True):
+    if not st.session_state.get('mostrar_totales_modelo_ia', False):
+        return
     contenedor_dashboard = (
         st.expander('Dashboard de la base', expanded=False)
         if usar_expander else st.container()
