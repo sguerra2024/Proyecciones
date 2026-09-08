@@ -58,6 +58,48 @@ def test_preparar_estado_para_nuevo_archivo_base_preserva_contexto_sesion():
     assert state["archivo_sesion_nombre"] == "archivo_sincronizado.xlsx"
 
 
+def test_control_acceso_crea_usuario_y_autentica(tmp_path, monkeypatch):
+    ruta = tmp_path / "control_acceso.db"
+    monkeypatch.setenv("ACCESS_DB_PATH", str(ruta))
+
+    ProyAst.crear_usuario("analista", "clave-segura-123")
+
+    assert ProyAst.autenticar_usuario("analista", "clave-segura-123") is True
+    assert ProyAst.autenticar_usuario("analista", "clave-incorrecta") is False
+    assert ProyAst.autenticar_usuario(
+        "desconocido", "clave-segura-123") is False
+
+    with sqlite3.connect(ruta) as conexion:
+        columnas = {
+            fila[1] for fila in conexion.execute('PRAGMA table_info(usuarios)')
+        }
+        registro = conexion.execute(
+            'SELECT usuario, clave_hash FROM usuarios'
+        ).fetchone()
+    assert {'usuario', 'clave_hash', 'activo'}.issubset(columnas)
+    assert registro[0] == 'analista'
+    assert registro[1].startswith('pbkdf2_sha256$')
+
+
+def test_usuario_inicial_predeterminado_es_admin(tmp_path, monkeypatch):
+    ruta = tmp_path / "control_acceso.db"
+    monkeypatch.setenv("ACCESS_DB_PATH", str(ruta))
+    monkeypatch.delenv("ACCESS_INITIAL_USER", raising=False)
+    monkeypatch.delenv("ADMIN_USER", raising=False)
+    monkeypatch.setenv("ACCESS_INITIAL_PASSWORD", "clave-admin-123")
+
+    ProyAst.preparar_usuario_inicial()
+
+    assert ProyAst.autenticar_usuario(
+        "Admin", "clave-admin-123") is True
+
+
+def test_solo_admin_puede_gestionar_usuarios():
+    assert ProyAst.usuario_puede_gestionar_acceso("Admin") is True
+    assert ProyAst.usuario_puede_gestionar_acceso("admin") is True
+    assert ProyAst.usuario_puede_gestionar_acceso("analista") is False
+
+
 def test_preparar_estado_para_nuevo_archivo_base_limpia_contexto_si_se_pide():
     state = {
         "archivo_sesion_df": pd.DataFrame({"col": [1, 2]}),
@@ -535,6 +577,22 @@ def test_sincronizar_readme_con_anthropic_usa_cache_por_contenido(monkeypatch, t
     assert primera["file_id"] == "file_readme"
     assert segunda == primera
     assert llamadas == [("README.md", b"Reglas de negocio")]
+
+
+def test_sincronizar_readme_automaticamente_solo_para_anthropic(monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(ProyAst, "st", types.SimpleNamespace(session_state={}))
+    monkeypatch.setattr(ProyAst, "obtener_llm_provider", lambda: "anthropic")
+    monkeypatch.setattr(
+        ProyAst,
+        "sincronizar_readme_con_anthropic",
+        lambda: llamadas.append("README") or {"file_id": "file-readme"},
+    )
+
+    resultado = ProyAst.sincronizar_readme_automaticamente()
+
+    assert resultado == {"file_id": "file-readme"}
+    assert llamadas == ["README"]
 
 
 def test_consultar_llm_incluye_definicion_autorizada_de_patron(monkeypatch):

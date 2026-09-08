@@ -22,6 +22,21 @@ proveedor, modelo, prompt original y final, respuesta, estado, error y duracion.
 La ruta puede cambiarse con `AI_LOG_DB_PATH`. Las credenciales configuradas se
 reemplazan por `[REDACTADO]` antes de almacenar cualquier texto.
 
+El sistema inicia con control de acceso mediante la tabla SQLite `usuarios` en
+`data/control_acceso.db`. Las claves se almacenan como hashes PBKDF2, nunca en
+texto plano. Para crear el primer usuario configure en `.env`:
+
+```env
+ACCESS_INITIAL_USER=Admin
+ACCESS_INITIAL_PASSWORD=una_clave_de_al_menos_8_caracteres
+```
+
+La base puede ubicarse en otra ruta mediante `ACCESS_DB_PATH`. Una vez creado el
+primer usuario, el formulario de Usuario y Clave se muestra antes del sistema.
+El usuario `Admin` dispone, después de iniciar sesión, del panel `Administrar
+usuarios` para crear nuevas credenciales. Las claves deben confirmarse y se
+guardan como hashes PBKDF2; los usuarios comunes no tienen acceso a este panel.
+
 Streamlit y FastAPI usan el mismo modelo de produccion definido en
 `projection_core.py`; no existe un modelo alternativo exclusivo para la API.
 
@@ -153,9 +168,17 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - `projection_core.py` usa este error firmado del Excel procesado para entrenar
 	la magnitud y direccion del amortiguador.
 - Al generar la evaluacion con `plot_series_evaluation.py`, el informe se guarda
-	en `Evaluacion/errores_evaluacion_modelo.csv`; el amortiguador usa exactamente
-	el numero de semanas `Anio-Semana` presentes en ese informe, no una ventana
-	fija de 16 semanas.
+	en `Evaluacion/errores_evaluacion_modelo.csv` y sus periodos unicos
+	`Anio-Semana` determinan las semanas disponibles para el amortiguador.
+- La regla del ciclo usa una ventana base de 16 semanas. Cuando existen 16 o
+	mas semanas, toma las ultimas 16 y excluye las 4 mas recientes, por lo que el
+	calculo efectivo es de 12 semanas.
+- Si existen menos de 16 semanas, no se excluyen semanas adicionales: se usan
+	todas las semanas disponibles. En el informe actual hay 4 periodos unicos,
+	por lo que el amortiguador analiza actualmente 4 semanas efectivas, no 12.
+- La IA debe responder esta cantidad real cuando se consulte por las semanas
+	de analisis del amortiguador y no debe afirmar que se analizaron 12 semanas
+	si el informe contiene solo 4 periodos.
 - El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
 - La convención del amortiguador sigue el caso real del error del modelo:
 	positivo cuando el modelo subestima y negativo cuando sobreestima.
@@ -288,7 +311,7 @@ Incluye:
 - La proyeccion amortiguada es un escenario operativo informativo; las graficas, metricas y proyeccion oficial conservan `Estimado_modelo`.
 - Para mejores resultados, mantener historial actualizado y consistente por semana.
 
-## 9. Contacto
+## 9. Contacto 
 
 - +593 985381052
 - +1 (240) 3576750

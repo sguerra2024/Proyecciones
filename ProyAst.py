@@ -16,6 +16,8 @@ import sys
 import mimetypes
 import requests
 import sqlite3
+import secrets
+import hmac
 import time
 from datetime import datetime, timezone
 
@@ -130,6 +132,173 @@ def obtener_ruta_registro_ia():
         ruta = Path(__file__).with_name("data") / "consultas_ia.db"
     ruta.parent.mkdir(parents=True, exist_ok=True)
     return ruta
+
+
+def obtener_ruta_control_acceso():
+    ruta_configurada = obtener_valor_env('ACCESS_DB_PATH')
+    if ruta_configurada:
+        ruta = Path(ruta_configurada).expanduser()
+        if not ruta.is_absolute():
+            ruta = Path(__file__).parent / ruta
+    else:
+        ruta = Path(__file__).with_name('data') / 'control_acceso.db'
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    return ruta
+
+
+def inicializar_tabla_usuarios():
+    ruta = obtener_ruta_control_acceso()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        conexion.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                clave_hash TEXT NOT NULL,
+                creado_en_utc TEXT NOT NULL,
+                activo INTEGER NOT NULL DEFAULT 1
+            )
+            '''
+        )
+    return ruta
+
+
+def crear_usuario(usuario, clave):
+    usuario_limpio = str(usuario or '').strip()
+    clave_texto = str(clave or '')
+    if not usuario_limpio or not clave_texto:
+        raise ValueError('Usuario y clave son obligatorios.')
+    if len(clave_texto) < 8:
+        raise ValueError('La clave debe tener al menos 8 caracteres.')
+
+    salt = secrets.token_bytes(16)
+    derivada = hashlib.pbkdf2_hmac(
+        'sha256', clave_texto.encode('utf-8'), salt, 200_000
+    )
+    clave_hash = f'pbkdf2_sha256$200000${salt.hex()}${derivada.hex()}'
+    ruta = inicializar_tabla_usuarios()
+    try:
+        with sqlite3.connect(ruta, timeout=5) as conexion:
+            conexion.execute(
+                '''
+                INSERT INTO usuarios (
+                    usuario, clave_hash, creado_en_utc, activo
+                ) VALUES (?, ?, ?, 1)
+                ''',
+                (
+                    usuario_limpio,
+                    clave_hash,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError('El usuario ya existe.') from exc
+
+
+def autenticar_usuario(usuario, clave):
+    usuario_limpio = str(usuario or '').strip()
+    clave_texto = str(clave or '')
+    if not usuario_limpio or not clave_texto:
+        return False
+
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        fila = conexion.execute(
+            '''
+            SELECT clave_hash FROM usuarios
+            WHERE usuario = ? AND activo = 1
+            ''',
+            (usuario_limpio,),
+        ).fetchone()
+    if not fila:
+        return False
+
+    partes = str(fila[0]).split('$')
+    if len(partes) != 4 or partes[0] != 'pbkdf2_sha256':
+        return False
+    try:
+        iteraciones = int(partes[1])
+        salt = bytes.fromhex(partes[2])
+        esperado = bytes.fromhex(partes[3])
+    except ValueError:
+        return False
+    calculado = hashlib.pbkdf2_hmac(
+        'sha256', clave_texto.encode('utf-8'), salt, iteraciones
+    )
+    return hmac.compare_digest(calculado, esperado)
+
+
+def preparar_usuario_inicial():
+    inicializar_tabla_usuarios()
+    ruta = obtener_ruta_control_acceso()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        cantidad = conexion.execute(
+            'SELECT COUNT(*) FROM usuarios WHERE activo = 1'
+        ).fetchone()[0]
+    if cantidad:
+        return
+    usuario = obtener_valor_env(
+        'ACCESS_INITIAL_USER', 'ADMIN_USER'
+    ) or 'Admin'
+    clave = obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD')
+    if usuario and clave:
+        crear_usuario(usuario, clave)
+
+
+def exigir_acceso_al_sistema():
+    preparar_usuario_inicial()
+    if st.session_state.get('usuario_autenticado'):
+        return
+
+    st.title('Control de acceso')
+    st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
+    with st.form('form_control_acceso'):
+        usuario = st.text_input('Usuario')
+        clave = st.text_input('Clave', type='password')
+        ingresar = st.form_submit_button('Ingresar')
+    if ingresar:
+        if autenticar_usuario(usuario, clave):
+            st.session_state['usuario_autenticado'] = usuario.strip()
+            st.rerun()
+        st.error('Usuario o clave incorrectos.')
+
+    if not obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD'):
+        st.warning(
+            'Configura ACCESS_INITIAL_PASSWORD para crear el usuario '
+            'Admin inicial.'
+        )
+    st.stop()
+
+
+def usuario_puede_gestionar_acceso(usuario=None):
+    usuario_actual = usuario
+    if usuario_actual is None:
+        usuario_actual = st.session_state.get('usuario_autenticado', '')
+    return str(usuario_actual or '').strip().casefold() == 'admin'
+
+
+def render_gestion_usuarios():
+    if not usuario_puede_gestionar_acceso():
+        return
+
+    with st.expander('Administrar usuarios', expanded=False):
+        st.caption('Crea credenciales para nuevos usuarios del sistema.')
+        with st.form('form_crear_usuario'):
+            nuevo_usuario = st.text_input('Nuevo usuario')
+            nueva_clave = st.text_input('Nueva clave', type='password')
+            confirmar_clave = st.text_input(
+                'Confirmar nueva clave', type='password'
+            )
+            crear = st.form_submit_button('Crear usuario')
+        if crear:
+            if nueva_clave != confirmar_clave:
+                st.error('Las claves no coinciden.')
+            else:
+                try:
+                    crear_usuario(nuevo_usuario, nueva_clave)
+                    st.success('Usuario creado correctamente.')
+                except ValueError as exc:
+                    st.error(str(exc))
 
 
 def redactar_secretos(texto):
@@ -841,6 +1010,18 @@ def sincronizar_readme_con_anthropic(state=None):
     target_state[cache_key] = contenido_hash
     target_state['readme_anthropic_info'] = info_carga
     return info_carga
+
+
+def sincronizar_readme_automaticamente():
+    if obtener_llm_provider() != 'anthropic':
+        return None
+    try:
+        return sincronizar_readme_con_anthropic()
+    except Exception as exc:
+        st.session_state['estado_subida_anthropic'] = (
+            'error', f'Error sincronizando README automaticamente: {exc}'
+        )
+        return None
 
 
 def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export, dataframe=None, state=None):
@@ -1782,6 +1963,13 @@ if 'tabla_mse_patron_masivo' not in st.session_state:
     st.session_state['tabla_mse_patron_masivo'] = pd.DataFrame()
 if 'mostrar_dashboard_ia' not in st.session_state:
     st.session_state['mostrar_dashboard_ia'] = False
+if 'usuario_autenticado' not in st.session_state:
+    st.session_state['usuario_autenticado'] = ''
+
+if st.runtime.exists():
+    exigir_acceso_al_sistema()
+    sincronizar_readme_automaticamente()
+    render_gestion_usuarios()
 
 
 def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, preservar_archivo_sesion=True):
@@ -1871,20 +2059,6 @@ def render_subida_archivo_anthropic(file_path):
 
     with st.expander(titulo):
         st.caption(mensaje)
-
-        if proveedor == 'anthropic':
-            if st.button(
-                'Sincronizar README con Anthropic',
-                key='btn_sync_readme_anthropic',
-            ):
-                try:
-                    info_readme = sincronizar_readme_con_anthropic()
-                    st.success(
-                        'README sincronizado con Anthropic: '
-                        f"{info_readme.get('file_id') or info_readme.get('nombre')}"
-                    )
-                except Exception as exc:
-                    st.error(f'Error sincronizando README: {exc}')
 
         st.write('**Seleccionar archivo a sincronizar**')
         archivo_personalizado = st.file_uploader(
