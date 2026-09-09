@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
+    calcular_ajuste_factor_diferencia_2026,
     calculate_model_error_report,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
@@ -59,6 +60,7 @@ TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.0"))
 PATRON_TRAIN_TARGET_WEIGHT = float(
     os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.45")
 )
+AJUSTE_REAL_2026_PESO = float(os.getenv("AJUSTE_REAL_2026_PESO", "1.5"))
 DEFINICION_PATRON_IA = (
     'Definicion autorizada de PATRON: PATRON es la mejor opcion historica '
     'distinta del mismo Bloque&Varid proyectado, cuyo ajuste (FIT) respecto '
@@ -250,23 +252,29 @@ def exigir_acceso_al_sistema():
     if st.session_state.get('usuario_autenticado'):
         return
 
-    st.title('Control de acceso')
-    st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
-    with st.form('form_control_acceso'):
-        usuario = st.text_input('Usuario')
-        clave = st.text_input('Clave', type='password')
-        ingresar = st.form_submit_button('Ingresar')
-    if ingresar:
-        if autenticar_usuario(usuario, clave):
-            st.session_state['usuario_autenticado'] = usuario.strip()
-            st.rerun()
-        st.error('Usuario o clave incorrectos.')
-
-    if not obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD'):
-        st.warning(
-            'Configura ACCESS_INITIAL_PASSWORD para crear el usuario '
-            'Admin inicial.'
+    _, col_acceso, _ = st.columns([0.35, 0.3, 0.35])
+    with col_acceso:
+        st.markdown(
+            "<h3 style='text-align:center;white-space:nowrap;"
+            "font-size:1.1rem;'>Control de acceso</h3>",
+            unsafe_allow_html=True,
         )
+        st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
+        with st.form('form_control_acceso'):
+            usuario = st.text_input('Usuario')
+            clave = st.text_input('Clave', type='password')
+            ingresar = st.form_submit_button('Ingresar')
+        if ingresar:
+            if autenticar_usuario(usuario, clave):
+                st.session_state['usuario_autenticado'] = usuario.strip()
+                st.rerun()
+            st.error('Usuario o clave incorrectos.')
+
+        if not obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD'):
+            st.warning(
+                'Configura ACCESS_INITIAL_PASSWORD para crear el usuario '
+                'Admin inicial.'
+            )
     st.stop()
 
 
@@ -1174,16 +1182,19 @@ def cargar_factor_diferencia_por_variedad():
     ruta_eval = Path(__file__).with_name('Evaluacion')
     ruta_factor = ruta_eval / 'factor_diferencia_2025_por_variedad.csv'
     ruta_resumen = ruta_eval / 'factor_diferencia_2025_resumen.csv'
+    ruta_errores = ruta_eval / 'errores_evaluacion_modelo.csv'
 
     factor_global = 1.0
     mtime_factor = ruta_factor.stat().st_mtime if ruta_factor.exists() else None
     mtime_resumen = ruta_resumen.stat().st_mtime if ruta_resumen.exists() else None
+    mtime_errores = ruta_errores.stat().st_mtime if ruta_errores.exists() else None
 
     cache = st.session_state.get(cache_key)
     if isinstance(cache, dict):
         if (
             cache.get('mtime_factor') == mtime_factor
             and cache.get('mtime_resumen') == mtime_resumen
+            and cache.get('mtime_errores') == mtime_errores
         ):
             return cache
 
@@ -1215,11 +1226,25 @@ def cargar_factor_diferencia_por_variedad():
             if pd.notna(valor_global) and np.isfinite(valor_global) and valor_global > 0:
                 factor_global = float(valor_global)
 
+    ajuste_real_2026 = calcular_ajuste_factor_diferencia_2026(
+        ruta_eval, peso_ajuste=AJUSTE_REAL_2026_PESO
+    )
+    ajustes_por_variedad = ajuste_real_2026['ajustes_por_variedad']
+    ajuste_global = ajuste_real_2026['ajuste_global']
+    factores = {
+        variedad: valor * ajustes_por_variedad.get(variedad, ajuste_global)
+        for variedad, valor in factores.items()
+    }
+    factor_global *= ajuste_global
+
     config_factor = {
         'factores_por_variedad': factores,
         'factor_global': factor_global,
+        'ajustes_reales_2026': ajustes_por_variedad,
+        'ajuste_real_2026_global': ajuste_global,
         'mtime_factor': mtime_factor,
         'mtime_resumen': mtime_resumen,
+        'mtime_errores': mtime_errores,
     }
     st.session_state[cache_key] = config_factor
     return config_factor
@@ -1265,6 +1290,37 @@ def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_
         )
 
     return pred_ajustada, factor_variedad, int(mask_objetivo.sum()), origen_factor
+
+
+def corregir_signo_amortiguador_con_error_real(amortiguador, var_proy, config_factor,
+                                               tolerancia=0.03):
+    """
+    Alinea el signo del amortiguador con el error real conocido de 2026
+    (Produccion/Estimado_modelo en errores_evaluacion_modelo.csv), para que
+    el buffer interno del RandomForest no contradiga una sobreestimacion o
+    subestimacion ya confirmada con datos reales.
+
+    Si el ratio real esta claramente por debajo de 1 (sobreestima) el
+    amortiguador se fuerza a <= 0. Si esta claramente por encima de 1
+    (subestima) se fuerza a >= 0. Dentro de la tolerancia se deja intacto.
+    """
+    valores = np.asarray(amortiguador, dtype=float)
+    if valores.size == 0:
+        return valores
+
+    ajustes_reales = config_factor.get('ajustes_reales_2026', {})
+    ratio = ajustes_reales.get(
+        str(var_proy), config_factor.get('ajuste_real_2026_global', 1.0)
+    )
+    if not np.isfinite(ratio):
+        return valores.copy()
+
+    corregido = valores.copy()
+    if ratio < 1.0 - tolerancia:
+        corregido = -np.abs(corregido)
+    elif ratio > 1.0 + tolerancia:
+        corregido = np.abs(corregido)
+    return corregido
 
 
 def cargar_archivo_a_dataframe(archivo_subido):
@@ -1458,6 +1514,94 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     return pd.DataFrame(filas, columns=columnas_salida)
 
 
+def resumir_tallos_m2_por_rango(df_base, anio_inicio, semana_inicio, anio_fin,
+                                semana_fin, finca_contexto=None):
+    """
+    Calcula el promedio de Tallos/m2 por Bloque&Varid dentro de un rango
+    arbitrario de anio/semana (no limitado a las ultimas 12 semanas >= 2026),
+    para responder preguntas historicas puntuales sin que la IA invente cifras.
+    """
+    columnas_salida = [
+        'Bloque&Varid', 'anio_inicio', 'semana_inicio', 'anio_fin',
+        'semana_fin', 'promedio_tallos_m2', 'conteo_semanas',
+    ]
+    if df_base is None or df_base.empty:
+        return pd.DataFrame(columns=columnas_salida)
+    requeridas = {'Bloque&Varid', 'Anio', 'Semana', 'Tallos/m2'}
+    if not requeridas.issubset(df_base.columns):
+        return pd.DataFrame(columns=columnas_salida)
+
+    trabajo = df_base.copy()
+    if finca_contexto is not None and 'Finca' in trabajo.columns:
+        trabajo = trabajo[
+            trabajo['Finca'].astype(str) == str(finca_contexto)
+        ]
+
+    trabajo['__anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
+    trabajo['__semana'] = pd.to_numeric(trabajo['Semana'], errors='coerce')
+    trabajo['__tallos_m2'] = pd.to_numeric(
+        trabajo['Tallos/m2'], errors='coerce'
+    )
+
+    clave_inicio = anio_inicio * 100 + semana_inicio
+    clave_fin = anio_fin * 100 + semana_fin
+    if clave_fin < clave_inicio:
+        clave_inicio, clave_fin = clave_fin, clave_inicio
+    trabajo['__clave'] = trabajo['__anio'] * 100 + trabajo['__semana']
+    trabajo = trabajo[trabajo['__clave'].between(clave_inicio, clave_fin)]
+    trabajo = trabajo.dropna(subset=['__tallos_m2'])
+    if trabajo.empty:
+        return pd.DataFrame(columns=columnas_salida)
+
+    filas = []
+    for variedad, grupo in trabajo.groupby('Bloque&Varid', dropna=False):
+        filas.append({
+            'Bloque&Varid': variedad,
+            'anio_inicio': anio_inicio,
+            'semana_inicio': semana_inicio,
+            'anio_fin': anio_fin,
+            'semana_fin': semana_fin,
+            'promedio_tallos_m2': round(float(grupo['__tallos_m2'].mean()), 2),
+            'conteo_semanas': int(grupo['__tallos_m2'].count()),
+        })
+    return pd.DataFrame(filas, columns=columnas_salida)
+
+
+def extraer_rango_semanas_pregunta(pregunta_normalizada):
+    """
+    Detecta un rango de semanas/anio en la pregunta del usuario, admitiendo
+    variantes como 'semanas 24 y 34 de 2025', 'semana 24 a 34 del ano 2025'
+    o 'entre la semana 24 y la semana 34 de 2025'.
+
+    El anio se busca como cualquier numero de 4 digitos cercano al rango de
+    semanas, en vez de exigir literalmente 'de'/'del' seguido del anio, para
+    no fallar con frases como 'del ano 2025'.
+
+    Returns:
+        tuple (anio_inicio, semana_inicio, anio_fin, semana_fin) o None
+    """
+    match_semanas = re.search(
+        r'semanas?\s+(?:la\s+)?(\d{1,2})\s*(?:y|a|-|hasta)\s*'
+        r'(?:la\s+semana\s+)?(\d{1,2})',
+        pregunta_normalizada,
+    )
+    if not match_semanas:
+        return None
+    semana_inicio, semana_fin = (int(valor)
+                                 for valor in match_semanas.groups())
+    if not (1 <= semana_inicio <= 53 and 1 <= semana_fin <= 53):
+        return None
+
+    resto = pregunta_normalizada[match_semanas.end():]
+    match_anio = re.search(r'\b(\d{4})\b', resto) or re.search(
+        r'\b(\d{4})\b', pregunta_normalizada
+    )
+    if not match_anio:
+        return None
+    anio = int(match_anio.group(1))
+    return anio, semana_inicio, anio, semana_fin
+
+
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                                  df_proyeccion=None, df_archivo_sincronizado=None,
                                  nombre_archivo_sincronizado=''):
@@ -1529,12 +1673,33 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         if not resumen.empty:
             resumen_info = resumen.to_csv(index=False)
 
+    rango_semanas = extraer_rango_semanas_pregunta(pregunta_normalizada)
+    resumen_rango_info = ''
+    if rango_semanas is not None:
+        anio_inicio, semana_inicio, anio_fin, semana_fin = rango_semanas
+        resumen_rango = resumir_tallos_m2_por_rango(
+            df_base, anio_inicio, semana_inicio, anio_fin, semana_fin,
+            finca_contexto=finca_contexto,
+        )
+        resumen_rango_info = (
+            resumen_rango.to_csv(index=False)
+            if not resumen_rango.empty
+            else 'No hay datos historicos para el rango de semanas solicitado.'
+        )
+
     restricciones_respuesta = (
         'Despliega exclusivamente el area calculada en M2, su porcentaje '
         'sobre los M2 de la variedad, el promedio de Tallos/m2 de las ultimas '
         '12 semanas disponibles de 2026 o posteriores y el producto de ambos '
         'valores. No muestres otras metricas ni inventes datos. '
     )
+    if resumen_rango_info:
+        restricciones_respuesta += (
+            'Para la pregunta sobre el rango de semanas/anio solicitado, usa '
+            'exclusivamente el promedio de Tallos/m2 ya calculado en el '
+            'Resumen historico por rango (csv); no lo recalcules ni inventes '
+            'otro valor. '
+        )
 
     instruccion_web = (
         'Integra los resultados externos como referencias informativas y '
@@ -1542,6 +1707,10 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         if consulta_externa else ''
     )
     seccion_web = f'{contexto_web}\n' if contexto_web else ''
+    seccion_rango = (
+        f'Resumen historico por rango (csv):\n{resumen_rango_info}\n'
+        if resumen_rango_info else ''
+    )
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde en espanol. '
@@ -1554,6 +1723,7 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'Finca en contexto: {finca_contexto}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
+        f'{seccion_rango}'
         f'{seccion_web}'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
@@ -2912,8 +3082,12 @@ if file_path is not None:
 
         def estilo_sn(valor):
             valor_num = pd.to_numeric(valor, errors='coerce')
-            if pd.notna(valor_num) and valor_num > 13:
+            if pd.isna(valor_num):
+                return ''
+            if valor_num > 13:
                 return 'background-color: #C6EFCE; color: #006100; font-weight: 700;'
+            if valor_num <= 9:
+                return 'background-color: #F28C28; color: #5A2D00; font-weight: 700;'
             return ''
 
         return df_tabla.style.map(estilo_sn, subset=[col_sn])
@@ -3142,6 +3316,9 @@ if file_path is not None:
             eval_actual_df.iloc[:len(pred_vals)],
             pred_vals,
             float(m2_1),
+        )
+        amortiguador = corregir_signo_amortiguador_con_error_real(
+            amortiguador, var_proy, config_factor_diferencia
         )
 
         y_pred['Estimado_modelo'] = pred_vals
@@ -3715,6 +3892,9 @@ if file_path is not None:
         eval_actual_df.iloc[:len(pred_vals)],
         pred_vals,
         float(m2_1),
+    )
+    amortiguador = corregir_signo_amortiguador_con_error_real(
+        amortiguador, var_proy, config_factor_diferencia
     )
 
     y_pred['Estimado_modelo'] = pred_vals

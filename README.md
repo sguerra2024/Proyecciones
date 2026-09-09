@@ -22,6 +22,8 @@ proveedor, modelo, prompt original y final, respuesta, estado, error y duracion.
 La ruta puede cambiarse con `AI_LOG_DB_PATH`. Las credenciales configuradas se
 reemplazan por `[REDACTADO]` antes de almacenar cualquier texto.
 
+### Control de acceso
+
 El sistema inicia con control de acceso mediante la tabla SQLite `usuarios` en
 `data/control_acceso.db`. Las claves se almacenan como hashes PBKDF2, nunca en
 texto plano. Para crear el primer usuario configure en `.env`:
@@ -30,6 +32,9 @@ texto plano. Para crear el primer usuario configure en `.env`:
 ACCESS_INITIAL_USER=Admin
 ACCESS_INITIAL_PASSWORD=una_clave_de_al_menos_8_caracteres
 ```
+
+En Render, configure `ACCESS_INITIAL_PASSWORD` como variable secreta del
+servicio `proyecciones-streamlit`. No la incluya en `render.yaml` ni en Git.
 
 La base puede ubicarse en otra ruta mediante `ACCESS_DB_PATH`. Una vez creado el
 primer usuario, el formulario de Usuario y Clave se muestra antes del sistema.
@@ -156,6 +161,17 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - La segunda media usa las semanas `22 a 52`.
 - El factor se define como `Media_2025_Sem22_52 / Media_2025_Sem1_17`.
 - Si no existe factor especifico para una variedad, se usa el factor global ponderado como respaldo.
+- El factor estacional (2025) se corrige multiplicando por un ajuste real de 2026:
+	`Ajuste_2026 = sum(Produccion) / sum(Estimado_modelo)` por `Bloque&Varid`,
+	calculado con las filas `Anio == 2026` de `Evaluacion/errores_evaluacion_modelo.csv`.
+- La desviacion de ese ajuste respecto a 1.0 se amplifica con `AJUSTE_REAL_2026_PESO`
+	(por defecto `1.5`): `Ajuste_ponderado = 1.0 + AJUSTE_REAL_2026_PESO * (Ajuste_2026 - 1.0)`,
+	para dar mas peso a la sobreestimacion/subestimacion real reciente frente a la
+	estacionalidad de 2025.
+- El ajuste real de 2026 (ya ponderado) se limita al rango `[0.5, 1.5]` para evitar
+	correcciones extremas cuando hay pocas semanas evaluadas.
+- Si una variedad no tiene filas de 2026 en el informe de errores, se usa el
+	ajuste global ponderado (misma formula, agregando todas las variedades) como respaldo.
 - El ajuste se aplica solo a las 4 semanas mas recientes de `2026` cuya semana sea mayor que `24`.
 - El valor aplicado queda trazado en la exportacion con el origen del factor (`variedad`, `global` o `neutral`).
 
@@ -180,6 +196,7 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 	de analisis del amortiguador y no debe afirmar que se analizaron 12 semanas
 	si el informe contiene solo 4 periodos.
 - El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
+- `Error_sobreestimacion_promedio` (columna informativa) usa el valor **maximo** del error firmado `(real - modelo)` en la ventana evaluada.
 - La convención del amortiguador sigue el caso real del error del modelo:
 	positivo cuando el modelo subestima y negativo cuando sobreestima.
 - Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.

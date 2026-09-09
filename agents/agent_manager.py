@@ -12,6 +12,44 @@ try:
 except ImportError:
     pass
 
+pd = None
+try:
+    pd = importlib.import_module('pandas')
+except ImportError:
+    pass
+
+
+def calcular_estadisticas(datos, decimales=2):
+    """
+    Calcula estadisticas descriptivas (media, mediana, desviacion, min, max, count)
+    con pandas, para que la IA reciba numeros ya calculados en vez de estimarlos.
+
+    Args:
+        datos: lista, dict de valores numericos, o pandas.Series
+        decimales (int): redondeo aplicado a cada estadistica
+
+    Returns:
+        dict: estadisticas listas para incluir como contexto en una consulta
+    """
+    if pd is None:
+        raise RuntimeError(
+            'La libreria pandas no esta instalada. Instala con: pip install pandas'
+        )
+    serie = datos if isinstance(datos, pd.Series) else pd.Series(
+        list(datos), dtype='float64')
+    serie = serie.dropna()
+    if serie.empty:
+        raise ValueError(
+            'No hay datos numericos validos para calcular estadisticas.')
+    return {
+        'media': round(float(serie.mean()), decimales),
+        'mediana': round(float(serie.median()), decimales),
+        'desviacion_estandar': round(float(serie.std()), decimales) if len(serie) > 1 else 0.0,
+        'minimo': round(float(serie.min()), decimales),
+        'maximo': round(float(serie.max()), decimales),
+        'conteo': int(serie.count()),
+    }
+
 
 class AgenteAnalistasMercados:
     """Agente especializado en análisis de datos, mercados y gestión de cambios."""
@@ -46,7 +84,9 @@ INSTRUCCIONES:
 - Traduce análisis técnicos en decisiones claras y accionables
 - Siempre cuantifica el impacto financiero
 - Presenta alternativas con sus costos/beneficios asociados
-- Sé directo: datos concretos antes que teoría"""
+- Sé directo: datos concretos antes que teoría
+- Usa exclusivamente las estadísticas y cifras que se te entregan en el contexto 
+  (media, mediana, desviación, etc.); no las recalcules ni inventes valores nuevos"""
 
     def __init__(self, api_key=None):
         """Inicializa el agente con credenciales de Anthropic."""
@@ -131,16 +171,41 @@ INSTRUCCIONES:
 
         Args:
             error_descripcion (str): Descripción del error
-            desviacion (float o dict): Desviación del estimado (monto o porcentaje)
+            desviacion (float, dict o lista): Desviación del estimado (monto/porcentaje,
+                o historial numérico a partir del cual se calculan estadísticas)
 
         Returns:
             str: Análisis de impacto y estrategias preventivas
         """
-        contexto = f"Error en estimado: {error_descripcion}\nDesviación: {desviacion}"
+        if isinstance(desviacion, (list, tuple)) or (pd is not None and isinstance(desviacion, pd.Series)):
+            estadisticas = calcular_estadisticas(desviacion)
+            contexto = f"Error en estimado: {error_descripcion}\nEstadísticas de desviación: {estadisticas}"
+        else:
+            contexto = f"Error en estimado: {error_descripcion}\nDesviación: {desviacion}"
         pregunta = (
             "Analiza el impacto financiero de este error. "
             "Incluye: pérdida estimada, causas raíz, patrones recurrentes, "
             "y medidas preventivas para el futuro."
+        )
+        return self.consultar(pregunta, contexto)
+
+    def analizar_serie_historica(self, descripcion, serie):
+        """
+        Calcula estadísticas de una serie numérica y pide a la IA que las interprete,
+        en vez de pedirle que calcule la media/mediana ella misma.
+
+        Args:
+            descripcion (str): Qué representa la serie (ej. "precios semanales")
+            serie: lista, dict o pandas.Series de valores numéricos
+
+        Returns:
+            str: Interpretación y recomendaciones basadas en las estadísticas calculadas
+        """
+        estadisticas = calcular_estadisticas(serie)
+        contexto = f"Serie: {descripcion}\nEstadísticas calculadas: {estadisticas}"
+        pregunta = (
+            "Interpreta estas estadísticas: qué indican sobre el comportamiento de la serie, "
+            "si hay señales de riesgo u oportunidad, y qué acciones recomiendas."
         )
         return self.consultar(pregunta, contexto)
 

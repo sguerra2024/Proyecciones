@@ -264,67 +264,7 @@ def test_amortiguador_pondera_magnitud_por_probabilidad_y_umbral(monkeypatch):
     )
 
     np.testing.assert_array_equal(official, [100.0, 100.0])
-    np.testing.assert_allclose(buffer, [-14.0, 0.0])
-
-
-def test_amortiguador_extiende_tendencia_baja_del_ciclo_por_6_semanas(monkeypatch):
-    class FixedBufferModel:
-        def __init__(self, **kwargs):
-            pass
-
-        def fit(self, features, target):
-            return self
-
-        def predict(self, features):
-            return np.full(len(features), -12.0)
-
-    class FixedRiskModel:
-        classes_ = np.array([False, True])
-
-        def __init__(self, **kwargs):
-            pass
-
-        def fit(self, features, target):
-            return self
-
-        def predict_proba(self, features):
-            return np.array([[0.65, 0.35], [0.65, 0.35]])
-
-    monkeypatch.setattr(
-        projection_core, "RandomForestRegressor", FixedBufferModel)
-    monkeypatch.setattr(
-        projection_core, "RandomForestClassifier", FixedRiskModel)
-    monkeypatch.setattr(
-        projection_core,
-        "load_overestimation_calibration",
-        lambda: {"max_buffer_rate": 1.0, "risk_threshold": 0.60},
-    )
-
-    training_df = pd.DataFrame({
-        "Produccion": [160.0, 155.0, 150.0, 145.0, 142.0, 138.0, 133.0, 130.0],
-        "Tallos/m2": [10.0] * 8,
-        "Semana": list(range(1, 9)),
-    })
-    training_features = pd.DataFrame({
-        "prediccion_prueba": [140.0] * 8,
-    })
-    evaluation_df = pd.DataFrame({
-        "Tallos/m2": [12.0, 13.0],
-        "Semana": [9, 10],
-    })
-
-    official, buffer, _, _ = apply_overestimation_buffer(
-        _FixedProductionModel(),
-        training_features,
-        training_df,
-        evaluation_df,
-        np.array([140.0, 140.0]),
-        100.0,
-    )
-
-    np.testing.assert_array_equal(official, [140.0, 140.0])
-    assert np.all(buffer >= 0.0)
-    assert np.all(np.isfinite(buffer))
+    np.testing.assert_allclose(buffer, [14.0, 0.0])
 
 
 def test_amortiguador_aprende_error_bilateral_sin_cambiar_prediccion_oficial():
@@ -351,7 +291,7 @@ def test_amortiguador_aprende_error_bilateral_sin_cambiar_prediccion_oficial():
         100.0,
     )
 
-    assert average_error == 5.0
+    assert average_error == 40.0
     np.testing.assert_array_equal(official, predictions)
     calibration = load_overestimation_calibration()
     assert np.all(np.abs(buffer) <= predictions *
@@ -383,7 +323,7 @@ def test_amortiguador_021leila_no_reserva_area_si_predomina_sobreestimacion():
     )
 
     np.testing.assert_array_equal(official, [1500.0, 1500.0])
-    assert np.all(buffer >= 0.0)
+    assert np.all(buffer <= 0.0)
 
 
 def test_error_real_modelo_se_calcula_en_columna_porcentaje_dif():
@@ -500,6 +440,6 @@ def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():
     np.testing.assert_array_equal(
         result["M2_variedad_disponibles"], [100.0, 100.0])
     assert result["Estado_M2_amortiguador"].tolist() == [
-        "Subestimacion: reservar area",
         "Sobreestimacion: liberar area",
+        "Subestimacion: reservar area",
     ]

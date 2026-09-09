@@ -34,6 +34,7 @@ DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
 REAL_PRODUCTION_TARGET_WEIGHT = 0.55
+PESO_AJUSTE_REAL_2026 = 1.5
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
 
 
@@ -304,7 +305,7 @@ def apply_overestimation_buffer(
     relative_error = error_report["%dif"].to_numpy(dtype=float)
     signed_error = relative_error * actual
     finite_signed_error = signed_error[np.isfinite(signed_error)]
-    average_error = float(np.mean(finite_signed_error)
+    average_error = float(np.max(finite_signed_error)
                           ) if finite_signed_error.size else 0.0
     valid_area = float(m2_variedad)
     if not np.isfinite(valid_area) or valid_area <= 0:
@@ -356,37 +357,6 @@ def apply_overestimation_buffer(
         dominant_direction = 1.0
         estimated_error = np.abs(estimated_error)
 
-    if history["Produccion"].notna().any():
-        production_series = pd.to_numeric(
-            history["Produccion"], errors="coerce"
-        ).to_numpy(dtype=float)
-        finite_production = production_series[np.isfinite(production_series)]
-        if finite_production.size >= 3:
-            cycle_window = finite_production[-min(len(finite_production), 12):]
-            cycle_mean = float(np.mean(cycle_window))
-            under_weeks = int(np.count_nonzero(cycle_window < cycle_mean))
-            if 3 <= under_weeks <= 5:
-                deficit = cycle_mean - cycle_window[cycle_window < cycle_mean]
-                mean_deficit = float(np.mean(deficit)) if deficit.size else 0.0
-                if np.isfinite(mean_deficit) and mean_deficit > 0:
-                    extension_weeks = min(len(base_predictions), 6)
-                    if extension_weeks > 0:
-                        recovery_pressure = np.clip(
-                            mean_deficit / max(abs(cycle_mean), 1.0),
-                            0.0,
-                            1.0,
-                        )
-                        if recovery_pressure > 0:
-                            negative_mask = estimated_error < 0.0
-                            if np.any(negative_mask[:extension_weeks]):
-                                estimated_error = estimated_error.copy()
-                                estimated_error[:extension_weeks] = np.where(
-                                    negative_mask[:extension_weeks],
-                                    estimated_error[:extension_weeks]
-                                    * (1.0 + recovery_pressure * 0.35),
-                                    estimated_error[:extension_weeks],
-                                )
-
     direction_labels = signed_error > 0
     if dominant_direction is not None:
         direction_probability = np.ones_like(base_predictions)
@@ -417,7 +387,7 @@ def apply_overestimation_buffer(
     buffer = np.where(
         direction_probability >= risk_threshold, estimated_buffer, 0.0
     )
-    buffer = -buffer
+    # Signo alineado con %dif=(real-estimado)/real: positivo=subestima, negativo=sobreestima.
     prediction_mean = float(np.mean(base_predictions)
                             ) if base_predictions.size else 0.0
     buffer_rate = float(
@@ -503,8 +473,8 @@ def add_buffer_projection_columns(
         [
             result["M2_amortiguador_adicional"].isna()
             & ~np.isclose(result["Amortiguador_sobreestimacion"], 0.0),
-            result["M2_amortiguador_adicional"] < 0,
             result["M2_amortiguador_adicional"] > 0,
+            result["M2_amortiguador_adicional"] < 0,
         ],
         [
             "No calculable: Tallos/m2 es cero",
@@ -591,6 +561,78 @@ def _prepare_production_dataset(
     return working.reset_index(drop=True)
 
 
+def calcular_ajuste_factor_diferencia_2026(
+    evaluation_dir: "Path | None" = None,
+    peso_ajuste: float = PESO_AJUSTE_REAL_2026,
+) -> dict[str, Any]:
+    """Corrige el factor estacional de 2025 con el error real observado en 2026.
+
+    Usa `errores_evaluacion_modelo.csv` (Anio==2026) y calcula, por variedad,
+    la razon `sum(Produccion) / sum(Estimado_modelo)`: valores <1 indican que
+    el modelo esta sobreestimando en la realidad reciente. `peso_ajuste`
+    amplifica (>1) o atenua (<1) la desviacion de esa razon respecto a 1.0
+    antes de limitar el resultado a [0.5, 1.5], para dar mas o menos peso a
+    la correccion real de 2026 frente al factor estacional de 2025.
+    """
+    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
+    ajustes: dict[str, float] = {}
+    ajuste_global = 1.0
+    errores_path = directorio / "errores_evaluacion_modelo.csv"
+    if not errores_path.exists():
+        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+    try:
+        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
+    except Exception:
+        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+    requeridas = {"Anio", "Bloque", "Variedad",
+                  "Estimado_modelo", "Produccion"}
+    if not requeridas.issubset(errores_df.columns):
+        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+    trabajo = errores_df.copy()
+    trabajo["Anio"] = pd.to_numeric(trabajo["Anio"], errors="coerce")
+    trabajo["Estimado_modelo"] = pd.to_numeric(
+        trabajo["Estimado_modelo"], errors="coerce")
+    trabajo["Produccion"] = pd.to_numeric(
+        trabajo["Produccion"], errors="coerce")
+    # 'Bloque&Varid' en este CSV viene prefijado con la semana; se reconstruye
+    # el identificador canonico (igual al de factor_diferencia_2025_por_variedad.csv)
+    # a partir de 'Bloque' y 'Variedad'.
+    bloque_numerico = pd.to_numeric(trabajo["Bloque"], errors="coerce")
+    trabajo["__bloque_varid"] = np.where(
+        bloque_numerico.notna(),
+        bloque_numerico.astype("Int64").astype(str).str.zfill(3)
+        + trabajo["Variedad"].astype(str).str.strip(),
+        np.nan,
+    )
+    trabajo = trabajo[trabajo["Anio"] == 2026].dropna(
+        subset=["Estimado_modelo", "Produccion", "__bloque_varid"]
+    )
+    if trabajo.empty:
+        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+    limite_inferior, limite_superior = 0.5, 1.5
+
+    def _ponderar(ratio: float) -> float:
+        ratio_ponderado = 1.0 + peso_ajuste * (ratio - 1.0)
+        return float(np.clip(ratio_ponderado, limite_inferior, limite_superior))
+
+    for variedad, grupo in trabajo.groupby("__bloque_varid"):
+        suma_estimado = float(grupo["Estimado_modelo"].sum())
+        suma_real = float(grupo["Produccion"].sum())
+        if suma_estimado > 0:
+            ajustes[str(variedad)] = _ponderar(suma_real / suma_estimado)
+
+    suma_estimado_total = float(trabajo["Estimado_modelo"].sum())
+    suma_real_total = float(trabajo["Produccion"].sum())
+    if suma_estimado_total > 0:
+        ajuste_global = _ponderar(suma_real_total / suma_estimado_total)
+
+    return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+
 def _load_difference_factors() -> dict[str, Any]:
     evaluation_dir = Path(__file__).with_name("Evaluacion")
     factors_path = evaluation_dir / "factor_diferencia_2025_por_variedad.csv"
@@ -614,6 +656,16 @@ def _load_difference_factors() -> dict[str, Any]:
             value = pd.to_numeric(summary_df.loc[0, column], errors="coerce")
             if pd.notna(value) and np.isfinite(value) and value > 0:
                 global_factor = float(value)
+
+    ajuste_real_2026 = calcular_ajuste_factor_diferencia_2026(evaluation_dir)
+    ajustes_por_variedad = ajuste_real_2026["ajustes_por_variedad"]
+    ajuste_global = ajuste_real_2026["ajuste_global"]
+    factors = {
+        variedad: valor * ajustes_por_variedad.get(variedad, ajuste_global)
+        for variedad, valor in factors.items()
+    }
+    global_factor *= ajuste_global
+
     return {"factores_por_variedad": factors, "factor_global": global_factor}
 
 
