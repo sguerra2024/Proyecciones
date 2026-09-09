@@ -229,15 +229,18 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - `Error_sobreestimacion_promedio` (columna informativa) usa el valor **maximo** del error firmado `(real - modelo)` en la ventana evaluada.
 - La convención del amortiguador sigue el caso real del error del modelo:
 	positivo cuando el modelo subestima y negativo cuando sobreestima.
-- **Salvaguarda de signo real 2026**: despues del calculo interno,
-	`corregir_signo_amortiguador_con_error_real()` (identica en modo individual
-	y masivo) compara el signo contra el ajuste real de 2026 por variedad
-	(`sum(Produccion) / sum(Estimado_modelo)` de `errores_evaluacion_modelo.csv`).
-	Si ese ratio esta claramente por debajo de 1 (sobreestimacion confirmada,
-	tolerancia `3%`) el amortiguador se fuerza a `<= 0`; si esta claramente por
-	encima de 1 (subestimacion confirmada) se fuerza a `>= 0`. Esto evita que el
-	`RandomForest` interno contradiga una sobreestimacion/subestimacion ya
-	comprobada con datos reales.
+- **Salvaguarda de signo por moda de evaluacion real 2026**: despues del
+	calculo interno, `corregir_signo_amortiguador_con_error_real()` (identica
+	en modo individual y masivo) fuerza el signo del amortiguador al **signo
+	moda** (el mas frecuente) del `%dif` real de 2026 para esa variedad,
+	calculado por `calcular_moda_signo_evaluacion_2026()` sobre
+	`errores_evaluacion_modelo.csv`.
+	Moda `+1` (predominan semanas de subestimacion) fuerza `amortiguador >= 0`;
+	moda `-1` (predominan semanas de sobreestimacion) fuerza `amortiguador <= 0`;
+	moda `0` (empate o sin datos de esa variedad) deja el signo calculado
+	internamente. Si la variedad no tiene datos propios se usa la moda global.
+	Esto evita que el `RandomForest` interno contradiga la tendencia real ya
+	observada en la evaluacion.
 - Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
 - El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.
 - El limite se obtiene de la mediana historica de la sobreestimacion expresada como proporcion de la prediccion. Con la evaluacion actual es aproximadamente `11%`, en lugar de un limite fijo de `30%`.
