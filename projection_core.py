@@ -29,7 +29,9 @@ MODEL_PARAMS = {
     "min_samples_split": 2,
     "max_features": "sqrt",
 }
-BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
+BUFFER_COLUMNS = [
+    "Prediccion_base", "m2Variedad", "Tallos/m2", "Semana", "Dif_previo"
+]
 DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
@@ -129,6 +131,21 @@ def save_buffer_evaluation_report(
     )
     report["%dif"] = error_report["%dif"].to_numpy()
     report["error_relativo"] = report["%dif"]
+
+    semana_column = normalized_columns.get("semana")
+    bloque_column = normalized_columns.get("bloque")
+    variedad_column = normalized_columns.get("variedad")
+    if semana_column and bloque_column and variedad_column:
+        semana_str = pd.to_numeric(
+            report[semana_column], errors="coerce"
+        ).astype("Int64").astype(str)
+        bloque_str = pd.to_numeric(
+            report[bloque_column], errors="coerce"
+        ).astype("Int64").astype(str).str.zfill(3)
+        variedad_str = report[variedad_column].astype(str).str.strip()
+        report["Semana&Bloque&Varid"] = (
+            semana_str + "&" + bloque_str + "&" + variedad_str
+        )
 
     destination = Path(destination_path) if destination_path else (
         Path(__file__).with_name("Evaluacion")
@@ -328,17 +345,32 @@ def apply_overestimation_buffer(
 
     signed_error_per_m2 = signed_error / valid_area
 
+    # Senal de retroalimentacion (equivalente al retorno de un actuador): el
+    # %dif firmado por m2 del periodo anterior. En entrenamiento se usa el
+    # valor propio del primer registro (no hay periodo previo disponible);
+    # en prediccion se arrastra el ultimo valor real conocido, ya que el
+    # error real de las semanas futuras aun no existe.
+    dif_previo_train = (
+        np.concatenate([signed_error_per_m2[:1], signed_error_per_m2[:-1]])
+        if signed_error_per_m2.size else signed_error_per_m2
+    )
+    ultimo_dif_conocido = (
+        float(signed_error_per_m2[-1]) if signed_error_per_m2.size else 0.0
+    )
+
     train_buffer_features = pd.DataFrame({
         "Prediccion_base": historical_predictions,
         "m2Variedad": np.full(len(historical_predictions), valid_area),
         "Tallos/m2": history["Tallos/m2"].to_numpy(dtype=float),
         "Semana": history["Semana"].to_numpy(dtype=float),
+        "Dif_previo": dif_previo_train,
     })
     prediction_buffer_features = pd.DataFrame({
         "Prediccion_base": base_predictions,
         "m2Variedad": np.full(len(base_predictions), valid_area),
         "Tallos/m2": evaluation_df["Tallos/m2"].to_numpy(dtype=float),
         "Semana": evaluation_df["Semana"].to_numpy(dtype=float),
+        "Dif_previo": np.full(len(base_predictions), ultimo_dif_conocido),
     })
     buffer_model = RandomForestRegressor(**MODEL_PARAMS)
     buffer_model.fit(

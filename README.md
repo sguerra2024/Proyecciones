@@ -177,6 +177,27 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 
 ### 3.7 Amortiguador de Sobreestimacion
 
+**Procedimiento de evaluacion de 4 semanas (recomendado, no obligatorio)**
+
+- El flujo recomendado es correr `plot_series_evaluation.py` (que llama a
+	`save_buffer_evaluation_report`) para regenerar `Evaluacion/errores_evaluacion_modelo.csv`
+	con las semanas evaluadas mas recientes antes de proyectar. Esto mejora la
+	calidad del amortiguador porque calibra el limite de riesgo y el ajuste real
+	de 2026 (ver mas abajo) con datos frescos.
+- **Este procedimiento NO es obligatorio para usar el sistema.** Si el archivo
+	no existe o esta desactualizado, `load_overestimation_calibration()` y
+	`calcular_ajuste_factor_diferencia_2026()` usan valores neutros de respaldo
+	(`max_buffer_rate`/`risk_threshold` por defecto, `Ajuste_2026 = 1.0`), y la
+	proyeccion oficial (`Estimado_modelo`) sigue funcionando sin bloquearse.
+	El amortiguador solo pierde precision, no impide la operacion.
+- `save_buffer_evaluation_report` conserva **todas las columnas del Excel
+	de origen** y agrega `%dif`, `error_relativo` y, si el Excel trae
+	`Semana`, `Bloque` y `Variedad`, la clave explicita `Semana&Bloque&Varid`
+	(formato `"{Semana}&{Bloque zfill3}&{Variedad}"`) para cotejar cada
+	registro semanal sin ambiguedad junto a su `%dif`.
+
+**Calculo del error y el buffer**
+
 - El error real del modelo se registra en la columna `%dif` con la formula
 	`(Produccion real - Estimado_modelo) / Produccion real`.
 - Un `%dif` positivo indica subestimacion y uno negativo indica
@@ -196,9 +217,27 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 	de analisis del amortiguador y no debe afirmar que se analizaron 12 semanas
 	si el informe contiene solo 4 periodos.
 - El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
+- El `RandomForestRegressor` del amortiguador recibe `Dif_previo` como variable
+	de entrada: el `%dif` firmado por m2 del periodo anterior (equivalente a la
+	senal de retorno de un actuador). En entrenamiento usa el valor desplazado
+	una semana; en prediccion arrastra el ultimo valor real conocido, ya que el
+	error real de las semanas futuras aun no existe.
+- Si el ratio de semanas sobreestimando (o subestimando) en la ventana evaluada
+	es `>= 75%`, el signo del amortiguador se fuerza en esa direccion; si no hay
+	una direccion dominante, un `RandomForestClassifier` estima la probabilidad
+	de subestimacion y define el signo.
 - `Error_sobreestimacion_promedio` (columna informativa) usa el valor **maximo** del error firmado `(real - modelo)` en la ventana evaluada.
 - La convención del amortiguador sigue el caso real del error del modelo:
 	positivo cuando el modelo subestima y negativo cuando sobreestima.
+- **Salvaguarda de signo real 2026**: despues del calculo interno,
+	`corregir_signo_amortiguador_con_error_real()` (identica en modo individual
+	y masivo) compara el signo contra el ajuste real de 2026 por variedad
+	(`sum(Produccion) / sum(Estimado_modelo)` de `errores_evaluacion_modelo.csv`).
+	Si ese ratio esta claramente por debajo de 1 (sobreestimacion confirmada,
+	tolerancia `3%`) el amortiguador se fuerza a `<= 0`; si esta claramente por
+	encima de 1 (subestimacion confirmada) se fuerza a `>= 0`. Esto evita que el
+	`RandomForest` interno contradiga una sobreestimacion/subestimacion ya
+	comprobada con datos reales.
 - Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
 - El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.
 - El limite se obtiene de la mediana historica de la sobreestimacion expresada como proporcion de la prediccion. Con la evaluacion actual es aproximadamente `11%`, en lugar de un limite fijo de `30%`.
