@@ -25,6 +25,7 @@ from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
     calcular_ajuste_factor_diferencia_2026,
+    calcular_moda_signo_evaluacion_2026,
     calculate_model_error_report,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
@@ -1237,11 +1238,15 @@ def cargar_factor_diferencia_por_variedad():
     }
     factor_global *= ajuste_global
 
+    moda_signo_2026 = calcular_moda_signo_evaluacion_2026(ruta_eval)
+
     config_factor = {
         'factores_por_variedad': factores,
         'factor_global': factor_global,
         'ajustes_reales_2026': ajustes_por_variedad,
         'ajuste_real_2026_global': ajuste_global,
+        'moda_signo_2026': moda_signo_2026['moda_por_variedad'],
+        'moda_signo_2026_global': moda_signo_2026['moda_global'],
         'mtime_factor': mtime_factor,
         'mtime_resumen': mtime_resumen,
         'mtime_errores': mtime_errores,
@@ -1295,32 +1300,28 @@ def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_
 def corregir_signo_amortiguador_con_error_real(amortiguador, var_proy, config_factor,
                                                tolerancia=0.03):
     """
-    Alinea el signo del amortiguador con el error real conocido de 2026
-    (Produccion/Estimado_modelo en errores_evaluacion_modelo.csv), para que
-    el buffer interno del RandomForest no contradiga una sobreestimacion o
-    subestimacion ya confirmada con datos reales.
+    Fuerza el signo del amortiguador al signo moda (el mas frecuente) del
+    %dif real de 2026 para esa variedad en errores_evaluacion_modelo.csv,
+    para que el amortiguador mantenga la tendencia observada en la
+    evaluacion real en vez de depender solo del RandomForest interno.
 
-    Si el ratio real esta claramente por debajo de 1 (sobreestima) el
-    amortiguador se fuerza a <= 0. Si esta claramente por encima de 1
-    (subestima) se fuerza a >= 0. Dentro de la tolerancia se deja intacto.
+    Moda > 0 (predomina subestimacion) -> amortiguador >= 0.
+    Moda < 0 (predomina sobreestimacion) -> amortiguador <= 0.
+    Moda == 0 (empate o sin datos) -> se deja el signo calculado internamente.
     """
     valores = np.asarray(amortiguador, dtype=float)
     if valores.size == 0:
         return valores
 
-    ajustes_reales = config_factor.get('ajustes_reales_2026', {})
-    ratio = ajustes_reales.get(
-        str(var_proy), config_factor.get('ajuste_real_2026_global', 1.0)
+    modas_por_variedad = config_factor.get('moda_signo_2026', {})
+    moda = modas_por_variedad.get(
+        str(var_proy), config_factor.get('moda_signo_2026_global', 0)
     )
-    if not np.isfinite(ratio):
-        return valores.copy()
-
-    corregido = valores.copy()
-    if ratio < 1.0 - tolerancia:
-        corregido = -np.abs(corregido)
-    elif ratio > 1.0 + tolerancia:
-        corregido = np.abs(corregido)
-    return corregido
+    if moda > 0:
+        return np.abs(valores)
+    if moda < 0:
+        return -np.abs(valores)
+    return valores.copy()
 
 
 def cargar_archivo_a_dataframe(archivo_subido):

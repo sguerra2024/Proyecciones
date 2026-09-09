@@ -665,6 +665,65 @@ def calcular_ajuste_factor_diferencia_2026(
     return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
 
 
+def calcular_moda_signo_evaluacion_2026(
+    evaluation_dir: "Path | None" = None,
+) -> dict[str, Any]:
+    """Calcula el signo moda (mas frecuente) del error real de 2026 por variedad.
+
+    Usa el signo de `%dif` (positivo=subestima, negativo=sobreestima) de las
+    filas `Anio == 2026` en `errores_evaluacion_modelo.csv`. Por `Bloque&Varid`
+    devuelve `1` si predominan semanas de subestimacion, `-1` si predominan de
+    sobreestimacion, o `0` si hay empate o no hay datos suficientes. Tambien
+    calcula una moda global (agregando todas las variedades) como respaldo.
+    """
+    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
+    modas: dict[str, int] = {}
+    moda_global = 0
+    errores_path = directorio / "errores_evaluacion_modelo.csv"
+    if not errores_path.exists():
+        return {"moda_por_variedad": modas, "moda_global": moda_global}
+
+    try:
+        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
+    except Exception:
+        return {"moda_por_variedad": modas, "moda_global": moda_global}
+
+    requeridas = {"Anio", "Bloque", "Variedad", "%dif"}
+    if not requeridas.issubset(errores_df.columns):
+        return {"moda_por_variedad": modas, "moda_global": moda_global}
+
+    trabajo = errores_df.copy()
+    trabajo["Anio"] = pd.to_numeric(trabajo["Anio"], errors="coerce")
+    trabajo["%dif"] = pd.to_numeric(trabajo["%dif"], errors="coerce")
+    bloque_numerico = pd.to_numeric(trabajo["Bloque"], errors="coerce")
+    trabajo["__bloque_varid"] = np.where(
+        bloque_numerico.notna(),
+        bloque_numerico.astype("Int64").astype(str).str.zfill(3)
+        + trabajo["Variedad"].astype(str).str.strip(),
+        np.nan,
+    )
+    trabajo = trabajo[trabajo["Anio"] == 2026].dropna(
+        subset=["%dif", "__bloque_varid"]
+    )
+    if trabajo.empty:
+        return {"moda_por_variedad": modas, "moda_global": moda_global}
+
+    def _moda_signo(serie_dif: pd.Series) -> int:
+        positivos = int((serie_dif > 0).sum())
+        negativos = int((serie_dif < 0).sum())
+        if positivos > negativos:
+            return 1
+        if negativos > positivos:
+            return -1
+        return 0
+
+    for variedad, grupo in trabajo.groupby("__bloque_varid"):
+        modas[str(variedad)] = _moda_signo(grupo["%dif"])
+
+    moda_global = _moda_signo(trabajo["%dif"])
+    return {"moda_por_variedad": modas, "moda_global": moda_global}
+
+
 def _load_difference_factors() -> dict[str, Any]:
     evaluation_dir = Path(__file__).with_name("Evaluacion")
     factors_path = evaluation_dir / "factor_diferencia_2025_por_variedad.csv"
