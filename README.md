@@ -177,19 +177,60 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 
 ### 3.7 Amortiguador de Sobreestimacion
 
-**Procedimiento de evaluacion de 4 semanas (recomendado, no obligatorio)**
+**El amortiguador como actuador de control**
 
-- El flujo recomendado es correr `plot_series_evaluation.py` (que llama a
-	`save_buffer_evaluation_report`) para regenerar `Evaluacion/errores_evaluacion_modelo.csv`
-	con las semanas evaluadas mas recientes antes de proyectar. Esto mejora la
-	calidad del amortiguador porque calibra el limite de riesgo y el ajuste real
-	de 2026 (ver mas abajo) con datos frescos.
-- **Este procedimiento NO es obligatorio para usar el sistema.** Si el archivo
-	no existe o esta desactualizado, `load_overestimation_calibration()` y
-	`calcular_ajuste_factor_diferencia_2026()` usan valores neutros de respaldo
-	(`max_buffer_rate`/`risk_threshold` por defecto, `Ajuste_2026 = 1.0`), y la
-	proyeccion oficial (`Estimado_modelo`) sigue funcionando sin bloquearse.
-	El amortiguador solo pierde precision, no impide la operacion.
+Un actuador en un sistema de control es un dispositivo **o programa** que
+transforma una señal eléctrica o una evaluación en una acción para modificar
+un proceso. En este proyecto, el amortiguador es un actuador lógico: no cambia
+la proyección oficial, sino que transforma la evaluación real del error del
+modelo en una acción operativa sobre el escenario de producción y el área
+disponible.
+
+**Cómo funciona dentro del sistema de control**
+
+1. **Evaluación y medición:** `plot_series_evaluation.py` compara la
+	`Produccion` real con `Estimado_modelo` y calcula `%dif` respecto al eje
+	cero:
+	`(%dif) = (Produccion real - Estimado_modelo) / Produccion real`.
+2. **Señal de error:** un `%dif` positivo representa subestimación y uno
+	negativo representa sobreestimación.
+3. **Integración de la señal:** se calculan el área positiva (subestimación),
+	el área negativa (sobreestimación, conservando su signo) y el área neta:
+	`area_neta = area_subestimacion + area_sobreestimacion`.
+	Estas áreas son la memoria acumulada del error observado respecto al eje
+	cero de la gráfica.
+4. **Controlador lógico:** `projection_core.py` combina el área neta por caso
+	evaluado con la señal histórica `Dif_previo`, la magnitud del error y la
+	probabilidad de dirección. El modelo determina cuánto debe actuar el
+	amortiguador y si debe reservar o liberar capacidad.
+5. **Acción del actuador:** el amortiguador positivo solicita reservar
+	producción/área cuando predomina la subestimación; el amortiguador negativo
+	solicita liberar área cuando predomina la sobreestimación.
+6. **Límite y salida:** la acción se limita por `max_buffer_rate` y por el área
+	disponible. `Estimado_modelo` permanece intacto; la acción se expone como
+	escenario informativo mediante `Amortiguador_sobreestimacion` y `M2
+	Amortiguador`.
+7. **Retroalimentación:** una nueva evaluación real actualiza `%dif`, las áreas
+	y la señal `Dif_previo`, cerrando el ciclo de control para la siguiente
+	proyección.
+
+La relación conceptual es:
+
+`evaluacion real -> señal de error -> controlador del amortiguador -> acción sobre el escenario -> nueva evaluación`.
+
+Por esta razón, el amortiguador **no puede calcularse sin una evaluación real
+inicial válida**. No se debe interpretar como un porcentaje fijo ni como una
+corrección arbitraria de la proyección oficial.
+
+**Procedimiento de evaluacion real previo a la proyeccion**
+
+- Antes de calcular el amortiguador se debe ejecutar `plot_series_evaluation.py`,
+  que llama a `save_buffer_evaluation_report`, para generar o actualizar
+  `Evaluacion/errores_evaluacion_modelo.csv` con datos reales.
+- El informe persiste `%dif`, `error_relativo`, `area_subestimacion`,
+  `area_sobreestimacion` y `area_neta`, además de las columnas originales.
+- Si no existe una evaluación real válida, el sistema bloquea el cálculo del
+  amortiguador y solicita generar primero el informe de evaluación.
 - `save_buffer_evaluation_report` conserva **todas las columnas del Excel
 	de origen** y agrega `%dif`, `error_relativo` y, si el Excel trae
 	`Semana`, `Bloque` y `Variedad`, la clave explicita `Semana&Bloque&Varid`
@@ -216,7 +257,9 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - La IA debe responder esta cantidad real cuando se consulte por las semanas
 	de analisis del amortiguador y no debe afirmar que se analizaron 12 semanas
 	si el informe contiene solo 4 periodos.
-- El amortiguador se calcula con un `RandomForestRegressor` para estimar la magnitud y un `RandomForestClassifier` para determinar el riesgo de sobreestimacion.
+- El amortiguador se calcula con un `RandomForestRegressor` para estimar la
+	magnitud y un `RandomForestClassifier` para estimar la probabilidad de
+	subestimacion; ambos reciben la señal acumulada de la evaluación real.
 - El `RandomForestRegressor` del amortiguador recibe `Dif_previo` como variable
 	de entrada: el `%dif` firmado por m2 del periodo anterior (equivalente a la
 	senal de retorno de un actuador). En entrenamiento usa el valor desplazado
@@ -241,10 +284,13 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 	internamente. Si la variedad no tiene datos propios se usa la moda global.
 	Esto evita que el `RandomForest` interno contradiga la tendencia real ya
 	observada en la evaluacion.
-- Solo los errores relativos negativos de `Evaluacion/errores_evaluacion_modelo.csv` se consideran sobreestimaciones del modelo.
-- El error se define como `(real - modelo) / real`; por tanto, los errores positivos no intervienen en la calibracion.
-- El limite se obtiene de la mediana historica de la sobreestimacion expresada como proporcion de la prediccion. Con la evaluacion actual es aproximadamente `11%`, en lugar de un limite fijo de `30%`.
-- El amortiguador solo se aplica al escenario informativo cuando la probabilidad estimada de sobreestimacion es al menos `60%`.
+- Los errores positivos y negativos de `Evaluacion/errores_evaluacion_modelo.csv`
+	intervienen en la señal integral: los positivos acumulan área de
+	subestimación y los negativos acumulan área de sobreestimación.
+- El límite se obtiene de la calibración histórica y la acción se limita por
+	`max_buffer_rate`, en lugar de aplicar un porcentaje fijo.
+- El amortiguador solo se aplica al escenario informativo cuando la
+	probabilidad de la dirección estimada es al menos `60%`.
 - `Estimado_modelo` permanece como proyeccion oficial y no es modificado.
 - `Proyeccion_con_amortiguador_IA` se calcula como `Estimado_modelo - Amortiguador`, con minimo cero.
 - `M2 Amortiguador` representa la proporcion de area requerida por el amortiguador y se redondea hacia arriba.

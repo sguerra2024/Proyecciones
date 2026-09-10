@@ -3,6 +3,7 @@ from projection_core import (
     apply_overestimation_buffer,
     build_production_model,
     calculate_model_error_report,
+    calculate_evaluation_area_metrics,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
     calculate_additional_buffer_area,
@@ -194,6 +195,8 @@ def test_amortiguador_usa_numero_de_semanas_evaluadas(monkeypatch):
             "max_buffer_rate": 0.10,
             "risk_threshold": 0.60,
             "evaluated_weeks": 4,
+            "area_net": 0.0,
+            "evaluation_cases": 4,
         },
     )
 
@@ -239,7 +242,12 @@ def test_amortiguador_pondera_magnitud_por_probabilidad_y_umbral(monkeypatch):
     monkeypatch.setattr(
         projection_core,
         "load_overestimation_calibration",
-        lambda: {"max_buffer_rate": 1.0, "risk_threshold": 0.60},
+        lambda: {
+            "max_buffer_rate": 1.0,
+            "risk_threshold": 0.60,
+            "area_net": 0.0,
+            "evaluation_cases": 4,
+        },
     )
     training_df = pd.DataFrame({
         "Produccion": [80, 120, 80, 120, 80],
@@ -340,6 +348,17 @@ def test_error_real_modelo_se_calcula_en_columna_porcentaje_dif():
     assert np.isnan(report.loc[2, "%dif"])
 
 
+def test_areas_evaluacion_conservan_signo_del_area_negativa():
+    areas = calculate_evaluation_area_metrics(
+        np.array([0.20, -0.10, 0.05, -0.30, np.nan])
+    )
+
+    assert np.isclose(areas["area_positive"], 0.25)
+    assert np.isclose(areas["area_negative"], -0.40)
+    assert np.isclose(areas["area_net"], -0.15)
+    assert areas["evaluation_cases"] == 4
+
+
 def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
     path = tmp_path / "errores.csv"
     pd.DataFrame({
@@ -354,6 +373,14 @@ def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
     assert calibration["underestimation_cases"] == 2
     assert np.isclose(calibration["max_buffer_rate"], expected_rate)
     assert calibration["risk_threshold"] == 0.60
+    assert np.isclose(calibration["area_positive"], 1.30)
+    assert np.isclose(calibration["area_negative"], -0.60)
+    assert np.isclose(calibration["area_net"], 0.70)
+
+
+def test_calibracion_exige_evaluacion_real_inicial(tmp_path):
+    with np.testing.assert_raises_regex(ValueError, "evaluacion real inicial"):
+        load_overestimation_calibration(tmp_path / "no_existe.csv")
 
 
 def test_informe_excel_recalcula_dif_y_conserva_semanas(tmp_path):

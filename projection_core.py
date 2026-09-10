@@ -40,30 +40,48 @@ PESO_AJUSTE_REAL_2026 = 1.5
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
 
 
+def calculate_evaluation_area_metrics(
+    relative_error: "pd.Series | np.ndarray",
+) -> dict[str, float | int]:
+    """Calcula las areas firmadas de %dif respecto al eje cero.
+
+    El area positiva corresponde a subestimacion y el area negativa conserva
+    su signo porque representa sobreestimacion. Estas areas son la senal
+    integral que utiliza el amortiguador como actuador.
+    """
+    values = pd.to_numeric(
+        pd.Series(relative_error), errors="coerce"
+    ).dropna().to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    area_positive = float(np.maximum(values, 0.0).sum())
+    area_negative = float(np.minimum(values, 0.0).sum())
+    return {
+        "area_positive": area_positive,
+        "area_negative": area_negative,
+        "area_net": area_positive + area_negative,
+        "evaluation_cases": int(values.size),
+    }
+
+
 def load_overestimation_calibration(
     evaluation_path: "Path | None" = None,
 ) -> dict[str, float | int | str]:
-    """Calibra el limite con errores relativos positivos y negativos."""
+    """Carga la evaluacion real que calibra el actuador del amortiguador."""
     path = evaluation_path or (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
     )
-    fallback = {
-        "max_buffer_rate": DEFAULT_MAX_BUFFER_RATE,
-        "risk_threshold": BUFFER_RISK_THRESHOLD,
-        "error_cases": 0,
-        "overestimation_cases": 0,
-        "underestimation_cases": 0,
-        "evaluated_weeks": DEFAULT_EVALUATED_WEEKS,
-        "source": "fallback",
-    }
     if not path.exists():
-        return fallback
+        raise ValueError(
+            "No existe una evaluacion real inicial; el amortiguador no puede calcularse."
+        )
 
     try:
         evaluation = pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:
-        return fallback
+    except Exception as exc:
+        raise ValueError(
+            f"No fue posible leer la evaluacion real: {path}"
+        ) from exc
     error_column = next(
         (
             column for column in evaluation.columns
@@ -72,18 +90,23 @@ def load_overestimation_calibration(
         None,
     )
     if error_column is None:
-        return fallback
+        raise ValueError(
+            "La evaluacion real no contiene la columna %dif o error_relativo."
+        )
 
     relative_error = pd.to_numeric(
         evaluation[error_column], errors="coerce"
     ).dropna()
     relative_error = relative_error[relative_error < 1.0]
     if relative_error.empty:
-        return fallback
+        raise ValueError(
+            "La evaluacion real no contiene errores relativos validos."
+        )
 
     absolute_error_on_prediction = (
         relative_error.abs() / (1.0 - relative_error)
     )
+    areas = calculate_evaluation_area_metrics(relative_error)
     evaluated_weeks = DEFAULT_EVALUATED_WEEKS
     if {"Anio", "Semana"}.issubset(evaluation.columns):
         evaluated_periods = evaluation[["Anio", "Semana"]].copy()
@@ -103,6 +126,10 @@ def load_overestimation_calibration(
         "error_cases": int(len(relative_error)),
         "overestimation_cases": int((relative_error < 0).sum()),
         "underestimation_cases": int((relative_error > 0).sum()),
+        "area_positive": areas["area_positive"],
+        "area_negative": areas["area_negative"],
+        "area_net": areas["area_net"],
+        "evaluation_cases": areas["evaluation_cases"],
         "evaluated_weeks": evaluated_weeks,
         "source": str(path),
     }
@@ -131,6 +158,10 @@ def save_buffer_evaluation_report(
     )
     report["%dif"] = error_report["%dif"].to_numpy()
     report["error_relativo"] = report["%dif"]
+    area_metrics = calculate_evaluation_area_metrics(report["%dif"])
+    report["area_subestimacion"] = area_metrics["area_positive"]
+    report["area_sobreestimacion"] = area_metrics["area_negative"]
+    report["area_neta"] = area_metrics["area_net"]
 
     semana_column = normalized_columns.get("semana")
     bloque_column = normalized_columns.get("bloque")
@@ -162,6 +193,7 @@ def save_buffer_evaluation_report(
     return {
         "rows": int(report["%dif"].notna().sum()),
         "evaluated_weeks": int(len(periods)),
+        **area_metrics,
         "source": str(destination),
         "values": report["%dif"].dropna().tolist(),
     }
@@ -342,6 +374,14 @@ def apply_overestimation_buffer(
 
     max_buffer_rate = float(calibration["max_buffer_rate"])
     risk_threshold = float(calibration["risk_threshold"])
+    evaluation_cases = int(calibration.get("evaluation_cases", 0))
+    if evaluation_cases <= 0:
+        raise ValueError(
+            "El amortiguador requiere una evaluacion real con al menos un caso."
+        )
+    # Actuador integral: el area neta respecto al eje cero conserva la
+    # memoria de la evaluacion. Positiva pide reservar; negativa pide liberar.
+    area_control = float(calibration["area_net"]) / evaluation_cases
 
     signed_error_per_m2 = signed_error / valid_area
 
@@ -379,6 +419,7 @@ def apply_overestimation_buffer(
     estimated_error = buffer_model.predict(
         prediction_buffer_features[BUFFER_COLUMNS]
     ) * valid_area
+    estimated_error += base_predictions * area_control
     negative_error_ratio = float(np.mean(signed_error < 0.0))
     positive_error_ratio = float(np.mean(signed_error > 0.0))
     dominant_direction = None

@@ -24,6 +24,10 @@ services:
         sync: false
       - key: ANTHROPIC_MODEL
         value: claude-3-5-sonnet-latest
+      - key: ACCESS_INITIAL_USER
+        value: Admin
+      - key: ACCESS_INITIAL_PASSWORD
+        sync: false
       - key: API_URL
         sync: false
       - key: API_KEY

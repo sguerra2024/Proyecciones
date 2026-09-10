@@ -1,4 +1,7 @@
-from projection_core import save_buffer_evaluation_report
+from projection_core import (
+    calculate_evaluation_area_metrics,
+    save_buffer_evaluation_report,
+)
 import matplotlib.pyplot as plt
 import pandas as pd
 import re
@@ -101,13 +104,9 @@ def plot_series_evaluation_from_values(values, output_prefix, title='Evaluacion 
     ordered_values = sorted(values, reverse=True)
     x_values = list(range(1, len(ordered_values) + 1))
 
-    def discrete_area(series):
-        return sum(series)
-
-    positive_parts = [max(v, 0.0) for v in ordered_values]
-    negative_parts = [max(-v, 0.0) for v in ordered_values]
-    area_positive = discrete_area(positive_parts)
-    area_negative = discrete_area(negative_parts)
+    area_metrics = calculate_evaluation_area_metrics(ordered_values)
+    area_positive = area_metrics['area_positive']
+    area_negative = abs(area_metrics['area_negative'])
 
     thresholds = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     counts = {}
