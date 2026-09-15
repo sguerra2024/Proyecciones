@@ -9,6 +9,7 @@ from projection_core import (
     calculate_pattern_signal_to_noise,
     calculate_additional_buffer_area,
     calculate_buffer_area_from_projection,
+    calcular_ajuste_reciente_4_semanas,
     find_reference_pattern,
     has_sufficient_pattern_history,
     load_overestimation_calibration,
@@ -162,7 +163,7 @@ def test_mse_de_patrones_se_alinea_por_edad_y_no_por_calendario():
     assert np.isclose(mse, 0.0)
 
 
-def test_siembra_nueva_prioriza_007_sumer_romance():
+def test_siembra_nueva_no_prioriza_sumer_romance():
     rows = []
     series = {
         "OBJETIVO": [0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 3.0, 5.0],
@@ -186,7 +187,7 @@ def test_siembra_nueva_prioriza_007_sumer_romance():
     pattern = find_reference_pattern(data, "OBJETIVO")
 
     assert pattern is not None
-    assert pattern["reference_var"] == "007SUMER ROMANCE"
+    assert pattern["reference_var"] == "OTRO_PATRON"
 
 
 def test_longitud_patron_cuenta_solo_filas_completas_del_modelo():
@@ -344,7 +345,7 @@ def test_amortiguador_pondera_magnitud_por_probabilidad_y_umbral(monkeypatch):
     )
 
     np.testing.assert_array_equal(official, [100.0, 100.0])
-    np.testing.assert_allclose(buffer, [14.0, 0.0])
+    np.testing.assert_allclose(buffer, [10.0, 0.0])
 
 
 def test_amortiguador_aprende_error_bilateral_sin_cambiar_prediccion_oficial():
@@ -439,7 +440,7 @@ def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
 
     calibration = load_overestimation_calibration(path)
 
-    expected_rate = 0.30 / 1.30
+    expected_rate = 0.10
     assert calibration["error_cases"] == 5
     assert calibration["overestimation_cases"] == 3
     assert calibration["underestimation_cases"] == 2
@@ -453,6 +454,27 @@ def test_calibracion_usa_errores_negativos_y_positivos(tmp_path):
 def test_calibracion_exige_evaluacion_real_inicial(tmp_path):
     with np.testing.assert_raises_regex(ValueError, "evaluacion real inicial"):
         load_overestimation_calibration(tmp_path / "no_existe.csv")
+
+
+def test_ajuste_reciente_usa_cuatro_semanas_y_limita_por_variedad(tmp_path):
+    evaluacion = tmp_path / "errores_evaluacion_modelo.csv"
+    pd.DataFrame({
+        "Anio": [2026] * 5,
+        "Semana": [30, 31, 32, 33, 34],
+        "Bloque": [1, 1, 1, 1, 1],
+        "Variedad": ["ROSA"] * 5,
+        "Produccion": [100, 50, 50, 50, 50],
+        "Estimado_modelo": [100, 100, 100, 100, 100],
+    }).to_csv(evaluacion, index=False)
+
+    resultado = calcular_ajuste_reciente_4_semanas(tmp_path)
+
+    assert resultado["semanas"] == [
+        "2026-31", "2026-32", "2026-33", "2026-34"
+    ]
+    assert resultado["filas"] == 4
+    assert resultado["ajuste_global"] == 0.85
+    assert resultado["ajustes_por_variedad"]["001ROSA"] == 0.85
 
 
 def test_informe_excel_recalcula_dif_y_conserva_semanas(tmp_path):
@@ -518,8 +540,19 @@ def test_area_amortiguador_es_fraccion_del_area_total():
     )
 
     np.testing.assert_array_equal(productivity, [10.0, 20.0])
-    np.testing.assert_array_equal(area, [30.0, 10.0])
+    np.testing.assert_array_equal(area, [10.0, 10.0])
     assert np.all(area <= 100.0)
+
+
+def test_area_amortiguador_no_supera_el_diez_por_ciento_por_variedad():
+    _, area = calculate_buffer_area_from_projection(
+        buffer_stems=np.array([100.0, -100.0]),
+        projected_stems=np.array([1000.0, 1000.0]),
+        total_area_m2=95.0,
+    )
+
+    assert np.all(np.abs(area) <= 95.0 * 0.10)
+    np.testing.assert_array_equal(area, [9.0, -9.0])
 
 
 def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():
@@ -535,7 +568,7 @@ def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():
     )
     np.testing.assert_array_equal(result["Tallos_m2_variedad"], [10.0, 5.0])
     np.testing.assert_array_equal(
-        result["M2_amortiguador_adicional"], [-11.0, 20.0])
+        result["M2_amortiguador_adicional"], [-10.0, 10.0])
     np.testing.assert_array_equal(
         result["M2_variedad_disponibles"], [100.0, 100.0])
     assert result["Estado_M2_amortiguador"].tolist() == [

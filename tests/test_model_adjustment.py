@@ -13,6 +13,7 @@ from ProyAst import (  # noqa: E402
     alinear_series_para_ajuste,
     calcular_factor_correccion_media_anio_en_curso,
     clasificar_sn,
+    construir_resumen_ajustes_media,
     construir_objetivo_entrenamiento_con_patron,
 )
 from projection_core import _apply_difference_factor  # noqa: E402
@@ -51,6 +52,32 @@ def test_factor_media_compara_verano_con_inicio_del_mismo_anio():
     factor = calcular_factor_correccion_media_anio_en_curso(promedio)
 
     assert np.isclose(factor, 0.7)
+
+
+def test_resumen_consolida_todos_los_ajustes_de_media():
+    export = pd.DataFrame({
+        'Variedad_proyectada': ['001ROSA', '001ROSA'],
+        'Factor_correccion': [0.9, 0.9],
+        'Factor_ajuste_reciente_4_semanas': [0.85, 0.85],
+        'Semanas_factor_2026_24_52': [4, 4],
+        'Origen_factor_2025': ['variedad', 'variedad'],
+        'Semanas_ajuste_reciente': [4, 4],
+        'Origen_ajuste_reciente': ['variedad', 'variedad'],
+        'Porcentaje_amortiguador_sugerido': [10.0, 10.0],
+    })
+
+    resumen = construir_resumen_ajustes_media(export)
+
+    assert len(resumen) == 1
+    fila = resumen.iloc[0]
+    assert fila['Factor_media_anual'] == 0.9
+    assert fila['Factor_media_ultimas_4_semanas'] == 0.85
+    assert np.isclose(
+        fila['Factor_media_combinado_informativo'],
+        0.9 * 0.85,
+    )
+    assert 'Factor_media_ingresos' not in resumen.columns
+    assert 'Factor_media_2025_2026' not in resumen.columns
 
 
 def test_clasificacion_sn_alerta_con_7_db_o_menos():

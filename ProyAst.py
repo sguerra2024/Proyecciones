@@ -29,6 +29,7 @@ from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
     calcular_ajuste_factor_diferencia_2026,
+    calcular_ajuste_reciente_4_semanas,
     calcular_moda_signo_evaluacion_2026,
     calculate_model_error_report,
     calculate_age_aligned_normalized_stems_mse,
@@ -36,7 +37,6 @@ from projection_core import (
     fit_production_model,
     has_sufficient_pattern_history,
     is_recent_sowing_series,
-    NEW_SOWING_REFERENCE_PATTERN,
     normalize_pattern_identifier,
     prepare_crop_age_series,
 )
@@ -1297,6 +1297,7 @@ def cargar_factor_diferencia_por_variedad():
     factor_global *= ajuste_global
 
     moda_signo_2026 = calcular_moda_signo_evaluacion_2026(ruta_eval)
+    ajuste_reciente = calcular_ajuste_reciente_4_semanas(ruta_eval)
 
     config_factor = {
         'factores_por_variedad': factores,
@@ -1305,12 +1306,51 @@ def cargar_factor_diferencia_por_variedad():
         'ajuste_real_2026_global': ajuste_global,
         'moda_signo_2026': moda_signo_2026['moda_por_variedad'],
         'moda_signo_2026_global': moda_signo_2026['moda_global'],
+        'ajustes_recientes_4_semanas': ajuste_reciente[
+            'ajustes_por_variedad'
+        ],
+        'ajuste_reciente_4_semanas_global': ajuste_reciente[
+            'ajuste_global'
+        ],
+        'semanas_ajuste_reciente': ajuste_reciente['semanas'],
         'mtime_factor': mtime_factor,
         'mtime_resumen': mtime_resumen,
         'mtime_errores': mtime_errores,
     }
     st.session_state[cache_key] = config_factor
     return config_factor
+
+
+def aplicar_ajuste_reciente_4_semanas(
+    pred_vals, eval_actual_df, var_proy, config_factor
+):
+    """Aplica el ajuste real reciente solo a las cuatro semanas evaluadas."""
+    pred_ajustada = np.asarray(pred_vals, dtype=float).copy()
+    if pred_ajustada.size == 0 or eval_actual_df is None or eval_actual_df.empty:
+        return pred_ajustada, 1.0, 0, 'neutral'
+
+    ajustes = config_factor.get('ajustes_recientes_4_semanas', {})
+    factor = float(ajustes.get(
+        str(var_proy),
+        config_factor.get('ajuste_reciente_4_semanas_global', 1.0),
+    ))
+    origen = 'variedad' if str(var_proy) in ajustes else 'global'
+    if not np.isfinite(factor) or factor <= 0:
+        return pred_ajustada, 1.0, 0, 'neutral'
+
+    anios = pd.to_numeric(eval_actual_df['Anio'], errors='coerce')
+    semanas = pd.to_numeric(eval_actual_df['Semana'], errors='coerce')
+    periodos = pd.DataFrame({'Anio': anios, 'Semana': semanas}).dropna()
+    if periodos.empty:
+        return pred_ajustada, factor, 0, origen
+    periodos = periodos.drop_duplicates().sort_values(['Anio', 'Semana'])
+    ultimos = set(map(tuple, periodos.tail(4).to_numpy()))
+    mascara = np.array(
+        [(a, s) in ultimos for a, s in zip(anios, semanas)], dtype=bool
+    )
+    n = min(len(pred_ajustada), len(mascara))
+    pred_ajustada[:n][mascara[:n]] *= factor
+    return pred_ajustada, factor, int(mascara[:n].sum()), origen
 
 
 def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_proy, config_factor):
@@ -1435,6 +1475,53 @@ def calcular_factor_correccion_media_anio_en_curso(df_promedio):
     if np.isclose(prom_inicio_anio, 0.0):
         return 1.0
     return prom_verano / prom_inicio_anio
+
+
+def construir_resumen_ajustes_media(df_export):
+    """Resume todos los factores de media aplicados por variedad/caso."""
+    if df_export is None or df_export.empty:
+        return pd.DataFrame()
+
+    trabajo = df_export.copy()
+    columna_variedad = next(
+        (
+            columna for columna in [
+                'Variedad_proyectada', 'Bloque&Varid', 'Variedad'
+            ] if columna in trabajo.columns
+        ),
+        None,
+    )
+    if columna_variedad is None:
+        return pd.DataFrame()
+
+    columnas = {
+        'Factor_correccion': 'Factor_media_anual',
+        'Factor_ajuste_reciente_4_semanas': 'Factor_media_ultimas_4_semanas',
+        'Semanas_factor_2026_24_52': 'Semanas_factor_2025_2026',
+        'Semanas_ajuste_reciente': 'Semanas_media_reciente',
+        'Origen_ajuste_reciente': 'Origen_media_reciente',
+        'Porcentaje_amortiguador_sugerido': 'Porcentaje_amortiguador',
+    }
+    resumen = pd.DataFrame({
+        'Variedad_proyectada': trabajo[columna_variedad].astype(str).str.strip()
+    })
+    for columna_origen, columna_resumen in columnas.items():
+        if columna_origen in trabajo.columns:
+            resumen[columna_resumen] = trabajo[columna_origen].iloc[:].values
+
+    factores_media = [
+        columna for columna in [
+            'Factor_media_anual',
+            'Factor_media_ultimas_4_semanas',
+        ] if columna in resumen.columns
+    ]
+    if factores_media:
+        valores = resumen[factores_media].apply(pd.to_numeric, errors='coerce')
+        resumen['Factor_media_combinado_informativo'] = valores.prod(axis=1)
+
+    resumen = resumen.drop_duplicates(
+        'Variedad_proyectada').reset_index(drop=True)
+    return resumen
 
 
 def resumir_proyeccion_individual(var_proy, patron_seleccionado,
@@ -3090,10 +3177,6 @@ if file_path is not None:
             raise ValueError(
                 'No hay datos suficientes para determinar la edad del cultivo.')
         target_stage = str(target_age['Etapa_cultivo'].iloc[-1])
-        target_is_new_sowing = is_recent_sowing_series(df_variedad_objetivo)
-        preferred_pattern = normalize_pattern_identifier(
-            NEW_SOWING_REFERENCE_PATTERN
-        )
         for name, group in df_patrones.groupby(['Bloque&Varid']):
             try:
                 raw_name = name[0] if isinstance(name, tuple) else name
@@ -3119,13 +3202,8 @@ if file_path is not None:
                     continue
                 candidate_stage = str(candidate_age['Etapa_cultivo'].iloc[-1])
                 stage_penalty = int(candidate_stage != target_stage)
-                preferred_penalty = int(
-                    target_is_new_sowing
-                    and normalize_pattern_identifier(candidate_name)
-                    != preferred_pattern
-                )
                 arr_list.append(
-                    (candidate_name, mse, stage_penalty, preferred_penalty)
+                    (candidate_name, mse, stage_penalty)
                 )
             except Exception:
                 continue
@@ -3133,7 +3211,7 @@ if file_path is not None:
         if not arr_list:
             raise ValueError('No hay suficientes patrones para comparar.')
 
-        arr_list.sort(key=lambda x: (x[3], x[2], x[1]))
+        arr_list.sort(key=lambda x: (x[2], x[1]))
         patron_seleccionado = seleccionar_patron(arr_list, var_proy)
         return patron_seleccionado, False
 
@@ -3606,26 +3684,11 @@ if file_path is not None:
         if media_modelo != 0 and not np.isclose(media_modelo, media_real):
             pred_vals = pred_vals * (media_real / media_modelo)
 
-        etiquetas_ingreso = eval_actual_df.apply(
-            lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}",
-            axis=1,
-        )
-        datos_ingreso = pd.DataFrame({
-            'Variedad_proyectada': [var_proy] * len(pred_vals),
-            'Anio_Semana': etiquetas_ingreso.iloc[:len(pred_vals)].values,
-            'Produccion_real': prod_real_vals,
-            'Estimado_modelo': pred_vals,
-        })
-        factor_ingreso = calcular_factor_ajuste_media_ingresos(
-            df_base, datos_ingreso
-        )
-        pred_vals = pred_vals * factor_ingreso
-
-        pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
+        pred_vals, factor_reciente, semanas_recientes, origen_reciente = aplicar_ajuste_reciente_4_semanas(
             pred_vals,
             eval_actual_df,
             var_proy,
-            config_factor_diferencia
+            config_factor_diferencia,
         )
         pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
             modelo,
@@ -3660,10 +3723,10 @@ if file_path is not None:
             'Amortiguador_sobreestimacion': amortiguador[:n_export],
             'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
             'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
-            'Factor_ajuste_ingreso': [factor_ingreso] * n_export,
-            'Factor_diferencia_2025': [factor_variedad] * n_export,
-            'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
-            'Origen_factor_2025': [origen_factor] * n_export,
+            'Factor_correccion': [factor_correccion] * n_export,
+            'Factor_ajuste_reciente_4_semanas': [factor_reciente] * n_export,
+            'Semanas_ajuste_reciente': [semanas_recientes] * n_export,
+            'Origen_ajuste_reciente': [origen_reciente] * n_export,
         })
         df_export = add_buffer_projection_columns(
             df_export,
@@ -3757,34 +3820,18 @@ if file_path is not None:
             df_export_todo = pd.DataFrame(
                 columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
 
-        if (
-            not df_export_todo.empty
-            and {'Variedad_proyectada', 'Origen_factor_2025', 'Factor_diferencia_2025'}.issubset(df_export_todo.columns)
-        ):
-            resumen_factor = (
-                df_export_todo[
-                    ['Variedad_proyectada', 'Origen_factor_2025',
-                        'Factor_diferencia_2025']
-                ]
-                .drop_duplicates(subset=['Variedad_proyectada'])
-            )
-            total_var_factor = int(len(resumen_factor))
-            var_factor_variedad = int(
-                (resumen_factor['Origen_factor_2025'] == 'variedad').sum()
-            )
-            var_factor_global = int(
-                (resumen_factor['Origen_factor_2025'] == 'global').sum()
-            )
-            var_factor_neutral = int(
-                (resumen_factor['Origen_factor_2025'] == 'neutral').sum()
-            )
-            st.caption(
-                'Factor por cambio de media 2025 aplicado en semanas 24-52 de 2026: '
-                f'{total_var_factor} variedades | '
-                f'por_variedad={var_factor_variedad}, '
-                f'global={var_factor_global}, '
-                f'neutral={var_factor_neutral}'
-            )
+        resumen_ajustes_masivo = construir_resumen_ajustes_media(
+            df_export_todo
+        )
+        if not resumen_ajustes_masivo.empty:
+            with st.expander(
+                'Resumen de todos los ajustes de media', expanded=False
+            ):
+                st.dataframe(
+                    resumen_ajustes_masivo,
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
         df_sn_por_caso = pd.DataFrame(columns=['Bloque&Varid', 'S/N'])
         if tablas_mse_masivo:
@@ -4201,27 +4248,12 @@ if file_path is not None:
     if media_modelo != 0 and not np.isclose(media_modelo, media_real):
         pred_vals = pred_vals * (media_real / media_modelo)
 
-    etiquetas_ingreso = eval_actual_df.apply(
-        lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}",
-        axis=1,
-    )
-    datos_ingreso = pd.DataFrame({
-        'Variedad_proyectada': [var_proy] * len(pred_vals),
-        'Anio_Semana': etiquetas_ingreso.iloc[:len(pred_vals)].values,
-        'Produccion_real': prod_real_vals,
-        'Estimado_modelo': pred_vals,
-    })
-    factor_ingreso = calcular_factor_ajuste_media_ingresos(
-        df, datos_ingreso
-    )
-    pred_vals = pred_vals * factor_ingreso
-
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
-    pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
+    pred_vals, factor_reciente, semanas_recientes, origen_reciente = aplicar_ajuste_reciente_4_semanas(
         pred_vals,
         eval_actual_df,
         var_proy,
-        config_factor_diferencia
+        config_factor_diferencia,
     )
     pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
         modelo,
@@ -4335,14 +4367,6 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
-    st.write(
-        'Factor por cambio de media 2025 aplicado (semanas 24-52 de 2026)',
-        round(factor_variedad, 6),
-        'origen:',
-        origen_factor,
-        'semanas afectadas:',
-        semanas_factor_aplicadas
-    )
     with st.expander('Promedio semanal Tallos/m2 por anio', expanded=False):
         st.dataframe(promedio_semanal_anual, use_container_width=True)
 
@@ -4364,15 +4388,25 @@ if file_path is not None:
         'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
         'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
         'Factor_correccion': [factor_correccion] * n_export,
-        'Factor_ajuste_ingreso': [factor_ingreso] * n_export,
-        'Factor_diferencia_2025': [factor_variedad] * n_export,
-        'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
-        'Origen_factor_2025': [origen_factor] * n_export,
+        'Factor_ajuste_reciente_4_semanas': [factor_reciente] * n_export,
+        'Semanas_ajuste_reciente': [semanas_recientes] * n_export,
+        'Origen_ajuste_reciente': [origen_reciente] * n_export,
     })
     df_export = add_buffer_projection_columns(
         df_export,
         float(m2_1),
     )
+
+    resumen_ajustes_individual = construir_resumen_ajustes_media(df_export)
+    if not resumen_ajustes_individual.empty:
+        with st.expander(
+            'Resumen de todos los ajustes de media', expanded=False
+        ):
+            st.dataframe(
+                resumen_ajustes_individual,
+                use_container_width=True,
+                hide_index=True,
+            )
 
     df_export['Error'] = (
         df_export['Produccion_real'] - df_export['Estimado_modelo']

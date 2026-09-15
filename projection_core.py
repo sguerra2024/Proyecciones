@@ -39,7 +39,6 @@ DEFAULT_EVALUATED_WEEKS = 16
 REAL_PRODUCTION_TARGET_WEIGHT = 0.55
 PESO_AJUSTE_REAL_2026 = 1.5
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
-NEW_SOWING_REFERENCE_PATTERN = "007SUMER ROMANCE"
 
 
 def calculate_evaluation_area_metrics(
@@ -123,7 +122,12 @@ def load_overestimation_calibration(
             evaluated_weeks = int(len(evaluated_periods))
 
     return {
-        "max_buffer_rate": float(absolute_error_on_prediction.median()),
+        # El amortiguador nunca puede superar el 10% del area de la variedad,
+        # aunque la calibracion historica sugiera un porcentaje mayor.
+        "max_buffer_rate": min(
+            float(absolute_error_on_prediction.median()),
+            DEFAULT_MAX_BUFFER_RATE,
+        ),
         "risk_threshold": BUFFER_RISK_THRESHOLD,
         "error_cases": int(len(relative_error)),
         "overestimation_cases": int((relative_error < 0).sum()),
@@ -374,7 +378,10 @@ def apply_overestimation_buffer(
     if signed_error.size == 0 or not np.any(~np.isclose(signed_error, 0.0)):
         return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
 
-    max_buffer_rate = float(calibration["max_buffer_rate"])
+    max_buffer_rate = min(
+        float(calibration["max_buffer_rate"]),
+        DEFAULT_MAX_BUFFER_RATE,
+    )
     risk_threshold = float(calibration["risk_threshold"])
     evaluation_cases = int(calibration.get("evaluation_cases", 0))
     if evaluation_cases <= 0:
@@ -513,8 +520,11 @@ def calculate_buffer_area_from_projection(
         buffer_stems, projected_productivity
     )
     valid_area = np.isfinite(buffer_area)
+    # Se usa floor para que el redondeo posterior de las exportaciones nunca
+    # convierta el limite en un valor superior al 10% del area disponible.
+    max_buffer_area = np.floor(total_area * DEFAULT_MAX_BUFFER_RATE)
     buffer_area[valid_area] = np.sign(buffer_area[valid_area]) * np.minimum(
-        np.abs(buffer_area[valid_area]), np.floor(total_area)
+        np.abs(buffer_area[valid_area]), max_buffer_area
     )
     return projected_productivity, buffer_area
 
@@ -706,6 +716,110 @@ def calcular_ajuste_factor_diferencia_2026(
         ajuste_global = _ponderar(suma_real_total / suma_estimado_total)
 
     return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
+
+
+def calcular_ajuste_reciente_4_semanas(
+    evaluation_dir: "Path | None" = None,
+    max_semanas: int = 4,
+    factor_minimo: float = 0.85,
+    factor_maximo: float = 1.15,
+    peso_individual: float = 0.70,
+) -> dict[str, Any]:
+    """Calcula un ajuste reciente por caso a partir de la evaluacion real.
+
+    El ajuste compara la produccion real contra ``Estimado_modelo`` en las
+    cuatro semanas mas recientes disponibles. Se usa la razon de sumas, que
+    evita dar el mismo peso a una variedad pequena y a una grande. Los casos
+    individuales se contraen hacia el factor global y se limitan para evitar
+    que una muestra corta produzca una correccion extrema.
+    """
+    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
+    errores_path = directorio / "errores_evaluacion_modelo.csv"
+    vacio = {
+        "ajustes_por_variedad": {},
+        "ajuste_global": 1.0,
+        "semanas": [],
+        "filas": 0,
+    }
+    if not errores_path.exists():
+        return vacio
+
+    try:
+        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
+    except Exception:
+        return vacio
+
+    requeridas = {
+        "Anio", "Semana", "Bloque", "Variedad",
+        "Estimado_modelo", "Produccion",
+    }
+    if not requeridas.issubset(errores_df.columns):
+        return vacio
+
+    trabajo = errores_df.copy()
+    for columna in ["Anio", "Semana", "Estimado_modelo", "Produccion"]:
+        trabajo[columna] = pd.to_numeric(trabajo[columna], errors="coerce")
+    trabajo = trabajo.dropna(subset=list(requeridas))
+    trabajo = trabajo[
+        (trabajo["Estimado_modelo"] > 0) & (trabajo["Produccion"] >= 0)
+    ].copy()
+    if trabajo.empty:
+        return vacio
+
+    periodos = (
+        trabajo[["Anio", "Semana"]]
+        .drop_duplicates()
+        .sort_values(["Anio", "Semana"])
+    )
+    periodos = periodos.tail(max(1, int(max_semanas)))
+    trabajo = trabajo.merge(periodos, on=["Anio", "Semana"], how="inner")
+    if trabajo.empty:
+        return vacio
+
+    bloque = pd.to_numeric(trabajo["Bloque"], errors="coerce")
+    trabajo["__bloque_varid"] = np.where(
+        bloque.notna(),
+        bloque.astype("Int64").astype(str).str.zfill(3)
+        + trabajo["Variedad"].astype(str).str.strip(),
+        np.nan,
+    )
+    trabajo = trabajo.dropna(subset=["__bloque_varid"])
+    if trabajo.empty:
+        return vacio
+
+    def razon(grupo: pd.DataFrame) -> float | None:
+        estimado = float(grupo["Estimado_modelo"].sum())
+        if estimado <= 0:
+            return None
+        return float(grupo["Produccion"].sum() / estimado)
+
+    razon_global = razon(trabajo)
+    if razon_global is None:
+        return vacio
+
+    peso = float(np.clip(peso_individual, 0.0, 1.0))
+
+    def limitar(valor: float) -> float:
+        return float(np.clip(valor, factor_minimo, factor_maximo))
+
+    ajuste_global = limitar(razon_global)
+    ajustes = {}
+    for variedad, grupo in trabajo.groupby("__bloque_varid"):
+        razon_variedad = razon(grupo)
+        if razon_variedad is not None:
+            ajustes[str(variedad)] = limitar(
+                peso * razon_variedad + (1.0 - peso) * razon_global
+            )
+
+    return {
+        "ajustes_por_variedad": ajustes,
+        "ajuste_global": ajuste_global,
+        "semanas": [
+            f"{int(fila.Anio)}-{int(fila.Semana):02d}"
+            for fila in periodos.itertuples(index=False)
+        ],
+        "filas": int(len(trabajo)),
+    }
 
 
 def calcular_moda_signo_evaluacion_2026(
@@ -944,10 +1058,6 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
         str(target_age["Etapa_cultivo"].iloc[-1])
         if not target_age.empty else None
     )
-    target_is_new_sowing = is_recent_sowing_series(target_rows)
-    preferred_pattern = normalize_pattern_identifier(
-        NEW_SOWING_REFERENCE_PATTERN
-    )
 
     candidates: list[dict[str, Any]] = []
     grouped = df.dropna(subset=["Bloque&Varid"]).groupby("Bloque&Varid")
@@ -971,12 +1081,6 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
             target_stage is not None
             and str(candidate_age["Etapa_cultivo"].iloc[-1]) != target_stage
         )
-        preferred_penalty = int(
-            target_is_new_sowing
-            and normalize_pattern_identifier(candidate_name)
-            != preferred_pattern
-        )
-
         candidate_series = pd.to_numeric(
             candidate_rows["Tallos/m2"], errors="coerce").dropna().reset_index(drop=True)
         candidates.append(
@@ -984,7 +1088,6 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
                 "reference_var": candidate_name,
                 "mse": mse,
                 "stage_penalty": stage_penalty,
-                "preferred_penalty": preferred_penalty,
                 "series": candidate_series,
             }
         )
@@ -992,11 +1095,7 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (
-        item["preferred_penalty"],
-        item["stage_penalty"],
-        item["mse"],
-    ))
+    candidates.sort(key=lambda item: (item["stage_penalty"], item["mse"]))
     return candidates[0]
 
 

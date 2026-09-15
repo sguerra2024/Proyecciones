@@ -107,9 +107,9 @@ Recomendaciones de calidad de datos:
 - Cada serie se clasifica en `crecimiento_sin_produccion`, `picos_iniciales` o
 	`estabilizacion`; se priorizan patrones que se encuentren en la misma etapa
 	que la variedad objetivo.
-- Cuando la variedad objetivo se identifica como siembra nueva y existe en el
-	archivo, se prioriza `007SUMER ROMANCE` como patrón de referencia, por su
-	secuencia de produccion inicial cero seguida de picos y estabilizacion.
+- Para una variedad objetivo identificada como siembra nueva, se selecciona el
+	patrón según la etapa de cultivo y el menor MSE normalizado alineado por edad;
+	no existe una variedad patrón predeterminada.
 - Antes del ranking se descartan los candidatos con menos registros validos que
 	la variedad objetivo; en ese caso se selecciona el siguiente patron por MSE.
 - Nunca se permite usar como patron la misma `Bloque&Varid` proyectada.
@@ -187,6 +187,22 @@ Se construye un dataset con historial semanal de la variedad y caracteristicas d
 - El valor aplicado queda trazado en la exportacion con el origen del factor (`variedad`, `global` o `neutral`).
 
 ### 3.7 Amortiguador de Sobreestimacion
+
+### 3.8 Resumen de ajustes de media
+
+La aplicación muestra un resumen por `Bloque&Varid` con todos los ajustes
+basados en medias que intervienen en la proyección:
+
+- `Factor_media_anual`: comparación de la media de `Tallos/m2` de las semanas
+	24-52 contra las semanas 1-23 del año en curso.
+- `Factor_media_ultimas_4_semanas`: corrección reciente por variedad basada en
+	`Produccion` frente a `Estimado_modelo`.
+- `Factor_media_combinado_informativo`: producto informativo de los factores
+	disponibles; no sustituye la trazabilidad de las semanas específicas donde
+	se aplica cada factor.
+
+El mismo resumen identifica el origen y las semanas afectadas, además del
+porcentaje sugerido del amortiguador.
 
 **El amortiguador como actuador de control**
 
