@@ -4,6 +4,7 @@ from projection_core import (
     build_production_model,
     calculate_model_error_report,
     calculate_evaluation_area_metrics,
+    calculate_age_aligned_normalized_stems_mse,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
     calculate_additional_buffer_area,
@@ -11,6 +12,8 @@ from projection_core import (
     find_reference_pattern,
     has_sufficient_pattern_history,
     load_overestimation_calibration,
+    prepare_crop_age_series,
+    is_recent_sowing_series,
     save_buffer_evaluation_report,
     train_projection_model,
 )
@@ -128,6 +131,64 @@ def test_pattern_selection_descarta_candidato_mas_corto():
     assert pattern["reference_var"] == "COMPLETO"
 
 
+def test_edad_cultivo_detecta_crecimiento_picos_y_estabilizacion():
+    rows = pd.DataFrame({
+        "Anio": [2025] * 8,
+        "Semana": list(range(1, 9)),
+        "Tallos/m2": [0.0, 0.0, 0.0, 1.0, 2.0, 1.5, 2.0, 1.8],
+        "Produccion": [0.0, 0.0, 0.0, 100.0, 220.0, 150.0, 240.0, 230.0],
+    })
+
+    prepared = prepare_crop_age_series(rows)
+
+    assert prepared["Edad_cultivo"].tolist() == list(range(8))
+    assert prepared["Etapa_cultivo"].iloc[0] == "crecimiento_sin_produccion"
+    assert prepared["Etapa_cultivo"].iloc[3] == "picos_iniciales"
+
+
+def test_mse_de_patrones_se_alinea_por_edad_y_no_por_calendario():
+    target = pd.DataFrame({
+        "Anio": [2025] * 8,
+        "Semana": list(range(1, 9)),
+        "Tallos/m2": [0.0, 0.0, 0.0, 1.0, 2.0, 1.5, 2.0, 1.8],
+        "Produccion": [0.0, 0.0, 0.0, 100.0, 220.0, 150.0, 240.0, 230.0],
+    })
+    shifted = target.copy()
+    shifted["Semana"] = shifted["Semana"] + 20
+
+    mse = calculate_age_aligned_normalized_stems_mse(target, shifted)
+
+    assert mse is not None
+    assert np.isclose(mse, 0.0)
+
+
+def test_siembra_nueva_prioriza_007_sumer_romance():
+    rows = []
+    series = {
+        "OBJETIVO": [0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 3.0, 5.0],
+        "007SUMER ROMANCE": [0.0, 0.0, 0.0, 0.0, 1.0, 8.0, 1.0, 6.0],
+        "OTRO_PATRON": [0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 3.0, 5.0],
+    }
+    for variety, values in series.items():
+        for week, stems in enumerate(values, start=1):
+            rows.append({
+                "Anio": 2025,
+                "Semana": week,
+                "Bloque&Varid": variety,
+                "Tallos/m2": stems,
+                "Produccion": stems * 100.0,
+            })
+
+    data = pd.DataFrame(rows)
+    assert is_recent_sowing_series(
+        data[data["Bloque&Varid"] == "OBJETIVO"]
+    )
+    pattern = find_reference_pattern(data, "OBJETIVO")
+
+    assert pattern is not None
+    assert pattern["reference_var"] == "007SUMER ROMANCE"
+
+
 def test_longitud_patron_cuenta_solo_filas_completas_del_modelo():
     columnas = ("Anio", "Semana", "Tallos/m2", "Produccion")
     objetivo = pd.DataFrame({
@@ -160,6 +221,17 @@ def test_signal_to_noise_uses_pattern_as_signal_and_model_error_as_noise():
     assert np.isclose(signal, 100.0)
     assert np.isclose(noise, 4.0)
     assert np.isclose(sn_ratio, 10.0 * np.log10(25.0))
+
+
+def test_signal_to_noise_decreases_when_pattern_misses_real_production():
+    _, noise, sn_ratio = calculate_pattern_signal_to_noise(
+        pattern_values=np.array([100.0, 100.0]),
+        model_values=np.array([100.0, 100.0]),
+        actual_values=np.array([10.0, 10.0]),
+    )
+
+    assert np.isclose(noise, 16200.0)
+    assert np.isclose(sn_ratio, 10.0 * np.log10(10000.0 / 16200.0))
 
 
 class _FixedProductionModel:

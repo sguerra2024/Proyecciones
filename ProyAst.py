@@ -2,6 +2,7 @@ from sklearn.metrics import mean_squared_error
 import pickle
 import io
 import hashlib
+import base64
 import importlib
 import pandas as pd
 import numpy as np
@@ -10,6 +11,7 @@ import re
 import unicodedata
 from pathlib import Path
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv, dotenv_values
 import os
 import sys
@@ -21,16 +23,28 @@ import hmac
 import time
 from datetime import datetime, timezone
 
+import ingresos_core
+
 from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
     calcular_ajuste_factor_diferencia_2026,
     calcular_moda_signo_evaluacion_2026,
     calculate_model_error_report,
-    calculate_normalized_stems_mse,
+    calculate_age_aligned_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
     fit_production_model,
     has_sufficient_pattern_history,
+    is_recent_sowing_series,
+    NEW_SOWING_REFERENCE_PATTERN,
+    normalize_pattern_identifier,
+    prepare_crop_age_series,
+)
+
+st.set_page_config(
+    page_title='Proyecciones',
+    page_icon='🎛️',
+    layout='wide',
 )
 
 agents_dir = Path(__file__).with_name("agents")
@@ -693,6 +707,7 @@ def consultar_llm(prompt_usuario):
     prompt_original = str(prompt_usuario)
     if proveedor == 'anthropic':
         prompt_original = reemplazar_astroflores_por_finca(prompt_original)
+
     prompt_enviado = (
         f'{DEFINICION_PATRON_IA}\n'
         'Definicion autorizada de AMORTIGUADOR M2: '
@@ -1033,6 +1048,17 @@ def sincronizar_readme_automaticamente():
         return None
 
 
+def clasificar_sn(valor):
+    valor_num = pd.to_numeric(valor, errors='coerce')
+    if pd.isna(valor_num):
+        return 'sin_dato'
+    if valor_num <= 7:
+        return 'alerta'
+    if valor_num >= 11:
+        return 'ok'
+    return 'sin_dato'
+
+
 def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export, dataframe=None, state=None):
     if not bytes_export:
         return
@@ -1129,6 +1155,38 @@ def crear_excel_proyeccion_masiva(
             writer, sheet_name='Analisis_avanzado', index=False
         )
     return buffer_excel.getvalue()
+
+
+def descargar_excel_automaticamente(datos, nombre_archivo='AMORTIG_ACT.xlsx'):
+    """Inicia una descarga del Excel una sola vez por contenido generado."""
+    datos_bytes = bytes(datos or b'')
+    if not datos_bytes:
+        return
+
+    contenido_hash = hashlib.sha256(datos_bytes).hexdigest()
+    estado_key = f'__descarga_automatica_excel__{nombre_archivo}'
+    if st.session_state.get(estado_key) == contenido_hash:
+        return
+
+    contenido_b64 = base64.b64encode(datos_bytes).decode('ascii')
+    nombre_seguro = str(nombre_archivo).replace('\\', '_').replace("'", '')
+    components.html(
+        f'''
+        <script>
+        (() => {{
+            const enlace = document.createElement('a');
+            enlace.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{contenido_b64}';
+            enlace.download = '{nombre_seguro}';
+            enlace.style.display = 'none';
+            document.body.appendChild(enlace);
+            enlace.click();
+            enlace.remove();
+        }})();
+        </script>
+        ''',
+        height=0,
+    )
+    st.session_state[estado_key] = contenido_hash
 
 
 def construir_cache_patrones_semanales(df_base):
@@ -1344,6 +1402,39 @@ def cargar_archivo_a_dataframe(archivo_subido):
         return pd.DataFrame()
 
     return pd.DataFrame()
+
+
+def calcular_factor_correccion_media_anio_en_curso(df_promedio):
+    if df_promedio is None or df_promedio.empty:
+        return 1.0
+
+    trabajo = df_promedio.copy()
+    trabajo['Anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
+    trabajo['Semana'] = pd.to_numeric(trabajo['Semana'], errors='coerce')
+    trabajo['Tallos/m2'] = pd.to_numeric(trabajo['Tallos/m2'], errors='coerce')
+    trabajo = trabajo.dropna(subset=['Anio', 'Semana', 'Tallos/m2'])
+    if trabajo.empty:
+        return 1.0
+
+    anio_actual = int(trabajo['Anio'].max())
+    periodo_verano = trabajo[
+        (trabajo['Anio'] == anio_actual)
+        & (trabajo['Semana'] >= 24)
+        & (trabajo['Semana'] <= 52)
+    ]
+    periodo_inicio_anio = trabajo[
+        (trabajo['Anio'] == anio_actual)
+        & (trabajo['Semana'] >= 1)
+        & (trabajo['Semana'] <= 23)
+    ]
+    if periodo_verano.empty or periodo_inicio_anio.empty:
+        return 1.0
+
+    prom_verano = float(periodo_verano['Tallos/m2'].mean())
+    prom_inicio_anio = float(periodo_inicio_anio['Tallos/m2'].mean())
+    if np.isclose(prom_inicio_anio, 0.0):
+        return 1.0
+    return prom_verano / prom_inicio_anio
 
 
 def resumir_proyeccion_individual(var_proy, patron_seleccionado,
@@ -1603,9 +1694,166 @@ def extraer_rango_semanas_pregunta(pregunta_normalizada):
     return anio, semana_inicio, anio, semana_fin
 
 
+def construir_resumen_diferencia_ingresos(df_base, df_proyeccion):
+    """Calcula la diferencia de ingreso real contra el ingreso proyectado.
+
+    Ambos valores se valoran con el mismo catalogo comercial vigente para que
+    la brecha represente una diferencia de tallos convertida a dinero, no una
+    comparacion de unidades. Si no hay catalogo o columnas suficientes, no se
+    fabrica un ingreso: se devuelve un mensaje explicito.
+    """
+    if df_proyeccion is None or df_proyeccion.empty:
+        return 'No hay calculo de ingresos: no hay proyeccion disponible.'
+
+    proyeccion = df_proyeccion.copy()
+    if 'Produccion_real' not in proyeccion.columns and (
+        df_base is not None and not df_base.empty
+    ):
+        base = df_base.copy()
+        if {'Anio', 'Semana'}.issubset(base.columns):
+            base['Anio_Semana'] = base.apply(
+                lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}"
+                if pd.notna(fila['Anio']) and pd.notna(fila['Semana'])
+                else np.nan,
+                axis=1,
+            )
+        if {'Bloque&Varid', 'Anio_Semana', 'Produccion'}.issubset(base.columns):
+            reales = base[[
+                'Bloque&Varid', 'Anio_Semana', 'Produccion'
+            ]].rename(columns={
+                'Bloque&Varid': 'Variedad_proyectada',
+                'Produccion': 'Produccion_real',
+            })
+            proyeccion = proyeccion.merge(
+                reales,
+                on=['Variedad_proyectada', 'Anio_Semana'],
+                how='left',
+            )
+
+    requeridas = {
+        'Variedad_proyectada', 'Anio_Semana',
+        'Produccion_real', 'Estimado_modelo',
+    }
+    if not requeridas.issubset(proyeccion.columns):
+        return 'No hay datos reales y proyectados suficientes para calcular ingresos.'
+
+    ruta_catalogo = Path(__file__).with_name('datos_mercado') / (
+        'catalogo_precios_historico.csv'
+    )
+    if not ruta_catalogo.exists():
+        return 'No hay catalogo de precios disponible para calcular ingresos.'
+
+    try:
+        catalogo_crudo = pd.read_csv(ruta_catalogo)
+        catalogo, fuera_de_rango = ingresos_core.normalizar_catalogo(
+            catalogo_crudo,
+            fecha_defecto=pd.Timestamp.today(),
+        )
+        fecha_corte = catalogo['fecha'].max()
+        catalogo_vigente = ingresos_core.catalogo_vigente(
+            catalogo, fecha_corte=fecha_corte
+        )
+        catalogo_precio = ingresos_core.elegir_mercado(
+            catalogo_vigente, estrategia='mejor_precio'
+        )
+
+        mapa_variedad = {}
+        if (
+            df_base is not None
+            and not df_base.empty
+            and {'Bloque&Varid', 'Variedad'}.issubset(df_base.columns)
+        ):
+            mapa_variedad = dict(
+                df_base[['Bloque&Varid', 'Variedad']]
+                .dropna()
+                .astype(str)
+                .drop_duplicates('Bloque&Varid')
+                .to_records(index=False)
+            )
+        proyeccion['__variedad_catalogo'] = proyeccion[
+            'Variedad_proyectada'
+        ].astype(str).map(mapa_variedad).fillna(
+            proyeccion['Variedad_proyectada'].astype(str)
+        )
+
+        base_valoracion = proyeccion.rename(
+            columns={'__variedad_catalogo': 'variedad'}
+        )[['variedad', 'Anio_Semana', 'Produccion_real', 'Estimado_modelo']].copy()
+        base_valoracion['variedad'] = base_valoracion['variedad'].astype(
+            str).str.upper()
+        base_valoracion['Produccion_real'] = pd.to_numeric(
+            base_valoracion['Produccion_real'], errors='coerce'
+        )
+        base_valoracion['Estimado_modelo'] = pd.to_numeric(
+            base_valoracion['Estimado_modelo'], errors='coerce'
+        )
+        base_valoracion = base_valoracion.dropna(
+            subset=['Produccion_real', 'Estimado_modelo']
+        )
+        if base_valoracion.empty:
+            return 'No hay datos reales y proyectados validos para calcular ingresos.'
+
+        def valorar(columna):
+            entrada = base_valoracion[
+                ['variedad', 'Anio_Semana', columna]
+            ].rename(columns={columna: 'tallos'})
+            return ingresos_core.calcular_ingresos(
+                entrada,
+                catalogo_precio,
+                mix_fuera_de_rango=fuera_de_rango,
+                mapeo_proyeccion={
+                    'variedad': 'variedad',
+                    'tallos': 'tallos',
+                    'semana': 'Anio_Semana',
+                },
+            ).totales.get('ingreso_base', 0.0)
+
+        ingreso_real = float(valorar('Produccion_real'))
+        ingreso_modelo = float(valorar('Estimado_modelo'))
+        diferencia = ingreso_modelo - ingreso_real
+        porcentaje = (
+            diferencia / ingreso_real * 100.0
+            if ingreso_real else np.nan
+        )
+        return (
+            'DIFERENCIA REAL DE INGRESOS (calculada con el catalogo vigente; '
+            'no recalcular):\n'
+            f'Ingreso real valorado: {ingreso_real:,.2f}\n'
+            f'Ingreso modelo valorado: {ingreso_modelo:,.2f}\n'
+            f'Brecha modelo-real: {diferencia:,.2f} '
+            f'({porcentaje:.2f}% sobre el ingreso real)\n'
+            f'Registros valorados: {len(base_valoracion)}'
+        )
+    except (KeyError, ValueError, TypeError, OSError) as exc:
+        return f'No fue posible calcular diferencias de ingreso: {exc}'
+
+
+def calcular_factor_ajuste_media_ingresos(df_base, df_proyeccion,
+                                          minimo=0.5, maximo=1.5):
+    """Devuelve el factor acotado que alinea ingreso modelo con ingreso real."""
+    resumen = construir_resumen_diferencia_ingresos(df_base, df_proyeccion)
+    if 'Ingreso real valorado:' not in resumen or 'Ingreso modelo valorado:' not in resumen:
+        return 1.0
+
+    try:
+        real_texto = re.search(
+            r'Ingreso real valorado:\s*([\d,.]+)', resumen).group(1)
+        modelo_texto = re.search(
+            r'Ingreso modelo valorado:\s*([\d,.]+)', resumen).group(1)
+        ingreso_real = float(real_texto.replace(',', ''))
+        ingreso_modelo = float(modelo_texto.replace(',', ''))
+    except (AttributeError, TypeError, ValueError):
+        return 1.0
+
+    if ingreso_real <= 0 or ingreso_modelo <= 0:
+        return 1.0
+    return float(np.clip(ingreso_real / ingreso_modelo, minimo, maximo))
+
+
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                                  df_proyeccion=None, df_archivo_sincronizado=None,
-                                 nombre_archivo_sincronizado=''):
+                                 nombre_archivo_sincronizado='',
+                                 resumen_ingresos=None):
     pregunta_limpia = str(pregunta_usuario).strip()
     if not pregunta_limpia:
         raise ValueError(
@@ -1674,6 +1922,15 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         if not resumen.empty:
             resumen_info = resumen.to_csv(index=False)
 
+    resumen_ingresos_info = (
+        str(resumen_ingresos).strip()
+        if resumen_ingresos is not None and str(resumen_ingresos).strip()
+        else construir_resumen_diferencia_ingresos(
+            contexto_df,
+            df_proyeccion,
+        )
+    )
+
     rango_semanas = extraer_rango_semanas_pregunta(pregunta_normalizada)
     resumen_rango_info = ''
     if rango_semanas is not None:
@@ -1694,6 +1951,12 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         '12 semanas disponibles de 2026 o posteriores y el producto de ambos '
         'valores. No muestres otras metricas ni inventes datos. '
     )
+    if 'DIFERENCIA REAL DE INGRESOS' in resumen_ingresos_info:
+        restricciones_respuesta += (
+            'Cuando se consulte por ingresos, usa exclusivamente la diferencia '
+            'real ya calculada entre ingreso modelo e ingreso real; no conviertas '
+            'tallos a dinero nuevamente ni inventes precios. '
+        )
     if resumen_rango_info:
         restricciones_respuesta += (
             'Para la pregunta sobre el rango de semanas/anio solicitado, usa '
@@ -1724,12 +1987,19 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'Finca en contexto: {finca_contexto}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
+        'Resumen de ingresos calculados (no recalcular ni recalcules):\n'
+        f'{resumen_ingresos_info}\n'
         f'{seccion_rango}'
         f'{seccion_web}'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
-    return consultar_llm(prompt)
+    try:
+        return consultar_llm(prompt, max_tokens=1024)
+    except TypeError as exc:
+        if 'max_tokens' not in str(exc):
+            raise
+        return consultar_llm(prompt)
 
 
 def alinear_series_para_ajuste(*series):
@@ -2083,6 +2353,44 @@ def construir_objetivo_entrenamiento_con_patron(
     )
 
 
+def entrenar_y_predecir_modelo_compartido(
+    x_train_df,
+    y_train,
+    x_frame,
+    var_proy,
+):
+    """Entrena/reutiliza y predice igual en los flujos individual y masivo."""
+    x_train = x_train_df.reset_index(drop=True).copy()
+    x_predict = x_frame.reset_index(drop=True).copy()
+    y_values = np.asarray(y_train, dtype=float).reshape(-1)
+    if len(x_train) != len(y_values):
+        raise ValueError(
+            'Las variables y el objetivo de entrenamiento deben tener igual longitud.'
+        )
+
+    firma = hashlib.sha256()
+    firma.update(
+        pd.util.hash_pandas_object(x_train, index=True).to_numpy().tobytes()
+    )
+    firma.update(np.asarray(y_values, dtype=np.float64).tobytes())
+    firma.update('|'.join(map(str, x_train.columns)).encode('utf-8'))
+    firma_modelo = firma.hexdigest()[:16]
+    nombre_modelo = ''.join(
+        ch if ch.isalnum() else '_' for ch in str(var_proy)
+    )
+    train_key = f'entrenado_compartido_{nombre_modelo}_{firma_modelo}_v5'
+
+    modelo_existente = train_key in st.session_state
+    if modelo_existente:
+        modelo = st.session_state[train_key]
+    else:
+        modelo = fit_production_model(x_train, y_values)
+        st.session_state[train_key] = modelo
+
+    predicciones = modelo.predict(x_predict)
+    return modelo, np.asarray(predicciones, dtype=float), train_key, not modelo_existente
+
+
 models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
 
@@ -2092,11 +2400,12 @@ if logo_path.exists():
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
-    with st.expander("Ver README"):
+    with st.expander("Ver README", expanded=False):
         try:
-            st.markdown(readme_path.read_text(encoding="utf-8"))
+            contenido_readme = readme_path.read_text(encoding="utf-8")
         except Exception:
-            st.code(readme_path.read_text(errors="ignore"))
+            contenido_readme = readme_path.read_text(errors="ignore")
+        st.markdown(contenido_readme)
 
 llm_ok, llm_estado = estado_configuracion_llm()
 if llm_ok:
@@ -2774,9 +3083,17 @@ if file_path is not None:
         return candidatos[0]
 
     def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy):
-        # Replica exacta de la comparacion del flujo individual para mantener
-        # el mismo patron seleccionado en la corrida masiva.
+        # Individual y masiva comparten esta seleccion por edad del cultivo.
         arr_list = []
+        target_age = prepare_crop_age_series(df_variedad_objetivo)
+        if target_age.empty:
+            raise ValueError(
+                'No hay datos suficientes para determinar la edad del cultivo.')
+        target_stage = str(target_age['Etapa_cultivo'].iloc[-1])
+        target_is_new_sowing = is_recent_sowing_series(df_variedad_objetivo)
+        preferred_pattern = normalize_pattern_identifier(
+            NEW_SOWING_REFERENCE_PATTERN
+        )
         for name, group in df_patrones.groupby(['Bloque&Varid']):
             try:
                 raw_name = name[0] if isinstance(name, tuple) else name
@@ -2791,53 +3108,32 @@ if file_path is not None:
                     ),
                 ):
                     continue
-                mse = calculate_normalized_stems_mse(
+                mse = calculate_age_aligned_normalized_stems_mse(
                     df_variedad_objetivo,
                     group,
                 )
                 if mse is None:
                     continue
-                patron_weekly = construir_patron_semanal(group)
-                trabajo = (
-                    df_variedad_objetivo[[
-                        'Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-                    .dropna()
-                    .reset_index(drop=True)
+                candidate_age = prepare_crop_age_series(group)
+                if candidate_age.empty:
+                    continue
+                candidate_stage = str(candidate_age['Etapa_cultivo'].iloc[-1])
+                stage_penalty = int(candidate_stage != target_stage)
+                preferred_penalty = int(
+                    target_is_new_sowing
+                    and normalize_pattern_identifier(candidate_name)
+                    != preferred_pattern
                 )
-                trabajo['Anio'] = pd.to_numeric(
-                    trabajo['Anio'], errors='coerce')
-                trabajo['Semana'] = pd.to_numeric(
-                    trabajo['Semana'], errors='coerce')
-                trabajo['Tallos/m2'] = pd.to_numeric(
-                    trabajo['Tallos/m2'], errors='coerce')
-                trabajo['Produccion'] = pd.to_numeric(
-                    trabajo['Produccion'], errors='coerce')
-                trabajo = trabajo.dropna(
-                    subset=['Anio', 'Semana', 'Tallos/m2', 'Produccion']
+                arr_list.append(
+                    (candidate_name, mse, stage_penalty, preferred_penalty)
                 )
-                trabajo['Anio'] = trabajo['Anio'].astype(int)
-                trabajo['Semana'] = trabajo['Semana'].astype(int)
-                trabajo = trabajo.sort_values(
-                    ['Anio', 'Semana']).reset_index(drop=True)
-                trabajo = trabajo.merge(
-                    patron_weekly,
-                    on=['Anio', 'Semana'],
-                    how='left'
-                )
-                trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
-                    trabajo['Tallos/m2']
-                )
-                trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
-                    trabajo['Produccion']
-                )
-                arr_list.append((candidate_name, mse))
             except Exception:
                 continue
 
         if not arr_list:
             raise ValueError('No hay suficientes patrones para comparar.')
 
-        arr_list.sort(key=lambda x: x[1])
+        arr_list.sort(key=lambda x: (x[3], x[2], x[1]))
         patron_seleccionado = seleccionar_patron(arr_list, var_proy)
         return patron_seleccionado, False
 
@@ -3082,12 +3378,10 @@ if file_path is not None:
             return df_tabla
 
         def estilo_sn(valor):
-            valor_num = pd.to_numeric(valor, errors='coerce')
-            if pd.isna(valor_num):
-                return ''
-            if valor_num > 13:
+            estado = clasificar_sn(valor)
+            if estado == 'ok':
                 return 'background-color: #C6EFCE; color: #006100; font-weight: 700;'
-            if valor_num <= 9:
+            if estado == 'alerta':
                 return 'background-color: #F28C28; color: #5A2D00; font-weight: 700;'
             return ''
 
@@ -3269,25 +3563,33 @@ if file_path is not None:
         y_frame = pd.DataFrame(
             eval_actual_df['Produccion']).reset_index(drop=True)
 
-        split_idx = len(x_train_df)
-        split_idx = max(split_idx, 1)
-
-        model_name = ''.join(
-            ch if ch.isalnum() else '_' for ch in str(var_proy))
-        train_key = f'entrenado_masivo_{model_name}_cal_v4'
-
-        if train_key not in st.session_state:
-            modelo = fit_production_model(
-                x_train_df.iloc[:split_idx],
-                y_train_df.iloc[:split_idx].values.ravel()
+        if {'Anio', 'Semana', 'Tallos/m2'}.issubset(y_actual.columns):
+            promedio_semanal = (
+                y_actual[['Anio', 'Semana', 'Tallos/m2']]
+                .dropna()
+                .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
+                .mean()
             )
-            st.session_state[train_key] = modelo
         else:
-            modelo = st.session_state[train_key]
+            promedio_semanal = pd.DataFrame(
+                columns=['Anio', 'Semana', 'Tallos/m2']
+            )
+        factor_correccion = calcular_factor_correccion_media_anio_en_curso(
+            promedio_semanal
+        ) if not promedio_semanal.empty else 1.0
+        if np.isclose(factor_correccion, 0.0) or not np.isfinite(factor_correccion):
+            factor_correccion = 1.0
 
-        y_pred = pd.DataFrame(modelo.predict(x_frame),
-                              columns=['Estimado_modelo'])
+        modelo, predicciones, _, _ = entrenar_y_predecir_modelo_compartido(
+            x_train_df,
+            y_train_df.values.ravel(),
+            x_frame,
+            var_proy,
+        )
+
+        y_pred = pd.DataFrame(predicciones, columns=['Estimado_modelo'])
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
+        pred_vals = pred_vals * factor_correccion
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
         prod_real_vals = y_frame.iloc[:len(proy_vals), 0].to_numpy(copy=True)
         pred_vals, proy_vals, prod_real_vals = alinear_series_para_ajuste(
@@ -3303,6 +3605,21 @@ if file_path is not None:
                              ) if pred_vals.size else np.nan
         if media_modelo != 0 and not np.isclose(media_modelo, media_real):
             pred_vals = pred_vals * (media_real / media_modelo)
+
+        etiquetas_ingreso = eval_actual_df.apply(
+            lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}",
+            axis=1,
+        )
+        datos_ingreso = pd.DataFrame({
+            'Variedad_proyectada': [var_proy] * len(pred_vals),
+            'Anio_Semana': etiquetas_ingreso.iloc[:len(pred_vals)].values,
+            'Produccion_real': prod_real_vals,
+            'Estimado_modelo': pred_vals,
+        })
+        factor_ingreso = calcular_factor_ajuste_media_ingresos(
+            df_base, datos_ingreso
+        )
+        pred_vals = pred_vals * factor_ingreso
 
         pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
             pred_vals,
@@ -3343,6 +3660,7 @@ if file_path is not None:
             'Amortiguador_sobreestimacion': amortiguador[:n_export],
             'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
             'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
+            'Factor_ajuste_ingreso': [factor_ingreso] * n_export,
             'Factor_diferencia_2025': [factor_variedad] * n_export,
             'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
             'Origen_factor_2025': [origen_factor] * n_export,
@@ -3574,6 +3892,17 @@ if file_path is not None:
             df_estimado_ordenado.reset_index(drop=True),
             columnas_base_export,
         )
+        buffer_amortig_act_masivo = io.BytesIO()
+        with pd.ExcelWriter(buffer_amortig_act_masivo, engine='openpyxl') as writer:
+            df_export_amortiguado.to_excel(
+                writer,
+                sheet_name='Amortiguador_generado',
+                index=False,
+            )
+        descargar_excel_automaticamente(
+            buffer_amortig_act_masivo.getvalue(),
+            'AMORTIG_ACT.xlsx',
+        )
 
         variedades_unicas_proyectadas = (
             df_export_estimado['Variedad']
@@ -3788,22 +4117,13 @@ if file_path is not None:
         .sort_values('Anio')
     )
 
-    factor_correccion = 1.4
-    if not promedio_semanal_anual.empty:
-        anio_objetivo = promedio_semanal_anual['Anio'].max()
-        prom_objetivo = float(
-            promedio_semanal_anual.loc[
-                promedio_semanal_anual['Anio'] == anio_objetivo,
-                'promedio_semanal_tallos_m2'
-            ].iloc[0]
+    factor_correccion = 1.0
+    if not promedio_semanal.empty:
+        factor_correccion = calcular_factor_correccion_media_anio_en_curso(
+            promedio_semanal
         )
-        historico = promedio_semanal_anual[
-            promedio_semanal_anual['Anio'] != anio_objetivo
-        ]['promedio_semanal_tallos_m2']
-        prom_historico = float(
-            historico.mean()) if not historico.empty else prom_objetivo
-        if prom_historico != 0:
-            factor_correccion = prom_objetivo / prom_historico
+    if np.isclose(factor_correccion, 0.0) or not np.isfinite(factor_correccion):
+        factor_correccion = 1.0
 
     n_train = len(entrenamiento_df)
     if n_train == 0:
@@ -3829,21 +4149,23 @@ if file_path is not None:
 
     split_idx = len(x_train_df)
     split_idx = max(split_idx, 1)
-    X_train = x_train_df.iloc[:split_idx]
-    y_train = y_train_df.iloc[:split_idx]
     inicio_train = entrenamiento_df.iloc[0]
     fin_train = entrenamiento_df.iloc[split_idx - 1]
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    train_key = f'entrenado_{model_name}_cal_v4'
+    modelo, predicciones, train_key, modelo_nuevo = (
+        entrenar_y_predecir_modelo_compartido(
+            x_train_df,
+            y_train_df.values.ravel(),
+            x_frame,
+            var_proy,
+        )
+    )
 
-    if train_key not in st.session_state:
-        modelo = fit_production_model(X_train, y_train.values.ravel())
-        st.session_state[train_key] = modelo
+    if modelo_nuevo:
         with open(model_file, 'wb') as f:
             pickle.dump(modelo, f)
-        # st.info('Modelo entrenado automaticamente una vez con el 80% de los datos.')
         st.caption(
             'Rango de entrenamiento usado: '
             f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
@@ -3852,9 +4174,9 @@ if file_path is not None:
         )
         st.caption(f'Modelo guardado en: {model_file.name}')
     else:
-        modelo = st.session_state[train_key]
         st.caption(
-            'Modelo ya entrenado en esta sesion; se reutiliza para la proyeccion.')
+            'Modelo compartido ya entrenado en esta sesion; se reutiliza '
+            'para la proyeccion.')
         st.caption(
             'Rango de entrenamiento configurado: '
             f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
@@ -3862,7 +4184,7 @@ if file_path is not None:
             f"({split_idx} de {len(entrenamiento_df)} registros)."
         )
 
-    pred_1 = modelo.predict(x_frame)
+    pred_1 = predicciones
 
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
     y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
@@ -3878,6 +4200,21 @@ if file_path is not None:
     media_modelo = pred_vals.mean()
     if media_modelo != 0 and not np.isclose(media_modelo, media_real):
         pred_vals = pred_vals * (media_real / media_modelo)
+
+    etiquetas_ingreso = eval_actual_df.apply(
+        lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}",
+        axis=1,
+    )
+    datos_ingreso = pd.DataFrame({
+        'Variedad_proyectada': [var_proy] * len(pred_vals),
+        'Anio_Semana': etiquetas_ingreso.iloc[:len(pred_vals)].values,
+        'Produccion_real': prod_real_vals,
+        'Estimado_modelo': pred_vals,
+    })
+    factor_ingreso = calcular_factor_ajuste_media_ingresos(
+        df, datos_ingreso
+    )
+    pred_vals = pred_vals * factor_ingreso
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
     pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
@@ -4027,6 +4364,7 @@ if file_path is not None:
         'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
         'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
         'Factor_correccion': [factor_correccion] * n_export,
+        'Factor_ajuste_ingreso': [factor_ingreso] * n_export,
         'Factor_diferencia_2025': [factor_variedad] * n_export,
         'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
         'Origen_factor_2025': [origen_factor] * n_export,
@@ -4092,6 +4430,59 @@ if file_path is not None:
     df_export_amortiguado_individual = simplificar_salida_amortiguada(
         df_export,
         ['Variedad_proyectada', 'Anio_Semana'],
+    )
+    df_amortiguador_generado = df_export[
+        [
+            'Variedad_proyectada',
+            'Anio_Semana',
+            'Amortiguador_sobreestimacion',
+            'M2_amortiguador_adicional',
+            'Estimado_con_amortiguador_IA',
+            'Porcentaje_amortiguador_sugerido',
+        ]
+    ].copy()
+    df_amortiguador_generado['Amortiguador_sobreestimacion'] = pd.to_numeric(
+        df_amortiguador_generado['Amortiguador_sobreestimacion'],
+        errors='coerce',
+    ).round(2)
+    df_amortiguador_generado['M2_amortiguador_adicional'] = np.rint(
+        pd.to_numeric(
+            df_amortiguador_generado['M2_amortiguador_adicional'],
+            errors='coerce',
+        )
+    ).astype('Int64')
+    df_amortiguador_generado['Estimado_con_amortiguador_IA'] = np.rint(
+        pd.to_numeric(
+            df_amortiguador_generado['Estimado_con_amortiguador_IA'],
+            errors='coerce',
+        )
+    ).astype('Int64')
+    df_amortiguador_generado['Porcentaje_amortiguador_sugerido'] = pd.to_numeric(
+        df_amortiguador_generado['Porcentaje_amortiguador_sugerido'],
+        errors='coerce',
+    ).round(2)
+    df_amortiguador_generado = df_amortiguador_generado.rename(columns={
+        'M2_amortiguador_adicional': 'M2 Amortiguador',
+        'Estimado_con_amortiguador_IA': 'Proyeccion_con_amortiguador_IA',
+        'Porcentaje_amortiguador_sugerido': '% Amortiguador sugerido',
+    })
+    buffer_amortiguador = io.BytesIO()
+    with pd.ExcelWriter(buffer_amortiguador, engine='openpyxl') as writer:
+        df_amortiguador_generado.to_excel(
+            writer,
+            sheet_name='Amortiguador_generado',
+            index=False,
+        )
+    descargar_excel_automaticamente(
+        buffer_amortiguador.getvalue(),
+        'AMORTIG_ACT.xlsx',
+    )
+    st.download_button(
+        'Exportar amortiguador generado',
+        data=buffer_amortiguador.getvalue(),
+        file_name='AMORTIG_ACT.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        key='descargar_amortiguador_generado'
     )
     base_proy_individual = df_export_amortiguado_individual.copy()
     base_proy_individual['Finca_proyectada'] = str(selected_finca)

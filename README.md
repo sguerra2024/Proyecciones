@@ -99,6 +99,17 @@ Recomendaciones de calidad de datos:
 - Para la IA, `PATRON` es la mejor opcion historica distinta del mismo `Bloque&Varid` proyectado, cuyo ajuste (`FIT`) respecto a los `Tallos/m2` actuales permite realizar una proyeccion futura.
 - Cada serie de `Tallos/m2` se normaliza a media 0 y desviacion estandar 1.
 - Se selecciona como patron el candidato con menor MSE entre las series normalizadas.
+- Para cultivos con siembra reciente, la comparacion se alinea por `Edad_cultivo`
+	(semanas desde la primera semana observada), no por `Anio-Semana`.
+- Si no existe una columna explicita de siembra, la primera semana observada se
+	usa como inicio del cultivo y la primera semana con `Produccion > 0` como
+	inicio productivo.
+- Cada serie se clasifica en `crecimiento_sin_produccion`, `picos_iniciales` o
+	`estabilizacion`; se priorizan patrones que se encuentren en la misma etapa
+	que la variedad objetivo.
+- Cuando la variedad objetivo se identifica como siembra nueva y existe en el
+	archivo, se prioriza `007SUMER ROMANCE` como patrón de referencia, por su
+	secuencia de produccion inicial cero seguida de picos y estabilizacion.
 - Antes del ranking se descartan los candidatos con menos registros validos que
 	la variedad objetivo; en ese caso se selecciona el siguiente patron por MSE.
 - Nunca se permite usar como patron la misma `Bloque&Varid` proyectada.
@@ -408,6 +419,22 @@ Incluye:
 - `projection_core.py`: modelo de produccion compartido por Streamlit y API.
 - `Evaluacion/errores_evaluacion_modelo.csv`: errores relativos usados para calibrar el amortiguador.
 - `modelos/`: modelos serializados por variedad.
+
+### Flujo del modelo y amortiguador
+
+```mermaid
+flowchart LR
+	patron[Patrón] --> proceso
+	produccion[Producción] --> proceso
+	senal[Señal de error] --> proceso
+
+	proceso[PROCESO<br/>Random Forest<br/>(regresión)] --> proyeccion[Proyección]
+	proyeccion -->|Error| comparador((X))
+	comparador --> amortiguador[Amortiguador]
+	amortiguador --> actuador[Actuador]
+	actuador -->|Retroalimentación| senal
+```
+
 
 ## 8. Observaciones Operativas
 

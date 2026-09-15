@@ -41,6 +41,47 @@ def _info_carga(modo="local", file_id="local-session", nombre="export.xlsx", fil
     }
 
 
+def test_resumen_diferencia_ingresos_valora_real_y_modelo_con_el_mismo_catalogo(
+    monkeypatch, tmp_path
+):
+    catalogo_dir = tmp_path / 'datos_mercado'
+    catalogo_dir.mkdir()
+    (catalogo_dir / 'catalogo_precios_historico.csv').write_text(
+        'fecha,variedad,grado,mercado,pct,fraccion,precio\n'
+        '2026-08-11,MONDIAL,60CM,UNICO,100,1,0.50\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(ProyAst, '__file__', str(tmp_path / 'ProyAst.py'))
+
+    base = pd.DataFrame({
+        'Finca': ['BL25'],
+        'Bloque&Varid': ['001MONDIAL'],
+        'Variedad': ['MONDIAL'],
+        'Anio': [2026],
+        'Semana': [32],
+        'Produccion': [1000.0],
+    })
+    proyeccion = pd.DataFrame({
+        'Variedad_proyectada': ['001MONDIAL'],
+        'Anio_Semana': ['2026-32'],
+        'Produccion_real': [1000.0],
+        'Estimado_modelo': [800.0],
+    })
+
+    resumen = ProyAst.construir_resumen_diferencia_ingresos(
+        base, proyeccion
+    )
+
+    assert 'Ingreso real valorado: 500.00' in resumen
+    assert 'Ingreso modelo valorado: 400.00' in resumen
+    assert 'Brecha modelo-real: -100.00 (-20.00%' in resumen
+
+    factor = ProyAst.calcular_factor_ajuste_media_ingresos(
+        base, proyeccion
+    )
+    assert factor == pytest.approx(1.25)
+
+
 # --- preparar_estado_para_nuevo_archivo_base -------------------------------
 
 def test_preparar_estado_para_nuevo_archivo_base_preserva_contexto_sesion():

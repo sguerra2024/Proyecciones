@@ -100,6 +100,28 @@ def _extract_semana_min_max_from_excel(excel_path, sheet_name=0):
     return int(semana_series.min()), int(semana_series.max())
 
 
+def _area_percentages(area_positive, area_negative):
+    """Normaliza las areas positiva y negativa para que sumen 100%."""
+    total_area = abs(float(area_positive)) + abs(float(area_negative))
+    if total_area == 0:
+        return 0.0, 0.0
+    return (
+        abs(float(area_positive)) / total_area * 100.0,
+        abs(float(area_negative)) / total_area * 100.0,
+    )
+
+
+def _cumulative_data_percentage(values, threshold=0.25):
+    """Calcula el porcentaje acumulado de datos dentro de ±threshold."""
+    valid_values = [float(value) for value in values if pd.notna(value)]
+    if not valid_values:
+        return 0.0
+    cases_within_threshold = sum(
+        abs(value) <= abs(float(threshold)) for value in valid_values
+    )
+    return cases_within_threshold / len(valid_values) * 100.0
+
+
 def plot_series_evaluation_from_values(values, output_prefix, title='Evaluacion proyecciones Modelo vs real semanas:', interval=20, show_before_save=True, semana_min=None, semana_max=None):
     ordered_values = sorted(values, reverse=True)
     x_values = list(range(1, len(ordered_values) + 1))
@@ -107,6 +129,11 @@ def plot_series_evaluation_from_values(values, output_prefix, title='Evaluacion 
     area_metrics = calculate_evaluation_area_metrics(ordered_values)
     area_positive = area_metrics['area_positive']
     area_negative = abs(area_metrics['area_negative'])
+    area_positive_pct, area_negative_pct = _area_percentages(
+        area_positive,
+        area_negative,
+    )
+    cumulative_25_pct = _cumulative_data_percentage(ordered_values)
 
     thresholds = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     counts = {}
@@ -154,8 +181,9 @@ def plot_series_evaluation_from_values(values, output_prefix, title='Evaluacion 
     ax.legend(loc='upper right')
 
     metrics_lines = [
-        f'Area positiva: {area_positive:.3f}',
-        f'Area negativa: {area_negative:.3f}',
+        f'Area positiva: {area_positive_pct:.2f}%',
+        f'Area negativa: {area_negative_pct:.2f}%',
+        f'Datos acumulados hasta ±25%: {cumulative_25_pct:.2f}%',
     ]
     if semana_min is not None and semana_max is not None:
         metrics_lines.append(f'Semana min/max: {semana_min} - {semana_max}')

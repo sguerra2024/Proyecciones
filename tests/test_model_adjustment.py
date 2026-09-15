@@ -11,6 +11,8 @@ from ProyAst import (  # noqa: E402
     ajustar_patron_con_extremos_real,
     ajustar_prediccion_modelo_con_patron,
     alinear_series_para_ajuste,
+    calcular_factor_correccion_media_anio_en_curso,
+    clasificar_sn,
     construir_objetivo_entrenamiento_con_patron,
 )
 from projection_core import _apply_difference_factor  # noqa: E402
@@ -37,6 +39,26 @@ def test_factor_media_2025_se_aplica_solo_semanas_24_a_52_de_2026(monkeypatch):
 
     np.testing.assert_array_equal(ajustadas_core, ajustadas)
     assert afectadas_core == 2
+
+
+def test_factor_media_compara_verano_con_inicio_del_mismo_anio():
+    promedio = pd.DataFrame({
+        'Anio': [2025, 2025, 2026, 2026, 2026, 2026],
+        'Semana': [1, 24, 1, 23, 24, 52],
+        'Tallos/m2': [300.0, 300.0, 100.0, 100.0, 70.0, 70.0],
+    })
+
+    factor = calcular_factor_correccion_media_anio_en_curso(promedio)
+
+    assert np.isclose(factor, 0.7)
+
+
+def test_clasificacion_sn_alerta_con_7_db_o_menos():
+    assert clasificar_sn(7.0) == 'alerta'
+    for valor in [7.1, 8.0, 8.348, 9.0, 10.0, 10.999]:
+        assert clasificar_sn(valor) == 'sin_dato'
+    for valor in [11.0, 13.0]:
+        assert clasificar_sn(valor) == 'ok'
 
 
 def test_prediccion_no_se_mezcla_con_patron_ni_produccion_real():

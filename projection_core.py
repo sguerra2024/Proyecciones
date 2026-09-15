@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+import re
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,7 @@ DEFAULT_EVALUATED_WEEKS = 16
 REAL_PRODUCTION_TARGET_WEIGHT = 0.55
 PESO_AJUSTE_REAL_2026 = 1.5
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
+NEW_SOWING_REFERENCE_PATTERN = "007SUMER ROMANCE"
 
 
 def calculate_evaluation_area_metrics(
@@ -937,6 +939,15 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
 
     target_rows = df[df["Bloque&Varid"].astype(
         str) == str(selected_var)].copy()
+    target_age = prepare_crop_age_series(target_rows)
+    target_stage = (
+        str(target_age["Etapa_cultivo"].iloc[-1])
+        if not target_age.empty else None
+    )
+    target_is_new_sowing = is_recent_sowing_series(target_rows)
+    preferred_pattern = normalize_pattern_identifier(
+        NEW_SOWING_REFERENCE_PATTERN
+    )
 
     candidates: list[dict[str, Any]] = []
     grouped = df.dropna(subset=["Bloque&Varid"]).groupby("Bloque&Varid")
@@ -947,9 +958,24 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
         if not has_sufficient_pattern_history(target_rows, candidate_rows):
             continue
 
-        mse = calculate_normalized_stems_mse(target_rows, candidate_rows)
+        mse = calculate_age_aligned_normalized_stems_mse(
+            target_rows,
+            candidate_rows,
+        )
         if mse is None:
             continue
+        candidate_age = prepare_crop_age_series(candidate_rows)
+        if candidate_age.empty:
+            continue
+        stage_penalty = int(
+            target_stage is not None
+            and str(candidate_age["Etapa_cultivo"].iloc[-1]) != target_stage
+        )
+        preferred_penalty = int(
+            target_is_new_sowing
+            and normalize_pattern_identifier(candidate_name)
+            != preferred_pattern
+        )
 
         candidate_series = pd.to_numeric(
             candidate_rows["Tallos/m2"], errors="coerce").dropna().reset_index(drop=True)
@@ -957,6 +983,8 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
             {
                 "reference_var": candidate_name,
                 "mse": mse,
+                "stage_penalty": stage_penalty,
+                "preferred_penalty": preferred_penalty,
                 "series": candidate_series,
             }
         )
@@ -964,7 +992,11 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: item["mse"])
+    candidates.sort(key=lambda item: (
+        item["preferred_penalty"],
+        item["stage_penalty"],
+        item["mse"],
+    ))
     return candidates[0]
 
 
@@ -1015,11 +1047,124 @@ def calculate_normalized_stems_mse(
     return float(np.mean((target_normalized - candidate_normalized) ** 2))
 
 
+def prepare_crop_age_series(rows: pd.DataFrame) -> pd.DataFrame:
+    """Agrega edad del cultivo y etapa a una serie semanal.
+
+    Cuando no existe una columna de siembra, la primera semana observada se
+    usa como inicio del cultivo. La primera semana con produccion positiva
+    marca el inicio productivo; esto permite distinguir crecimiento, picos
+    iniciales y estabilizacion.
+    """
+    required = {"Anio", "Semana", "Tallos/m2"}
+    if not required.issubset(rows.columns):
+        return pd.DataFrame()
+
+    working = rows.copy()
+    working["__anio"] = pd.to_numeric(working["Anio"], errors="coerce")
+    working["__semana"] = pd.to_numeric(working["Semana"], errors="coerce")
+    working["__tallos"] = pd.to_numeric(working["Tallos/m2"], errors="coerce")
+    if "Produccion" in working.columns:
+        working["__produccion"] = pd.to_numeric(
+            working["Produccion"], errors="coerce"
+        )
+    else:
+        working["__produccion"] = np.nan
+
+    working = working.dropna(subset=["__anio", "__semana", "__tallos"])
+    if working.empty:
+        return pd.DataFrame()
+    working = working.sort_values(
+        ["__anio", "__semana"]).reset_index(drop=True)
+    ordinal = working["__anio"] * 53 + working["__semana"]
+    start_ordinal = float(ordinal.min())
+    working["Edad_cultivo"] = (ordinal - start_ordinal).astype(int)
+
+    productive = working.loc[
+        working["__produccion"].fillna(0.0) > 0.0, "Edad_cultivo"
+    ]
+    first_productive_age = (
+        int(productive.min()) if not productive.empty else None
+    )
+    if first_productive_age is None:
+        working["Etapa_cultivo"] = "crecimiento_sin_produccion"
+    else:
+        working["Etapa_cultivo"] = np.select(
+            [
+                working["Edad_cultivo"] < first_productive_age,
+                working["Edad_cultivo"] < 52,
+            ],
+            ["crecimiento_sin_produccion", "picos_iniciales"],
+            default="estabilizacion",
+        )
+    return working
+
+
+def is_recent_sowing_series(rows: pd.DataFrame) -> bool:
+    """Identifica una serie con crecimiento inicial sin produccion."""
+    prepared = prepare_crop_age_series(rows)
+    if prepared.empty or "__produccion" not in prepared.columns:
+        return False
+
+    produccion = prepared["__produccion"].fillna(0.0)
+    primera_productiva = prepared.loc[
+        produccion > 0.0, "Edad_cultivo"
+    ]
+    if primera_productiva.empty:
+        return False
+    edad_inicio_productivo = int(primera_productiva.min())
+    return edad_inicio_productivo >= 4
+
+
+def normalize_pattern_identifier(value: object) -> str:
+    """Normaliza identificadores para comparar Bloque&Varid sin formato."""
+    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+
+
+def calculate_age_aligned_normalized_stems_mse(
+    target_rows: pd.DataFrame,
+    candidate_rows: pd.DataFrame,
+) -> float | None:
+    """Compara patrones por semanas desde el inicio del cultivo."""
+    target = prepare_crop_age_series(target_rows)
+    candidate = prepare_crop_age_series(candidate_rows)
+    if target.empty or candidate.empty:
+        return None
+
+    target = target[["Edad_cultivo", "__tallos"]].rename(
+        columns={"__tallos": "target"}
+    )
+    candidate = candidate[["Edad_cultivo", "__tallos"]].rename(
+        columns={"__tallos": "candidate"}
+    )
+    aligned = target.merge(candidate, on="Edad_cultivo", how="inner").dropna()
+    if len(aligned) < 4:
+        return None
+
+    target_values = aligned["target"].to_numpy(dtype=float)
+    candidate_values = aligned["candidate"].to_numpy(dtype=float)
+    target_std = float(np.std(target_values, ddof=0))
+    candidate_std = float(np.std(candidate_values, ddof=0))
+    if np.isclose(target_std, 0.0) or np.isclose(candidate_std, 0.0):
+        return None
+
+    target_normalized = (target_values - np.mean(target_values)) / target_std
+    candidate_normalized = (
+        candidate_values - np.mean(candidate_values)
+    ) / candidate_std
+    return float(np.mean((target_normalized - candidate_normalized) ** 2))
+
+
 def calculate_pattern_signal_to_noise(
     pattern_values: "pd.Series | np.ndarray",
     model_values: "pd.Series | np.ndarray",
     actual_values: "pd.Series | np.ndarray",
 ) -> tuple[float, float, float]:
+    """Calculate S/N while penalizing a pattern that misses the real series.
+
+    The model error and the pattern error are both noise sources. This keeps
+    an apparently strong S/N from being produced by a pattern with high
+    power but poor point-by-point agreement with the real production.
+    """
     values = pd.DataFrame({
         "pattern": pd.to_numeric(
             pd.Series(pattern_values).reset_index(drop=True), errors="coerce"
@@ -1035,9 +1180,13 @@ def calculate_pattern_signal_to_noise(
         return np.nan, np.nan, np.nan
 
     signal_power = float(np.mean(values["pattern"].to_numpy() ** 2))
-    noise_power = float(np.mean(
+    model_error_power = float(np.mean(
         (values["model"].to_numpy() - values["actual"].to_numpy()) ** 2
     ))
+    pattern_error_power = float(np.mean(
+        (values["pattern"].to_numpy() - values["actual"].to_numpy()) ** 2
+    ))
+    noise_power = model_error_power + pattern_error_power
     if signal_power <= 0:
         sn_ratio_db = np.nan
     elif np.isclose(noise_power, 0.0):
