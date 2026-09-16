@@ -212,6 +212,16 @@ def exigir_acceso_al_sistema():
     st.stop()
 
 
+def aplicar_control_acceso():
+    """Bloquea el resto de la UI si no hay sesión autenticada."""
+    preparar_usuario_inicial()
+    if st.session_state.get('usuario_autenticado'):
+        return True
+
+    exigir_acceso_al_sistema()
+    return False
+
+
 def usuario_puede_gestionar_acceso(usuario=None):
     usuario_actual = usuario
     if usuario_actual is None:
@@ -1878,6 +1888,11 @@ if 'tabla_mse_patron_masivo' not in st.session_state:
     st.session_state['tabla_mse_patron_masivo'] = pd.DataFrame()
 if 'mostrar_dashboard_ia' not in st.session_state:
     st.session_state['mostrar_dashboard_ia'] = False
+
+aplicar_control_acceso()
+
+if usuario_puede_gestionar_acceso():
+    render_gestion_usuarios()
 
 
 def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, preservar_archivo_sesion=True):
