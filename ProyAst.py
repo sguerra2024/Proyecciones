@@ -213,7 +213,7 @@ def exigir_acceso_al_sistema():
 
 
 def aplicar_control_acceso():
-    """Bloquea el resto de la UI si no hay sesión autenticada."""
+    """Bloquea el resto de la UI si no hay sesión autenticada y fuerza login antes del render principal."""
     preparar_usuario_inicial()
     if st.session_state.get('usuario_autenticado'):
         return True
