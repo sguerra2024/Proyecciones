@@ -1,8 +1,6 @@
 from sklearn.metrics import mean_squared_error
 import pickle
 import io
-import hashlib
-import base64
 import importlib
 import pandas as pd
 import numpy as np
@@ -11,40 +9,26 @@ import re
 import unicodedata
 from pathlib import Path
 import streamlit as st
-import streamlit.components.v1 as components
 from dotenv import load_dotenv, dotenv_values
 import os
 import sys
 import mimetypes
 import requests
 import sqlite3
-import secrets
-import hmac
 import time
+import secrets
+import hashlib
+import hmac
 from datetime import datetime, timezone
-
-import ingresos_core
 
 from projection_core import (
     add_buffer_projection_columns,
     apply_overestimation_buffer,
-    calcular_ajuste_factor_diferencia_2026,
-    calcular_ajuste_reciente_4_semanas,
-    calcular_moda_signo_evaluacion_2026,
     calculate_model_error_report,
-    calculate_age_aligned_normalized_stems_mse,
+    calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
     fit_production_model,
     has_sufficient_pattern_history,
-    is_recent_sowing_series,
-    normalize_pattern_identifier,
-    prepare_crop_age_series,
-)
-
-st.set_page_config(
-    page_title='Proyecciones',
-    page_icon='🎛️',
-    layout='wide',
 )
 
 agents_dir = Path(__file__).with_name("agents")
@@ -73,9 +57,8 @@ PATRON_PREDICTION_WEIGHT = float(os.getenv("PATRON_PREDICTION_WEIGHT", "0.65"))
 REFUERZO_TALLOS_M2 = float(os.getenv("REFUERZO_TALLOS_M2", "0.30"))
 TALLOS_2026_BOOST = float(os.getenv("TALLOS_2026_BOOST", "1.0"))
 PATRON_TRAIN_TARGET_WEIGHT = float(
-    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.45")
+    os.getenv("PATRON_TRAIN_TARGET_WEIGHT", "0.30")
 )
-AJUSTE_REAL_2026_PESO = float(os.getenv("AJUSTE_REAL_2026_PESO", "1.5"))
 DEFINICION_PATRON_IA = (
     'Definicion autorizada de PATRON: PATRON es la mejor opcion historica '
     'distinta del mismo Bloque&Varid proyectado, cuyo ajuste (FIT) respecto '
@@ -91,64 +74,6 @@ RECOMENDACION_AMORTIGUADOR_IA = (
     'PARA ADMINISTRAR ESTE AMORTIGUADOR, SE RECOMIENDA QUE CADA TECNICO '
     'EXPONGA UNA IDEA Y QUE ESTA SE REGISTRE.'
 )
-MENSAJE_CONSULTA_EXTERNA_IA = (
-    'Las consultas externas requieren configurar SERPAPI_API_KEY en el entorno '
-    'de la aplicacion.'
-)
-RESPUESTA_SIN_INFORMACION_IA = 'CONSULTA README PARA MAYOR INFORMACION'
-
-
-def obtener_valor_env(*claves):
-    for clave in claves:
-        valor = (os.getenv(clave) or "").strip()
-        if valor:
-            return valor
-
-    for ruta_env in [Path(__file__).with_name('.env'), Path.cwd() / '.env']:
-        if not ruta_env.exists():
-            continue
-        valores = dotenv_values(ruta_env)
-        for clave in claves:
-            valor = (valores.get(clave) or "").strip()
-            if valor:
-                return valor
-    return ""
-
-
-def obtener_llm_provider():
-    proveedor = (os.getenv("LLM_PROVIDER")
-                 or llm_provider or "anthropic").strip().lower()
-    alias = {
-        'copilot': 'github',
-        'github_models': 'github',
-        'gh': 'github',
-        'openai_compatible': 'openai'
-    }
-    return alias.get(proveedor, proveedor)
-
-
-def obtener_api_key_anthropic():
-    return obtener_valor_env("ANTHROPIC_API_KEY", "ANTHROPIC_KEY")
-
-
-def obtener_api_key_openai():
-    return obtener_valor_env("OPENAI_API_KEY")
-
-
-def obtener_api_key_github():
-    return obtener_valor_env("GITHUB_MODELS_TOKEN", "GITHUB_TOKEN")
-
-
-def obtener_ruta_registro_ia():
-    ruta_configurada = obtener_valor_env("AI_LOG_DB_PATH")
-    if ruta_configurada:
-        ruta = Path(ruta_configurada).expanduser()
-        if not ruta.is_absolute():
-            ruta = Path(__file__).parent / ruta
-    else:
-        ruta = Path(__file__).with_name("data") / "consultas_ia.db"
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    return ruta
 
 
 def obtener_ruta_control_acceso():
@@ -160,7 +85,7 @@ def obtener_ruta_control_acceso():
     else:
         ruta = Path(__file__).with_name('data') / 'control_acceso.db'
     ruta.parent.mkdir(parents=True, exist_ok=True)
-    return ruta
+    return str(ruta)
 
 
 def inicializar_tabla_usuarios():
@@ -267,29 +192,23 @@ def exigir_acceso_al_sistema():
     if st.session_state.get('usuario_autenticado'):
         return
 
-    _, col_acceso, _ = st.columns([0.35, 0.3, 0.35])
-    with col_acceso:
-        st.markdown(
-            "<h3 style='text-align:center;white-space:nowrap;"
-            "font-size:1.1rem;'>Control de acceso</h3>",
-            unsafe_allow_html=True,
-        )
-        st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
-        with st.form('form_control_acceso'):
-            usuario = st.text_input('Usuario')
-            clave = st.text_input('Clave', type='password')
-            ingresar = st.form_submit_button('Ingresar')
-        if ingresar:
-            if autenticar_usuario(usuario, clave):
-                st.session_state['usuario_autenticado'] = usuario.strip()
-                st.rerun()
-            st.error('Usuario o clave incorrectos.')
+    st.title('Control de acceso')
+    st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
+    with st.form('form_control_acceso'):
+        usuario = st.text_input('Usuario')
+        clave = st.text_input('Clave', type='password')
+        ingresar = st.form_submit_button('Ingresar')
+    if ingresar:
+        if autenticar_usuario(usuario, clave):
+            st.session_state['usuario_autenticado'] = usuario.strip()
+            st.rerun()
+        st.error('Usuario o clave incorrectos.')
 
-        if not obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD'):
-            st.warning(
-                'Configura ACCESS_INITIAL_PASSWORD para crear el usuario '
-                'Admin inicial.'
-            )
+    if not obtener_valor_env('ACCESS_INITIAL_PASSWORD', 'ADMIN_PASSWORD'):
+        st.warning(
+            'Configura ACCESS_INITIAL_PASSWORD para crear el usuario '
+            'Admin inicial.'
+        )
     st.stop()
 
 
@@ -322,6 +241,59 @@ def render_gestion_usuarios():
                     st.success('Usuario creado correctamente.')
                 except ValueError as exc:
                     st.error(str(exc))
+
+
+def obtener_valor_env(*claves):
+    for clave in claves:
+        valor = (os.getenv(clave) or "").strip()
+        if valor:
+            return valor
+
+    for ruta_env in [Path(__file__).with_name('.env'), Path.cwd() / '.env']:
+        if not ruta_env.exists():
+            continue
+        valores = dotenv_values(ruta_env)
+        for clave in claves:
+            valor = (valores.get(clave) or "").strip()
+            if valor:
+                return valor
+    return ""
+
+
+def obtener_llm_provider():
+    proveedor = (os.getenv("LLM_PROVIDER")
+                 or llm_provider or "anthropic").strip().lower()
+    alias = {
+        'copilot': 'github',
+        'github_models': 'github',
+        'gh': 'github',
+        'openai_compatible': 'openai'
+    }
+    return alias.get(proveedor, proveedor)
+
+
+def obtener_api_key_anthropic():
+    return obtener_valor_env("ANTHROPIC_API_KEY", "ANTHROPIC_KEY")
+
+
+def obtener_api_key_openai():
+    return obtener_valor_env("OPENAI_API_KEY")
+
+
+def obtener_api_key_github():
+    return obtener_valor_env("GITHUB_MODELS_TOKEN", "GITHUB_TOKEN")
+
+
+def obtener_ruta_registro_ia():
+    ruta_configurada = obtener_valor_env("AI_LOG_DB_PATH")
+    if ruta_configurada:
+        ruta = Path(ruta_configurada).expanduser()
+        if not ruta.is_absolute():
+            ruta = Path(__file__).parent / ruta
+    else:
+        ruta = Path(__file__).with_name("data") / "consultas_ia.db"
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    return ruta
 
 
 def redactar_secretos(texto):
@@ -688,40 +660,16 @@ def es_error_modelo_inexistente(exc):
     )
 
 
-def reemplazar_astroflores_por_finca(texto):
-    return re.sub(r'\bastroflores\b', 'Finca', str(texto), flags=re.IGNORECASE)
-
-
-def cargar_contexto_readme_ia():
-    readme_path = Path(__file__).with_name('README.md')
-    if not readme_path.exists():
-        return 'README.md no disponible en el proyecto.'
-    try:
-        return readme_path.read_text(encoding='utf-8')
-    except OSError:
-        return readme_path.read_text(errors='ignore')
-
-
 def consultar_llm(prompt_usuario):
-    proveedor = obtener_llm_provider()
     prompt_original = str(prompt_usuario)
-    if proveedor == 'anthropic':
-        prompt_original = reemplazar_astroflores_por_finca(prompt_original)
-
     prompt_enviado = (
         f'{DEFINICION_PATRON_IA}\n'
         'Definicion autorizada de AMORTIGUADOR M2: '
         f'{DEFINICION_AMORTIGUADOR_IA}\n'
         f'{RECOMENDACION_AMORTIGUADOR_IA}\n\n'
-        'README.md es la fuente autorizada para las reglas, definiciones y '
-        'comportamiento del proyecto. Consulta este contexto antes de responder '
-        'y no contradigas sus reglas. Si no encuentras la respuesta en README '
-        'o en el contexto suministrado, responde exactamente: '
-        f'{RESPUESTA_SIN_INFORMACION_IA}.\n\n'
-        'CONTEXTO README.md:\n'
-        f'{cargar_contexto_readme_ia()}\n\n'
         f'{prompt_original}'
     )
+    proveedor = obtener_llm_provider()
     modelo = modelo_principal_proveedor(proveedor)
     inicio = time.perf_counter()
     registro_id = iniciar_registro_consulta_ia(
@@ -748,8 +696,6 @@ def consultar_llm(prompt_usuario):
         )
         raise
 
-    if proveedor == 'anthropic':
-        respuesta = reemplazar_astroflores_por_finca(respuesta)
     finalizar_registro_consulta_ia(
         registro_id,
         'ok',
@@ -993,72 +939,6 @@ class ArchivoEnMemoria:
         return self._data
 
 
-def sincronizar_readme_con_anthropic(state=None):
-    if obtener_llm_provider() != 'anthropic':
-        raise RuntimeError(
-            'La sincronizacion de README solo esta disponible con '
-            'LLM_PROVIDER=anthropic.'
-        )
-
-    readme_path = Path(__file__).with_name('README.md')
-    if not readme_path.exists():
-        raise FileNotFoundError('No se encontro README.md en el proyecto.')
-    contenido = readme_path.read_bytes()
-    if not contenido:
-        raise ValueError('README.md esta vacio.')
-
-    target_state = st.session_state if state is None else state
-    cache_key = '__readme_anthropic_sync_cache__'
-    contenido_hash = hashlib.sha256(contenido).hexdigest()
-    if target_state.get(cache_key) == contenido_hash:
-        return target_state.get('readme_anthropic_info', {
-            'nombre': readme_path.name,
-            'modo': 'remoto',
-        })
-
-    archivo_readme = ArchivoEnMemoria(
-        readme_path.name,
-        contenido,
-        'text/markdown',
-    )
-    info_carga = sincronizar_archivo_llm(
-        archivo_readme,
-        nombre_archivo=readme_path.name,
-    )
-    registrar_sincronizacion_en_sesion(
-        info_carga,
-        None,
-        readme_path.name,
-        readme_path.name + contenido_hash,
-    )
-    target_state[cache_key] = contenido_hash
-    target_state['readme_anthropic_info'] = info_carga
-    return info_carga
-
-
-def sincronizar_readme_automaticamente():
-    if obtener_llm_provider() != 'anthropic':
-        return None
-    try:
-        return sincronizar_readme_con_anthropic()
-    except Exception as exc:
-        st.session_state['estado_subida_anthropic'] = (
-            'error', f'Error sincronizando README automaticamente: {exc}'
-        )
-        return None
-
-
-def clasificar_sn(valor):
-    valor_num = pd.to_numeric(valor, errors='coerce')
-    if pd.isna(valor_num):
-        return 'sin_dato'
-    if valor_num <= 7:
-        return 'alerta'
-    if valor_num >= 11:
-        return 'ok'
-    return 'sin_dato'
-
-
 def sincronizar_export_generado_automatico(bytes_export, nombre_export, mime_export, dataframe=None, state=None):
     if not bytes_export:
         return
@@ -1133,19 +1013,16 @@ def preparar_salida_proyeccion_masiva(df_proyeccion, columnas_identificacion):
         columna for columna in columnas_identificacion
         if columna in salida.columns
     ]
-    return salida[identificadores + ['Estimado_modelo']].reset_index(drop=True)
+    columnas_resultado = ['Estimado_modelo']
+    if '%dif' in salida.columns:
+        columnas_resultado.append('%dif')
+    return salida[identificadores + columnas_resultado].reset_index(drop=True)
 
 
 def crear_excel_proyeccion_masiva(
     df_proyeccion_original,
     df_analisis_avanzado,
 ):
-    df_proyeccion_original = df_proyeccion_original.drop(
-        columns=['%dif'], errors='ignore'
-    )
-    df_analisis_avanzado = df_analisis_avanzado.drop(
-        columns=['%dif'], errors='ignore'
-    )
     buffer_excel = io.BytesIO()
     with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
         df_proyeccion_original.to_excel(
@@ -1155,38 +1032,6 @@ def crear_excel_proyeccion_masiva(
             writer, sheet_name='Analisis_avanzado', index=False
         )
     return buffer_excel.getvalue()
-
-
-def descargar_excel_automaticamente(datos, nombre_archivo='AMORTIG_ACT.xlsx'):
-    """Inicia una descarga del Excel una sola vez por contenido generado."""
-    datos_bytes = bytes(datos or b'')
-    if not datos_bytes:
-        return
-
-    contenido_hash = hashlib.sha256(datos_bytes).hexdigest()
-    estado_key = f'__descarga_automatica_excel__{nombre_archivo}'
-    if st.session_state.get(estado_key) == contenido_hash:
-        return
-
-    contenido_b64 = base64.b64encode(datos_bytes).decode('ascii')
-    nombre_seguro = str(nombre_archivo).replace('\\', '_').replace("'", '')
-    components.html(
-        f'''
-        <script>
-        (() => {{
-            const enlace = document.createElement('a');
-            enlace.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{contenido_b64}';
-            enlace.download = '{nombre_seguro}';
-            enlace.style.display = 'none';
-            document.body.appendChild(enlace);
-            enlace.click();
-            enlace.remove();
-        }})();
-        </script>
-        ''',
-        height=0,
-    )
-    st.session_state[estado_key] = contenido_hash
 
 
 def construir_cache_patrones_semanales(df_base):
@@ -1241,19 +1086,16 @@ def cargar_factor_diferencia_por_variedad():
     ruta_eval = Path(__file__).with_name('Evaluacion')
     ruta_factor = ruta_eval / 'factor_diferencia_2025_por_variedad.csv'
     ruta_resumen = ruta_eval / 'factor_diferencia_2025_resumen.csv'
-    ruta_errores = ruta_eval / 'errores_evaluacion_modelo.csv'
 
     factor_global = 1.0
     mtime_factor = ruta_factor.stat().st_mtime if ruta_factor.exists() else None
     mtime_resumen = ruta_resumen.stat().st_mtime if ruta_resumen.exists() else None
-    mtime_errores = ruta_errores.stat().st_mtime if ruta_errores.exists() else None
 
     cache = st.session_state.get(cache_key)
     if isinstance(cache, dict):
         if (
             cache.get('mtime_factor') == mtime_factor
             and cache.get('mtime_resumen') == mtime_resumen
-            and cache.get('mtime_errores') == mtime_errores
         ):
             return cache
 
@@ -1285,72 +1127,14 @@ def cargar_factor_diferencia_por_variedad():
             if pd.notna(valor_global) and np.isfinite(valor_global) and valor_global > 0:
                 factor_global = float(valor_global)
 
-    ajuste_real_2026 = calcular_ajuste_factor_diferencia_2026(
-        ruta_eval, peso_ajuste=AJUSTE_REAL_2026_PESO
-    )
-    ajustes_por_variedad = ajuste_real_2026['ajustes_por_variedad']
-    ajuste_global = ajuste_real_2026['ajuste_global']
-    factores = {
-        variedad: valor * ajustes_por_variedad.get(variedad, ajuste_global)
-        for variedad, valor in factores.items()
-    }
-    factor_global *= ajuste_global
-
-    moda_signo_2026 = calcular_moda_signo_evaluacion_2026(ruta_eval)
-    ajuste_reciente = calcular_ajuste_reciente_4_semanas(ruta_eval)
-
     config_factor = {
         'factores_por_variedad': factores,
         'factor_global': factor_global,
-        'ajustes_reales_2026': ajustes_por_variedad,
-        'ajuste_real_2026_global': ajuste_global,
-        'moda_signo_2026': moda_signo_2026['moda_por_variedad'],
-        'moda_signo_2026_global': moda_signo_2026['moda_global'],
-        'ajustes_recientes_4_semanas': ajuste_reciente[
-            'ajustes_por_variedad'
-        ],
-        'ajuste_reciente_4_semanas_global': ajuste_reciente[
-            'ajuste_global'
-        ],
-        'semanas_ajuste_reciente': ajuste_reciente['semanas'],
         'mtime_factor': mtime_factor,
         'mtime_resumen': mtime_resumen,
-        'mtime_errores': mtime_errores,
     }
     st.session_state[cache_key] = config_factor
     return config_factor
-
-
-def aplicar_ajuste_reciente_4_semanas(
-    pred_vals, eval_actual_df, var_proy, config_factor
-):
-    """Aplica el ajuste real reciente solo a las cuatro semanas evaluadas."""
-    pred_ajustada = np.asarray(pred_vals, dtype=float).copy()
-    if pred_ajustada.size == 0 or eval_actual_df is None or eval_actual_df.empty:
-        return pred_ajustada, 1.0, 0, 'neutral'
-
-    ajustes = config_factor.get('ajustes_recientes_4_semanas', {})
-    factor = float(ajustes.get(
-        str(var_proy),
-        config_factor.get('ajuste_reciente_4_semanas_global', 1.0),
-    ))
-    origen = 'variedad' if str(var_proy) in ajustes else 'global'
-    if not np.isfinite(factor) or factor <= 0:
-        return pred_ajustada, 1.0, 0, 'neutral'
-
-    anios = pd.to_numeric(eval_actual_df['Anio'], errors='coerce')
-    semanas = pd.to_numeric(eval_actual_df['Semana'], errors='coerce')
-    periodos = pd.DataFrame({'Anio': anios, 'Semana': semanas}).dropna()
-    if periodos.empty:
-        return pred_ajustada, factor, 0, origen
-    periodos = periodos.drop_duplicates().sort_values(['Anio', 'Semana'])
-    ultimos = set(map(tuple, periodos.tail(4).to_numpy()))
-    mascara = np.array(
-        [(a, s) in ultimos for a, s in zip(anios, semanas)], dtype=bool
-    )
-    n = min(len(pred_ajustada), len(mascara))
-    pred_ajustada[:n][mascara[:n]] *= factor
-    return pred_ajustada, factor, int(mascara[:n].sum()), origen
 
 
 def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_proy, config_factor):
@@ -1395,33 +1179,6 @@ def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_
     return pred_ajustada, factor_variedad, int(mask_objetivo.sum()), origen_factor
 
 
-def corregir_signo_amortiguador_con_error_real(amortiguador, var_proy, config_factor,
-                                               tolerancia=0.03):
-    """
-    Fuerza el signo del amortiguador al signo moda (el mas frecuente) del
-    %dif real de 2026 para esa variedad en errores_evaluacion_modelo.csv,
-    para que el amortiguador mantenga la tendencia observada en la
-    evaluacion real en vez de depender solo del RandomForest interno.
-
-    Moda > 0 (predomina subestimacion) -> amortiguador >= 0.
-    Moda < 0 (predomina sobreestimacion) -> amortiguador <= 0.
-    Moda == 0 (empate o sin datos) -> se deja el signo calculado internamente.
-    """
-    valores = np.asarray(amortiguador, dtype=float)
-    if valores.size == 0:
-        return valores
-
-    modas_por_variedad = config_factor.get('moda_signo_2026', {})
-    moda = modas_por_variedad.get(
-        str(var_proy), config_factor.get('moda_signo_2026_global', 0)
-    )
-    if moda > 0:
-        return np.abs(valores)
-    if moda < 0:
-        return -np.abs(valores)
-    return valores.copy()
-
-
 def cargar_archivo_a_dataframe(archivo_subido):
     if archivo_subido is None:
         return pd.DataFrame()
@@ -1442,86 +1199,6 @@ def cargar_archivo_a_dataframe(archivo_subido):
         return pd.DataFrame()
 
     return pd.DataFrame()
-
-
-def calcular_factor_correccion_media_anio_en_curso(df_promedio):
-    if df_promedio is None or df_promedio.empty:
-        return 1.0
-
-    trabajo = df_promedio.copy()
-    trabajo['Anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
-    trabajo['Semana'] = pd.to_numeric(trabajo['Semana'], errors='coerce')
-    trabajo['Tallos/m2'] = pd.to_numeric(trabajo['Tallos/m2'], errors='coerce')
-    trabajo = trabajo.dropna(subset=['Anio', 'Semana', 'Tallos/m2'])
-    if trabajo.empty:
-        return 1.0
-
-    anio_actual = int(trabajo['Anio'].max())
-    periodo_verano = trabajo[
-        (trabajo['Anio'] == anio_actual)
-        & (trabajo['Semana'] >= 24)
-        & (trabajo['Semana'] <= 52)
-    ]
-    periodo_inicio_anio = trabajo[
-        (trabajo['Anio'] == anio_actual)
-        & (trabajo['Semana'] >= 1)
-        & (trabajo['Semana'] <= 23)
-    ]
-    if periodo_verano.empty or periodo_inicio_anio.empty:
-        return 1.0
-
-    prom_verano = float(periodo_verano['Tallos/m2'].mean())
-    prom_inicio_anio = float(periodo_inicio_anio['Tallos/m2'].mean())
-    if np.isclose(prom_inicio_anio, 0.0):
-        return 1.0
-    return prom_verano / prom_inicio_anio
-
-
-def construir_resumen_ajustes_media(df_export):
-    """Resume todos los factores de media aplicados por variedad/caso."""
-    if df_export is None or df_export.empty:
-        return pd.DataFrame()
-
-    trabajo = df_export.copy()
-    columna_variedad = next(
-        (
-            columna for columna in [
-                'Variedad_proyectada', 'Bloque&Varid', 'Variedad'
-            ] if columna in trabajo.columns
-        ),
-        None,
-    )
-    if columna_variedad is None:
-        return pd.DataFrame()
-
-    columnas = {
-        'Factor_correccion': 'Factor_media_anual',
-        'Factor_ajuste_reciente_4_semanas': 'Factor_media_ultimas_4_semanas',
-        'Semanas_factor_2026_24_52': 'Semanas_factor_2025_2026',
-        'Semanas_ajuste_reciente': 'Semanas_media_reciente',
-        'Origen_ajuste_reciente': 'Origen_media_reciente',
-        'Porcentaje_amortiguador_sugerido': 'Porcentaje_amortiguador',
-    }
-    resumen = pd.DataFrame({
-        'Variedad_proyectada': trabajo[columna_variedad].astype(str).str.strip()
-    })
-    for columna_origen, columna_resumen in columnas.items():
-        if columna_origen in trabajo.columns:
-            resumen[columna_resumen] = trabajo[columna_origen].iloc[:].values
-
-    factores_media = [
-        columna for columna in [
-            'Factor_media_anual',
-            'Factor_media_ultimas_4_semanas',
-        ] if columna in resumen.columns
-    ]
-    if factores_media:
-        valores = resumen[factores_media].apply(pd.to_numeric, errors='coerce')
-        resumen['Factor_media_combinado_informativo'] = valores.prod(axis=1)
-
-    resumen = resumen.drop_duplicates(
-        'Variedad_proyectada').reset_index(drop=True)
-    return resumen
 
 
 def resumir_proyeccion_individual(var_proy, patron_seleccionado,
@@ -1693,266 +1370,13 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     return pd.DataFrame(filas, columns=columnas_salida)
 
 
-def resumir_tallos_m2_por_rango(df_base, anio_inicio, semana_inicio, anio_fin,
-                                semana_fin, finca_contexto=None):
-    """
-    Calcula el promedio de Tallos/m2 por Bloque&Varid dentro de un rango
-    arbitrario de anio/semana (no limitado a las ultimas 12 semanas >= 2026),
-    para responder preguntas historicas puntuales sin que la IA invente cifras.
-    """
-    columnas_salida = [
-        'Bloque&Varid', 'anio_inicio', 'semana_inicio', 'anio_fin',
-        'semana_fin', 'promedio_tallos_m2', 'conteo_semanas',
-    ]
-    if df_base is None or df_base.empty:
-        return pd.DataFrame(columns=columnas_salida)
-    requeridas = {'Bloque&Varid', 'Anio', 'Semana', 'Tallos/m2'}
-    if not requeridas.issubset(df_base.columns):
-        return pd.DataFrame(columns=columnas_salida)
-
-    trabajo = df_base.copy()
-    if finca_contexto is not None and 'Finca' in trabajo.columns:
-        trabajo = trabajo[
-            trabajo['Finca'].astype(str) == str(finca_contexto)
-        ]
-
-    trabajo['__anio'] = pd.to_numeric(trabajo['Anio'], errors='coerce')
-    trabajo['__semana'] = pd.to_numeric(trabajo['Semana'], errors='coerce')
-    trabajo['__tallos_m2'] = pd.to_numeric(
-        trabajo['Tallos/m2'], errors='coerce'
-    )
-
-    clave_inicio = anio_inicio * 100 + semana_inicio
-    clave_fin = anio_fin * 100 + semana_fin
-    if clave_fin < clave_inicio:
-        clave_inicio, clave_fin = clave_fin, clave_inicio
-    trabajo['__clave'] = trabajo['__anio'] * 100 + trabajo['__semana']
-    trabajo = trabajo[trabajo['__clave'].between(clave_inicio, clave_fin)]
-    trabajo = trabajo.dropna(subset=['__tallos_m2'])
-    if trabajo.empty:
-        return pd.DataFrame(columns=columnas_salida)
-
-    filas = []
-    for variedad, grupo in trabajo.groupby('Bloque&Varid', dropna=False):
-        filas.append({
-            'Bloque&Varid': variedad,
-            'anio_inicio': anio_inicio,
-            'semana_inicio': semana_inicio,
-            'anio_fin': anio_fin,
-            'semana_fin': semana_fin,
-            'promedio_tallos_m2': round(float(grupo['__tallos_m2'].mean()), 2),
-            'conteo_semanas': int(grupo['__tallos_m2'].count()),
-        })
-    return pd.DataFrame(filas, columns=columnas_salida)
-
-
-def extraer_rango_semanas_pregunta(pregunta_normalizada):
-    """
-    Detecta un rango de semanas/anio en la pregunta del usuario, admitiendo
-    variantes como 'semanas 24 y 34 de 2025', 'semana 24 a 34 del ano 2025'
-    o 'entre la semana 24 y la semana 34 de 2025'.
-
-    El anio se busca como cualquier numero de 4 digitos cercano al rango de
-    semanas, en vez de exigir literalmente 'de'/'del' seguido del anio, para
-    no fallar con frases como 'del ano 2025'.
-
-    Returns:
-        tuple (anio_inicio, semana_inicio, anio_fin, semana_fin) o None
-    """
-    match_semanas = re.search(
-        r'semanas?\s+(?:la\s+)?(\d{1,2})\s*(?:y|a|-|hasta)\s*'
-        r'(?:la\s+semana\s+)?(\d{1,2})',
-        pregunta_normalizada,
-    )
-    if not match_semanas:
-        return None
-    semana_inicio, semana_fin = (int(valor)
-                                 for valor in match_semanas.groups())
-    if not (1 <= semana_inicio <= 53 and 1 <= semana_fin <= 53):
-        return None
-
-    resto = pregunta_normalizada[match_semanas.end():]
-    match_anio = re.search(r'\b(\d{4})\b', resto) or re.search(
-        r'\b(\d{4})\b', pregunta_normalizada
-    )
-    if not match_anio:
-        return None
-    anio = int(match_anio.group(1))
-    return anio, semana_inicio, anio, semana_fin
-
-
-def construir_resumen_diferencia_ingresos(df_base, df_proyeccion):
-    """Calcula la diferencia de ingreso real contra el ingreso proyectado.
-
-    Ambos valores se valoran con el mismo catalogo comercial vigente para que
-    la brecha represente una diferencia de tallos convertida a dinero, no una
-    comparacion de unidades. Si no hay catalogo o columnas suficientes, no se
-    fabrica un ingreso: se devuelve un mensaje explicito.
-    """
-    if df_proyeccion is None or df_proyeccion.empty:
-        return 'No hay calculo de ingresos: no hay proyeccion disponible.'
-
-    proyeccion = df_proyeccion.copy()
-    if 'Produccion_real' not in proyeccion.columns and (
-        df_base is not None and not df_base.empty
-    ):
-        base = df_base.copy()
-        if {'Anio', 'Semana'}.issubset(base.columns):
-            base['Anio_Semana'] = base.apply(
-                lambda fila: f"{int(fila['Anio'])}-{int(fila['Semana']):02d}"
-                if pd.notna(fila['Anio']) and pd.notna(fila['Semana'])
-                else np.nan,
-                axis=1,
-            )
-        if {'Bloque&Varid', 'Anio_Semana', 'Produccion'}.issubset(base.columns):
-            reales = base[[
-                'Bloque&Varid', 'Anio_Semana', 'Produccion'
-            ]].rename(columns={
-                'Bloque&Varid': 'Variedad_proyectada',
-                'Produccion': 'Produccion_real',
-            })
-            proyeccion = proyeccion.merge(
-                reales,
-                on=['Variedad_proyectada', 'Anio_Semana'],
-                how='left',
-            )
-
-    requeridas = {
-        'Variedad_proyectada', 'Anio_Semana',
-        'Produccion_real', 'Estimado_modelo',
-    }
-    if not requeridas.issubset(proyeccion.columns):
-        return 'No hay datos reales y proyectados suficientes para calcular ingresos.'
-
-    ruta_catalogo = Path(__file__).with_name('datos_mercado') / (
-        'catalogo_precios_historico.csv'
-    )
-    if not ruta_catalogo.exists():
-        return 'No hay catalogo de precios disponible para calcular ingresos.'
-
-    try:
-        catalogo_crudo = pd.read_csv(ruta_catalogo)
-        catalogo, fuera_de_rango = ingresos_core.normalizar_catalogo(
-            catalogo_crudo,
-            fecha_defecto=pd.Timestamp.today(),
-        )
-        fecha_corte = catalogo['fecha'].max()
-        catalogo_vigente = ingresos_core.catalogo_vigente(
-            catalogo, fecha_corte=fecha_corte
-        )
-        catalogo_precio = ingresos_core.elegir_mercado(
-            catalogo_vigente, estrategia='mejor_precio'
-        )
-
-        mapa_variedad = {}
-        if (
-            df_base is not None
-            and not df_base.empty
-            and {'Bloque&Varid', 'Variedad'}.issubset(df_base.columns)
-        ):
-            mapa_variedad = dict(
-                df_base[['Bloque&Varid', 'Variedad']]
-                .dropna()
-                .astype(str)
-                .drop_duplicates('Bloque&Varid')
-                .to_records(index=False)
-            )
-        proyeccion['__variedad_catalogo'] = proyeccion[
-            'Variedad_proyectada'
-        ].astype(str).map(mapa_variedad).fillna(
-            proyeccion['Variedad_proyectada'].astype(str)
-        )
-
-        base_valoracion = proyeccion.rename(
-            columns={'__variedad_catalogo': 'variedad'}
-        )[['variedad', 'Anio_Semana', 'Produccion_real', 'Estimado_modelo']].copy()
-        base_valoracion['variedad'] = base_valoracion['variedad'].astype(
-            str).str.upper()
-        base_valoracion['Produccion_real'] = pd.to_numeric(
-            base_valoracion['Produccion_real'], errors='coerce'
-        )
-        base_valoracion['Estimado_modelo'] = pd.to_numeric(
-            base_valoracion['Estimado_modelo'], errors='coerce'
-        )
-        base_valoracion = base_valoracion.dropna(
-            subset=['Produccion_real', 'Estimado_modelo']
-        )
-        if base_valoracion.empty:
-            return 'No hay datos reales y proyectados validos para calcular ingresos.'
-
-        def valorar(columna):
-            entrada = base_valoracion[
-                ['variedad', 'Anio_Semana', columna]
-            ].rename(columns={columna: 'tallos'})
-            return ingresos_core.calcular_ingresos(
-                entrada,
-                catalogo_precio,
-                mix_fuera_de_rango=fuera_de_rango,
-                mapeo_proyeccion={
-                    'variedad': 'variedad',
-                    'tallos': 'tallos',
-                    'semana': 'Anio_Semana',
-                },
-            ).totales.get('ingreso_base', 0.0)
-
-        ingreso_real = float(valorar('Produccion_real'))
-        ingreso_modelo = float(valorar('Estimado_modelo'))
-        diferencia = ingreso_modelo - ingreso_real
-        porcentaje = (
-            diferencia / ingreso_real * 100.0
-            if ingreso_real else np.nan
-        )
-        return (
-            'DIFERENCIA REAL DE INGRESOS (calculada con el catalogo vigente; '
-            'no recalcular):\n'
-            f'Ingreso real valorado: {ingreso_real:,.2f}\n'
-            f'Ingreso modelo valorado: {ingreso_modelo:,.2f}\n'
-            f'Brecha modelo-real: {diferencia:,.2f} '
-            f'({porcentaje:.2f}% sobre el ingreso real)\n'
-            f'Registros valorados: {len(base_valoracion)}'
-        )
-    except (KeyError, ValueError, TypeError, OSError) as exc:
-        return f'No fue posible calcular diferencias de ingreso: {exc}'
-
-
-def calcular_factor_ajuste_media_ingresos(df_base, df_proyeccion,
-                                          minimo=0.5, maximo=1.5):
-    """Devuelve el factor acotado que alinea ingreso modelo con ingreso real."""
-    resumen = construir_resumen_diferencia_ingresos(df_base, df_proyeccion)
-    if 'Ingreso real valorado:' not in resumen or 'Ingreso modelo valorado:' not in resumen:
-        return 1.0
-
-    try:
-        real_texto = re.search(
-            r'Ingreso real valorado:\s*([\d,.]+)', resumen).group(1)
-        modelo_texto = re.search(
-            r'Ingreso modelo valorado:\s*([\d,.]+)', resumen).group(1)
-        ingreso_real = float(real_texto.replace(',', ''))
-        ingreso_modelo = float(modelo_texto.replace(',', ''))
-    except (AttributeError, TypeError, ValueError):
-        return 1.0
-
-    if ingreso_real <= 0 or ingreso_modelo <= 0:
-        return 1.0
-    return float(np.clip(ingreso_real / ingreso_modelo, minimo, maximo))
-
-
 def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
                                  df_proyeccion=None, df_archivo_sincronizado=None,
-                                 nombre_archivo_sincronizado='',
-                                 resumen_ingresos=None):
+                                 nombre_archivo_sincronizado=''):
     pregunta_limpia = str(pregunta_usuario).strip()
     if not pregunta_limpia:
         raise ValueError(
             'Escribe una pregunta antes de consultar a Anthropic.')
-    consulta_externa = solicita_informacion_externa(pregunta_limpia)
-    contexto_web = ''
-    if consulta_externa:
-        if not obtener_valor_env('SERPAPI_API_KEY'):
-            return MENSAJE_CONSULTA_EXTERNA_IA
-        contexto_web = construir_contexto_web(buscar_en_web(pregunta_limpia))
-        if not contexto_web:
-            return 'No se encontraron resultados externos para esta consulta.'
 
     pregunta_normalizada = ''.join(
         caracter
@@ -2009,64 +1433,35 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         if not resumen.empty:
             resumen_info = resumen.to_csv(index=False)
 
-    resumen_ingresos_info = (
-        str(resumen_ingresos).strip()
-        if resumen_ingresos is not None and str(resumen_ingresos).strip()
-        else construir_resumen_diferencia_ingresos(
-            contexto_df,
-            df_proyeccion,
+    requiere_web = solicita_informacion_externa(pregunta_limpia)
+    contexto_web = ''
+    if requiere_web:
+        contexto_web = construir_contexto_web(
+            buscar_en_web(pregunta_limpia)
         )
+
+    alcance_respuesta = (
+        'La aplicacion ya realizo una busqueda externa mediante SerpAPI y te '
+        'entrega sus resultados abajo. No afirmes que no puedes consultar la '
+        'web: usa el contexto web suministrado y cita sus fuentes. Distingue '
+        'los datos internos de la informacion web. '
+        if contexto_web else
+        'Usa unicamente el resumen y las definiciones de negocio suministrados. '
     )
-
-    rango_semanas = extraer_rango_semanas_pregunta(pregunta_normalizada)
-    resumen_rango_info = ''
-    if rango_semanas is not None:
-        anio_inicio, semana_inicio, anio_fin, semana_fin = rango_semanas
-        resumen_rango = resumir_tallos_m2_por_rango(
-            df_base, anio_inicio, semana_inicio, anio_fin, semana_fin,
-            finca_contexto=finca_contexto,
-        )
-        resumen_rango_info = (
-            resumen_rango.to_csv(index=False)
-            if not resumen_rango.empty
-            else 'No hay datos historicos para el rango de semanas solicitado.'
-        )
-
     restricciones_respuesta = (
+        'Responde la solicitud externa basandote en los resultados web. '
+        'Si no hay resultados web, indicalo claramente y no inventes fuentes. '
+        if requiere_web else
         'Despliega exclusivamente el area calculada en M2, su porcentaje '
         'sobre los M2 de la variedad, el promedio de Tallos/m2 de las ultimas '
         '12 semanas disponibles de 2026 o posteriores y el producto de ambos '
         'valores. No muestres otras metricas ni inventes datos. '
     )
-    if 'DIFERENCIA REAL DE INGRESOS' in resumen_ingresos_info:
-        restricciones_respuesta += (
-            'Cuando se consulte por ingresos, usa exclusivamente la diferencia '
-            'real ya calculada entre ingreso modelo e ingreso real; no conviertas '
-            'tallos a dinero nuevamente ni inventes precios. '
-        )
-    if resumen_rango_info:
-        restricciones_respuesta += (
-            'Para la pregunta sobre el rango de semanas/anio solicitado, usa '
-            'exclusivamente el promedio de Tallos/m2 ya calculado en el '
-            'Resumen historico por rango (csv); no lo recalcules ni inventes '
-            'otro valor. '
-        )
 
-    instruccion_web = (
-        'Integra los resultados externos como referencias informativas y '
-        'distingue claramente esos datos del contexto interno. '
-        if consulta_externa else ''
-    )
-    seccion_web = f'{contexto_web}\n' if contexto_web else ''
-    seccion_rango = (
-        f'Resumen historico por rango (csv):\n{resumen_rango_info}\n'
-        if resumen_rango_info else ''
-    )
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde en espanol. '
-        'Usa el resumen y las definiciones de negocio suministrados. '
-        f'{instruccion_web}'
+        f'{alcance_respuesta}'
         f'{DEFINICION_AMORTIGUADOR_IA} '
         f'{RECOMENDACION_AMORTIGUADOR_IA} '
         'Nunca afirmes que el amortiguador no forma parte de la informacion. '
@@ -2074,19 +1469,11 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
         f'Finca en contexto: {finca_contexto}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
-        'Resumen de ingresos calculados (no recalcular ni recalcules):\n'
-        f'{resumen_ingresos_info}\n'
-        f'{seccion_rango}'
-        f'{seccion_web}'
+        f'{contexto_web}\n'
         'Pregunta del usuario:\n'
         f'{pregunta_limpia}'
     )
-    try:
-        return consultar_llm(prompt, max_tokens=1024)
-    except TypeError as exc:
-        if 'max_tokens' not in str(exc):
-            raise
-        return consultar_llm(prompt)
+    return consultar_llm(prompt)
 
 
 def alinear_series_para_ajuste(*series):
@@ -2440,44 +1827,6 @@ def construir_objetivo_entrenamiento_con_patron(
     )
 
 
-def entrenar_y_predecir_modelo_compartido(
-    x_train_df,
-    y_train,
-    x_frame,
-    var_proy,
-):
-    """Entrena/reutiliza y predice igual en los flujos individual y masivo."""
-    x_train = x_train_df.reset_index(drop=True).copy()
-    x_predict = x_frame.reset_index(drop=True).copy()
-    y_values = np.asarray(y_train, dtype=float).reshape(-1)
-    if len(x_train) != len(y_values):
-        raise ValueError(
-            'Las variables y el objetivo de entrenamiento deben tener igual longitud.'
-        )
-
-    firma = hashlib.sha256()
-    firma.update(
-        pd.util.hash_pandas_object(x_train, index=True).to_numpy().tobytes()
-    )
-    firma.update(np.asarray(y_values, dtype=np.float64).tobytes())
-    firma.update('|'.join(map(str, x_train.columns)).encode('utf-8'))
-    firma_modelo = firma.hexdigest()[:16]
-    nombre_modelo = ''.join(
-        ch if ch.isalnum() else '_' for ch in str(var_proy)
-    )
-    train_key = f'entrenado_compartido_{nombre_modelo}_{firma_modelo}_v5'
-
-    modelo_existente = train_key in st.session_state
-    if modelo_existente:
-        modelo = st.session_state[train_key]
-    else:
-        modelo = fit_production_model(x_train, y_values)
-        st.session_state[train_key] = modelo
-
-    predicciones = modelo.predict(x_predict)
-    return modelo, np.asarray(predicciones, dtype=float), train_key, not modelo_existente
-
-
 models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
 
@@ -2487,12 +1836,11 @@ if logo_path.exists():
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
-    with st.expander("Ver README", expanded=False):
+    with st.expander("Ver README"):
         try:
-            contenido_readme = readme_path.read_text(encoding="utf-8")
+            st.markdown(readme_path.read_text(encoding="utf-8"))
         except Exception:
-            contenido_readme = readme_path.read_text(errors="ignore")
-        st.markdown(contenido_readme)
+            st.code(readme_path.read_text(errors="ignore"))
 
 llm_ok, llm_estado = estado_configuracion_llm()
 if llm_ok:
@@ -2530,13 +1878,6 @@ if 'tabla_mse_patron_masivo' not in st.session_state:
     st.session_state['tabla_mse_patron_masivo'] = pd.DataFrame()
 if 'mostrar_dashboard_ia' not in st.session_state:
     st.session_state['mostrar_dashboard_ia'] = False
-if 'usuario_autenticado' not in st.session_state:
-    st.session_state['usuario_autenticado'] = ''
-
-if st.runtime.exists():
-    exigir_acceso_al_sistema()
-    sincronizar_readme_automaticamente()
-    render_gestion_usuarios()
 
 
 def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, preservar_archivo_sesion=True):
@@ -2556,13 +1897,7 @@ def preparar_estado_para_nuevo_archivo_base(state=None, nuevo_archivo_id=None, p
 
 
 def consulta_solicita_dashboard(texto_consulta):
-    texto = ''.join(
-        caracter
-        for caracter in unicodedata.normalize(
-            'NFKD', str(texto_consulta or '').strip().casefold()
-        )
-        if not unicodedata.combining(caracter)
-    )
+    texto = (texto_consulta or '').strip().lower()
     if not texto:
         return False
 
@@ -2579,33 +1914,6 @@ def consulta_solicita_dashboard(texto_consulta):
         'kpis'
     ]
     return any(palabra in texto for palabra in palabras_clave)
-
-
-def consulta_solicita_totales_modelo(texto_consulta):
-    texto = ''.join(
-        caracter
-        for caracter in unicodedata.normalize(
-            'NFKD', str(texto_consulta or '').strip().casefold()
-        )
-        if not unicodedata.combining(caracter)
-    )
-    patrones = [
-        r'\btotales?\b.*\b(?:modelo|produccion)\b',
-        r'\b(?:modelo|produccion)\b.*\btotales?\b',
-        r'\bmodelo\s+vs\s+(?:produccion|real)\b',
-        r'\bcompar(?:a|ar|ativo|acion)\b.*\bmodelo\b',
-    ]
-    return any(re.search(patron, texto) for patron in patrones)
-
-
-def preparar_estado_consulta_ia(state, pregunta):
-    state['respuesta_pregunta_claude'] = ''
-    state['error_pregunta_claude'] = ''
-    state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(pregunta)
-    state['mostrar_totales_modelo_ia'] = consulta_solicita_totales_modelo(
-        pregunta
-    )
-    return state
 
 
 @st.fragment
@@ -2772,8 +2080,6 @@ def construir_prompt_dashboard_anthropic(df_base, base_modelo, instruccion_extra
 
 
 def render_dashboard_base(df_base, usar_expander=True):
-    if not st.session_state.get('mostrar_totales_modelo_ia', False):
-        return
     contenedor_dashboard = (
         st.expander('Dashboard de la base', expanded=False)
         if usar_expander else st.container()
@@ -3009,8 +2315,12 @@ def render_dashboard_base(df_base, usar_expander=True):
 def render_preguntas_claude(df_base, selected_finca):
     with st.expander('Preguntas a la IA (Anthropic/GitHub Models/OpenAI)', expanded=True):
         st.caption(
-            'Consulta sobre variedades, fincas, usos y precios presentes en los datos cargados.'
+            'Consulta sobre variedades, fincas, usos y precios, segun datos cargados.'
         )
+
+        if st.session_state.get('mostrar_dashboard_ia', False):
+            render_dashboard_base(df_base, usar_expander=False)
+            st.divider()
 
         st.write()
         with st.form('form_pregunta_IA', clear_on_submit=True):
@@ -3021,9 +2331,8 @@ def render_preguntas_claude(df_base, selected_finca):
             enviar_pregunta = st.form_submit_button('Preguntale a la IA')
 
         if enviar_pregunta:
-            preparar_estado_consulta_ia(
-                st.session_state,
-                pregunta_negocio,
+            st.session_state['mostrar_dashboard_ia'] = consulta_solicita_dashboard(
+                pregunta_negocio
             )
             try:
                 respuesta_negocio = responder_pregunta_anthropic(
@@ -3039,10 +2348,6 @@ def render_preguntas_claude(df_base, selected_finca):
             except Exception as exc:
                 st.session_state['error_pregunta_claude'] = str(exc)
                 st.session_state['respuesta_pregunta_claude'] = ''
-
-        if st.session_state.get('mostrar_dashboard_ia', False):
-            render_dashboard_base(df_base, usar_expander=False)
-            st.divider()
 
         if st.session_state.get('error_pregunta_claude'):
             st.error(
@@ -3170,13 +2475,9 @@ if file_path is not None:
         return candidatos[0]
 
     def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy):
-        # Individual y masiva comparten esta seleccion por edad del cultivo.
+        # Replica exacta de la comparacion del flujo individual para mantener
+        # el mismo patron seleccionado en la corrida masiva.
         arr_list = []
-        target_age = prepare_crop_age_series(df_variedad_objetivo)
-        if target_age.empty:
-            raise ValueError(
-                'No hay datos suficientes para determinar la edad del cultivo.')
-        target_stage = str(target_age['Etapa_cultivo'].iloc[-1])
         for name, group in df_patrones.groupby(['Bloque&Varid']):
             try:
                 raw_name = name[0] if isinstance(name, tuple) else name
@@ -3191,27 +2492,53 @@ if file_path is not None:
                     ),
                 ):
                     continue
-                mse = calculate_age_aligned_normalized_stems_mse(
+                mse = calculate_normalized_stems_mse(
                     df_variedad_objetivo,
                     group,
                 )
                 if mse is None:
                     continue
-                candidate_age = prepare_crop_age_series(group)
-                if candidate_age.empty:
-                    continue
-                candidate_stage = str(candidate_age['Etapa_cultivo'].iloc[-1])
-                stage_penalty = int(candidate_stage != target_stage)
-                arr_list.append(
-                    (candidate_name, mse, stage_penalty)
+                patron_weekly = construir_patron_semanal(group)
+                trabajo = (
+                    df_variedad_objetivo[[
+                        'Anio', 'Semana', 'Tallos/m2', 'Produccion']]
+                    .dropna()
+                    .reset_index(drop=True)
                 )
+                trabajo['Anio'] = pd.to_numeric(
+                    trabajo['Anio'], errors='coerce')
+                trabajo['Semana'] = pd.to_numeric(
+                    trabajo['Semana'], errors='coerce')
+                trabajo['Tallos/m2'] = pd.to_numeric(
+                    trabajo['Tallos/m2'], errors='coerce')
+                trabajo['Produccion'] = pd.to_numeric(
+                    trabajo['Produccion'], errors='coerce')
+                trabajo = trabajo.dropna(
+                    subset=['Anio', 'Semana', 'Tallos/m2', 'Produccion']
+                )
+                trabajo['Anio'] = trabajo['Anio'].astype(int)
+                trabajo['Semana'] = trabajo['Semana'].astype(int)
+                trabajo = trabajo.sort_values(
+                    ['Anio', 'Semana']).reset_index(drop=True)
+                trabajo = trabajo.merge(
+                    patron_weekly,
+                    on=['Anio', 'Semana'],
+                    how='left'
+                )
+                trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
+                    trabajo['Tallos/m2']
+                )
+                trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
+                    trabajo['Produccion']
+                )
+                arr_list.append((candidate_name, mse))
             except Exception:
                 continue
 
         if not arr_list:
             raise ValueError('No hay suficientes patrones para comparar.')
 
-        arr_list.sort(key=lambda x: (x[2], x[1]))
+        arr_list.sort(key=lambda x: x[1])
         patron_seleccionado = seleccionar_patron(arr_list, var_proy)
         return patron_seleccionado, False
 
@@ -3456,11 +2783,9 @@ if file_path is not None:
             return df_tabla
 
         def estilo_sn(valor):
-            estado = clasificar_sn(valor)
-            if estado == 'ok':
+            valor_num = pd.to_numeric(valor, errors='coerce')
+            if pd.notna(valor_num) and valor_num > 13:
                 return 'background-color: #C6EFCE; color: #006100; font-weight: 700;'
-            if estado == 'alerta':
-                return 'background-color: #F28C28; color: #5A2D00; font-weight: 700;'
             return ''
 
         return df_tabla.style.map(estilo_sn, subset=[col_sn])
@@ -3641,33 +2966,25 @@ if file_path is not None:
         y_frame = pd.DataFrame(
             eval_actual_df['Produccion']).reset_index(drop=True)
 
-        if {'Anio', 'Semana', 'Tallos/m2'}.issubset(y_actual.columns):
-            promedio_semanal = (
-                y_actual[['Anio', 'Semana', 'Tallos/m2']]
-                .dropna()
-                .groupby(['Anio', 'Semana'], as_index=False)['Tallos/m2']
-                .mean()
+        split_idx = len(x_train_df)
+        split_idx = max(split_idx, 1)
+
+        model_name = ''.join(
+            ch if ch.isalnum() else '_' for ch in str(var_proy))
+        train_key = f'entrenado_masivo_{model_name}_cal_v4'
+
+        if train_key not in st.session_state:
+            modelo = fit_production_model(
+                x_train_df.iloc[:split_idx],
+                y_train_df.iloc[:split_idx].values.ravel()
             )
+            st.session_state[train_key] = modelo
         else:
-            promedio_semanal = pd.DataFrame(
-                columns=['Anio', 'Semana', 'Tallos/m2']
-            )
-        factor_correccion = calcular_factor_correccion_media_anio_en_curso(
-            promedio_semanal
-        ) if not promedio_semanal.empty else 1.0
-        if np.isclose(factor_correccion, 0.0) or not np.isfinite(factor_correccion):
-            factor_correccion = 1.0
+            modelo = st.session_state[train_key]
 
-        modelo, predicciones, _, _ = entrenar_y_predecir_modelo_compartido(
-            x_train_df,
-            y_train_df.values.ravel(),
-            x_frame,
-            var_proy,
-        )
-
-        y_pred = pd.DataFrame(predicciones, columns=['Estimado_modelo'])
+        y_pred = pd.DataFrame(modelo.predict(x_frame),
+                              columns=['Estimado_modelo'])
         pred_vals = y_pred['Estimado_modelo'].to_numpy(copy=True)
-        pred_vals = pred_vals * factor_correccion
         proy_vals = proy.reset_index(drop=True).to_numpy(copy=True)
         prod_real_vals = y_frame.iloc[:len(proy_vals), 0].to_numpy(copy=True)
         pred_vals, proy_vals, prod_real_vals = alinear_series_para_ajuste(
@@ -3684,11 +3001,11 @@ if file_path is not None:
         if media_modelo != 0 and not np.isclose(media_modelo, media_real):
             pred_vals = pred_vals * (media_real / media_modelo)
 
-        pred_vals, factor_reciente, semanas_recientes, origen_reciente = aplicar_ajuste_reciente_4_semanas(
+        pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
             pred_vals,
             eval_actual_df,
             var_proy,
-            config_factor_diferencia,
+            config_factor_diferencia
         )
         pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
             modelo,
@@ -3697,9 +3014,6 @@ if file_path is not None:
             eval_actual_df.iloc[:len(pred_vals)],
             pred_vals,
             float(m2_1),
-        )
-        amortiguador = corregir_signo_amortiguador_con_error_real(
-            amortiguador, var_proy, config_factor_diferencia
         )
 
         y_pred['Estimado_modelo'] = pred_vals
@@ -3723,10 +3037,9 @@ if file_path is not None:
             'Amortiguador_sobreestimacion': amortiguador[:n_export],
             'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
             'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
-            'Factor_correccion': [factor_correccion] * n_export,
-            'Factor_ajuste_reciente_4_semanas': [factor_reciente] * n_export,
-            'Semanas_ajuste_reciente': [semanas_recientes] * n_export,
-            'Origen_ajuste_reciente': [origen_reciente] * n_export,
+            'Factor_diferencia_2025': [factor_variedad] * n_export,
+            'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
+            'Origen_factor_2025': [origen_factor] * n_export,
         })
         df_export = add_buffer_projection_columns(
             df_export,
@@ -3820,18 +3133,34 @@ if file_path is not None:
             df_export_todo = pd.DataFrame(
                 columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
 
-        resumen_ajustes_masivo = construir_resumen_ajustes_media(
-            df_export_todo
-        )
-        if not resumen_ajustes_masivo.empty:
-            with st.expander(
-                'Resumen de todos los ajustes de media', expanded=False
-            ):
-                st.dataframe(
-                    resumen_ajustes_masivo,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        if (
+            not df_export_todo.empty
+            and {'Variedad_proyectada', 'Origen_factor_2025', 'Factor_diferencia_2025'}.issubset(df_export_todo.columns)
+        ):
+            resumen_factor = (
+                df_export_todo[
+                    ['Variedad_proyectada', 'Origen_factor_2025',
+                        'Factor_diferencia_2025']
+                ]
+                .drop_duplicates(subset=['Variedad_proyectada'])
+            )
+            total_var_factor = int(len(resumen_factor))
+            var_factor_variedad = int(
+                (resumen_factor['Origen_factor_2025'] == 'variedad').sum()
+            )
+            var_factor_global = int(
+                (resumen_factor['Origen_factor_2025'] == 'global').sum()
+            )
+            var_factor_neutral = int(
+                (resumen_factor['Origen_factor_2025'] == 'neutral').sum()
+            )
+            st.caption(
+                'Factor por cambio de media 2025 aplicado en semanas 24-52 de 2026: '
+                f'{total_var_factor} variedades | '
+                f'por_variedad={var_factor_variedad}, '
+                f'global={var_factor_global}, '
+                f'neutral={var_factor_neutral}'
+            )
 
         df_sn_por_caso = pd.DataFrame(columns=['Bloque&Varid', 'S/N'])
         if tablas_mse_masivo:
@@ -3938,17 +3267,6 @@ if file_path is not None:
         df_export_amortiguado = simplificar_salida_amortiguada(
             df_estimado_ordenado.reset_index(drop=True),
             columnas_base_export,
-        )
-        buffer_amortig_act_masivo = io.BytesIO()
-        with pd.ExcelWriter(buffer_amortig_act_masivo, engine='openpyxl') as writer:
-            df_export_amortiguado.to_excel(
-                writer,
-                sheet_name='Amortiguador_generado',
-                index=False,
-            )
-        descargar_excel_automaticamente(
-            buffer_amortig_act_masivo.getvalue(),
-            'AMORTIG_ACT.xlsx',
         )
 
         variedades_unicas_proyectadas = (
@@ -4164,13 +3482,22 @@ if file_path is not None:
         .sort_values('Anio')
     )
 
-    factor_correccion = 1.0
-    if not promedio_semanal.empty:
-        factor_correccion = calcular_factor_correccion_media_anio_en_curso(
-            promedio_semanal
+    factor_correccion = 1.4
+    if not promedio_semanal_anual.empty:
+        anio_objetivo = promedio_semanal_anual['Anio'].max()
+        prom_objetivo = float(
+            promedio_semanal_anual.loc[
+                promedio_semanal_anual['Anio'] == anio_objetivo,
+                'promedio_semanal_tallos_m2'
+            ].iloc[0]
         )
-    if np.isclose(factor_correccion, 0.0) or not np.isfinite(factor_correccion):
-        factor_correccion = 1.0
+        historico = promedio_semanal_anual[
+            promedio_semanal_anual['Anio'] != anio_objetivo
+        ]['promedio_semanal_tallos_m2']
+        prom_historico = float(
+            historico.mean()) if not historico.empty else prom_objetivo
+        if prom_historico != 0:
+            factor_correccion = prom_objetivo / prom_historico
 
     n_train = len(entrenamiento_df)
     if n_train == 0:
@@ -4196,23 +3523,21 @@ if file_path is not None:
 
     split_idx = len(x_train_df)
     split_idx = max(split_idx, 1)
+    X_train = x_train_df.iloc[:split_idx]
+    y_train = y_train_df.iloc[:split_idx]
     inicio_train = entrenamiento_df.iloc[0]
     fin_train = entrenamiento_df.iloc[split_idx - 1]
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    modelo, predicciones, train_key, modelo_nuevo = (
-        entrenar_y_predecir_modelo_compartido(
-            x_train_df,
-            y_train_df.values.ravel(),
-            x_frame,
-            var_proy,
-        )
-    )
+    train_key = f'entrenado_{model_name}_cal_v4'
 
-    if modelo_nuevo:
+    if train_key not in st.session_state:
+        modelo = fit_production_model(X_train, y_train.values.ravel())
+        st.session_state[train_key] = modelo
         with open(model_file, 'wb') as f:
             pickle.dump(modelo, f)
+        # st.info('Modelo entrenado automaticamente una vez con el 80% de los datos.')
         st.caption(
             'Rango de entrenamiento usado: '
             f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
@@ -4221,9 +3546,9 @@ if file_path is not None:
         )
         st.caption(f'Modelo guardado en: {model_file.name}')
     else:
+        modelo = st.session_state[train_key]
         st.caption(
-            'Modelo compartido ya entrenado en esta sesion; se reutiliza '
-            'para la proyeccion.')
+            'Modelo ya entrenado en esta sesion; se reutiliza para la proyeccion.')
         st.caption(
             'Rango de entrenamiento configurado: '
             f"{int(inicio_train['Anio'])}-{int(inicio_train['Semana']):02d} "
@@ -4231,7 +3556,7 @@ if file_path is not None:
             f"({split_idx} de {len(entrenamiento_df)} registros)."
         )
 
-    pred_1 = predicciones
+    pred_1 = modelo.predict(x_frame)
 
     y_pred = pd.DataFrame(pred_1, columns=['Estimado_modelo'])
     y_pred['Estimado_modelo'] = y_pred['Estimado_modelo'] * factor_correccion
@@ -4249,11 +3574,11 @@ if file_path is not None:
         pred_vals = pred_vals * (media_real / media_modelo)
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
-    pred_vals, factor_reciente, semanas_recientes, origen_reciente = aplicar_ajuste_reciente_4_semanas(
+    pred_vals, factor_variedad, semanas_factor_aplicadas, origen_factor = aplicar_factor_diferencia_2026_semanas_24_52(
         pred_vals,
         eval_actual_df,
         var_proy,
-        config_factor_diferencia,
+        config_factor_diferencia
     )
     pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
         modelo,
@@ -4262,9 +3587,6 @@ if file_path is not None:
         eval_actual_df.iloc[:len(pred_vals)],
         pred_vals,
         float(m2_1),
-    )
-    amortiguador = corregir_signo_amortiguador_con_error_real(
-        amortiguador, var_proy, config_factor_diferencia
     )
 
     y_pred['Estimado_modelo'] = pred_vals
@@ -4367,6 +3689,14 @@ if file_path is not None:
     st.pyplot(fig, clear_figure=True)
 
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
+    st.write(
+        'Factor por cambio de media 2025 aplicado (semanas 24-52 de 2026)',
+        round(factor_variedad, 6),
+        'origen:',
+        origen_factor,
+        'semanas afectadas:',
+        semanas_factor_aplicadas
+    )
     with st.expander('Promedio semanal Tallos/m2 por anio', expanded=False):
         st.dataframe(promedio_semanal_anual, use_container_width=True)
 
@@ -4388,25 +3718,14 @@ if file_path is not None:
         'Error_sobreestimacion_promedio': [error_sobreestimacion_promedio] * n_export,
         'Porcentaje_amortiguador_sugerido': [porcentaje_amortiguador * 100.0] * n_export,
         'Factor_correccion': [factor_correccion] * n_export,
-        'Factor_ajuste_reciente_4_semanas': [factor_reciente] * n_export,
-        'Semanas_ajuste_reciente': [semanas_recientes] * n_export,
-        'Origen_ajuste_reciente': [origen_reciente] * n_export,
+        'Factor_diferencia_2025': [factor_variedad] * n_export,
+        'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
+        'Origen_factor_2025': [origen_factor] * n_export,
     })
     df_export = add_buffer_projection_columns(
         df_export,
         float(m2_1),
     )
-
-    resumen_ajustes_individual = construir_resumen_ajustes_media(df_export)
-    if not resumen_ajustes_individual.empty:
-        with st.expander(
-            'Resumen de todos los ajustes de media', expanded=False
-        ):
-            st.dataframe(
-                resumen_ajustes_individual,
-                use_container_width=True,
-                hide_index=True,
-            )
 
     df_export['Error'] = (
         df_export['Produccion_real'] - df_export['Estimado_modelo']
@@ -4465,59 +3784,6 @@ if file_path is not None:
         df_export,
         ['Variedad_proyectada', 'Anio_Semana'],
     )
-    df_amortiguador_generado = df_export[
-        [
-            'Variedad_proyectada',
-            'Anio_Semana',
-            'Amortiguador_sobreestimacion',
-            'M2_amortiguador_adicional',
-            'Estimado_con_amortiguador_IA',
-            'Porcentaje_amortiguador_sugerido',
-        ]
-    ].copy()
-    df_amortiguador_generado['Amortiguador_sobreestimacion'] = pd.to_numeric(
-        df_amortiguador_generado['Amortiguador_sobreestimacion'],
-        errors='coerce',
-    ).round(2)
-    df_amortiguador_generado['M2_amortiguador_adicional'] = np.rint(
-        pd.to_numeric(
-            df_amortiguador_generado['M2_amortiguador_adicional'],
-            errors='coerce',
-        )
-    ).astype('Int64')
-    df_amortiguador_generado['Estimado_con_amortiguador_IA'] = np.rint(
-        pd.to_numeric(
-            df_amortiguador_generado['Estimado_con_amortiguador_IA'],
-            errors='coerce',
-        )
-    ).astype('Int64')
-    df_amortiguador_generado['Porcentaje_amortiguador_sugerido'] = pd.to_numeric(
-        df_amortiguador_generado['Porcentaje_amortiguador_sugerido'],
-        errors='coerce',
-    ).round(2)
-    df_amortiguador_generado = df_amortiguador_generado.rename(columns={
-        'M2_amortiguador_adicional': 'M2 Amortiguador',
-        'Estimado_con_amortiguador_IA': 'Proyeccion_con_amortiguador_IA',
-        'Porcentaje_amortiguador_sugerido': '% Amortiguador sugerido',
-    })
-    buffer_amortiguador = io.BytesIO()
-    with pd.ExcelWriter(buffer_amortiguador, engine='openpyxl') as writer:
-        df_amortiguador_generado.to_excel(
-            writer,
-            sheet_name='Amortiguador_generado',
-            index=False,
-        )
-    descargar_excel_automaticamente(
-        buffer_amortiguador.getvalue(),
-        'AMORTIG_ACT.xlsx',
-    )
-    st.download_button(
-        'Exportar amortiguador generado',
-        data=buffer_amortiguador.getvalue(),
-        file_name='AMORTIG_ACT.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        key='descargar_amortiguador_generado'
-    )
     base_proy_individual = df_export_amortiguado_individual.copy()
     base_proy_individual['Finca_proyectada'] = str(selected_finca)
     base_proy_individual['Estimado_modelo'] = np.rint(pd.to_numeric(
@@ -4546,7 +3812,7 @@ if file_path is not None:
     st.download_button(
         'Exportar datos a Excel',
         data=buffer_individual.getvalue(),
-        file_name='Proyecto.xlsx',
+        file_name='Proy.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         key='descargar_individual'
     )

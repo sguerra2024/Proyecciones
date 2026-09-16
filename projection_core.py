@@ -3,7 +3,6 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-import re
 
 import numpy as np
 import pandas as pd
@@ -30,59 +29,38 @@ MODEL_PARAMS = {
     "min_samples_split": 2,
     "max_features": "sqrt",
 }
-BUFFER_COLUMNS = [
-    "Prediccion_base", "m2Variedad", "Tallos/m2", "Semana", "Dif_previo"
-]
+BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
-REAL_PRODUCTION_TARGET_WEIGHT = 0.55
-PESO_AJUSTE_REAL_2026 = 1.5
-PATTERN_PRODUCTION_TARGET_WEIGHT = 0.45
-
-
-def calculate_evaluation_area_metrics(
-    relative_error: "pd.Series | np.ndarray",
-) -> dict[str, float | int]:
-    """Calcula las areas firmadas de %dif respecto al eje cero.
-
-    El area positiva corresponde a subestimacion y el area negativa conserva
-    su signo porque representa sobreestimacion. Estas areas son la senal
-    integral que utiliza el amortiguador como actuador.
-    """
-    values = pd.to_numeric(
-        pd.Series(relative_error), errors="coerce"
-    ).dropna().to_numpy(dtype=float)
-    values = values[np.isfinite(values)]
-    area_positive = float(np.maximum(values, 0.0).sum())
-    area_negative = float(np.minimum(values, 0.0).sum())
-    return {
-        "area_positive": area_positive,
-        "area_negative": area_negative,
-        "area_net": area_positive + area_negative,
-        "evaluation_cases": int(values.size),
-    }
+REAL_PRODUCTION_TARGET_WEIGHT = 0.70
+PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
 
 
 def load_overestimation_calibration(
     evaluation_path: "Path | None" = None,
 ) -> dict[str, float | int | str]:
-    """Carga la evaluacion real que calibra el actuador del amortiguador."""
+    """Calibra el limite con errores relativos positivos y negativos."""
     path = evaluation_path or (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
     )
+    fallback = {
+        "max_buffer_rate": DEFAULT_MAX_BUFFER_RATE,
+        "risk_threshold": BUFFER_RISK_THRESHOLD,
+        "error_cases": 0,
+        "overestimation_cases": 0,
+        "underestimation_cases": 0,
+        "evaluated_weeks": DEFAULT_EVALUATED_WEEKS,
+        "source": "fallback",
+    }
     if not path.exists():
-        raise ValueError(
-            "No existe una evaluacion real inicial; el amortiguador no puede calcularse."
-        )
+        return fallback
 
     try:
         evaluation = pd.read_csv(path, encoding="utf-8-sig")
-    except Exception as exc:
-        raise ValueError(
-            f"No fue posible leer la evaluacion real: {path}"
-        ) from exc
+    except Exception:
+        return fallback
     error_column = next(
         (
             column for column in evaluation.columns
@@ -91,23 +69,18 @@ def load_overestimation_calibration(
         None,
     )
     if error_column is None:
-        raise ValueError(
-            "La evaluacion real no contiene la columna %dif o error_relativo."
-        )
+        return fallback
 
     relative_error = pd.to_numeric(
         evaluation[error_column], errors="coerce"
     ).dropna()
     relative_error = relative_error[relative_error < 1.0]
     if relative_error.empty:
-        raise ValueError(
-            "La evaluacion real no contiene errores relativos validos."
-        )
+        return fallback
 
     absolute_error_on_prediction = (
         relative_error.abs() / (1.0 - relative_error)
     )
-    areas = calculate_evaluation_area_metrics(relative_error)
     evaluated_weeks = DEFAULT_EVALUATED_WEEKS
     if {"Anio", "Semana"}.issubset(evaluation.columns):
         evaluated_periods = evaluation[["Anio", "Semana"]].copy()
@@ -122,20 +95,11 @@ def load_overestimation_calibration(
             evaluated_weeks = int(len(evaluated_periods))
 
     return {
-        # El amortiguador nunca puede superar el 10% del area de la variedad,
-        # aunque la calibracion historica sugiera un porcentaje mayor.
-        "max_buffer_rate": min(
-            float(absolute_error_on_prediction.median()),
-            DEFAULT_MAX_BUFFER_RATE,
-        ),
+        "max_buffer_rate": float(absolute_error_on_prediction.median()),
         "risk_threshold": BUFFER_RISK_THRESHOLD,
         "error_cases": int(len(relative_error)),
         "overestimation_cases": int((relative_error < 0).sum()),
         "underestimation_cases": int((relative_error > 0).sum()),
-        "area_positive": areas["area_positive"],
-        "area_negative": areas["area_negative"],
-        "area_net": areas["area_net"],
-        "evaluation_cases": areas["evaluation_cases"],
         "evaluated_weeks": evaluated_weeks,
         "source": str(path),
     }
@@ -164,25 +128,6 @@ def save_buffer_evaluation_report(
     )
     report["%dif"] = error_report["%dif"].to_numpy()
     report["error_relativo"] = report["%dif"]
-    area_metrics = calculate_evaluation_area_metrics(report["%dif"])
-    report["area_subestimacion"] = area_metrics["area_positive"]
-    report["area_sobreestimacion"] = area_metrics["area_negative"]
-    report["area_neta"] = area_metrics["area_net"]
-
-    semana_column = normalized_columns.get("semana")
-    bloque_column = normalized_columns.get("bloque")
-    variedad_column = normalized_columns.get("variedad")
-    if semana_column and bloque_column and variedad_column:
-        semana_str = pd.to_numeric(
-            report[semana_column], errors="coerce"
-        ).astype("Int64").astype(str)
-        bloque_str = pd.to_numeric(
-            report[bloque_column], errors="coerce"
-        ).astype("Int64").astype(str).str.zfill(3)
-        variedad_str = report[variedad_column].astype(str).str.strip()
-        report["Semana&Bloque&Varid"] = (
-            semana_str + "&" + bloque_str + "&" + variedad_str
-        )
 
     destination = Path(destination_path) if destination_path else (
         Path(__file__).with_name("Evaluacion")
@@ -199,7 +144,6 @@ def save_buffer_evaluation_report(
     return {
         "rows": int(report["%dif"].notna().sum()),
         "evaluated_weeks": int(len(periods)),
-        **area_metrics,
         "source": str(destination),
         "values": report["%dif"].dropna().tolist(),
     }
@@ -319,7 +263,6 @@ def apply_overestimation_buffer(
         1,
         int(calibration.get("evaluated_weeks", DEFAULT_EVALUATED_WEEKS)),
     )
-    exclude_latest_weeks = 4 if evaluated_weeks >= DEFAULT_EVALUATED_WEEKS else 0
 
     if {"Anio", "Semana"}.issubset(history.columns):
         order = history.assign(
@@ -330,12 +273,7 @@ def apply_overestimation_buffer(
         positions = order.sort_values(["__anio", "__semana"])[
             "__position"
         ].to_numpy(dtype=int)
-        if len(positions) >= evaluated_weeks:
-            positions = positions[-evaluated_weeks:]
-            if exclude_latest_weeks and len(positions) > exclude_latest_weeks:
-                positions = positions[:-exclude_latest_weeks]
-        else:
-            positions = positions[-len(positions):]
+        positions = positions[-evaluated_weeks:]
         history = history.iloc[positions].reset_index(drop=True)
         history_features = history_features.iloc[positions].reset_index(
             drop=True)
@@ -344,13 +282,6 @@ def apply_overestimation_buffer(
         history_features = history_features.tail(
             evaluated_weeks
         ).reset_index(drop=True)
-        if len(history) >= evaluated_weeks:
-            if exclude_latest_weeks and len(history) > exclude_latest_weeks:
-                history = history.iloc[:-
-                                       exclude_latest_weeks].reset_index(drop=True)
-                history_features = history_features.iloc[
-                    :-exclude_latest_weeks
-                ].reset_index(drop=True)
 
     historical_predictions = production_model.predict(history_features)
     error_report = calculate_model_error_report(
@@ -360,7 +291,7 @@ def apply_overestimation_buffer(
     relative_error = error_report["%dif"].to_numpy(dtype=float)
     signed_error = relative_error * actual
     finite_signed_error = signed_error[np.isfinite(signed_error)]
-    average_error = float(np.max(finite_signed_error)
+    average_error = float(np.mean(finite_signed_error)
                           ) if finite_signed_error.size else 0.0
     valid_area = float(m2_variedad)
     if not np.isfinite(valid_area) or valid_area <= 0:
@@ -378,48 +309,22 @@ def apply_overestimation_buffer(
     if signed_error.size == 0 or not np.any(~np.isclose(signed_error, 0.0)):
         return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
 
-    max_buffer_rate = min(
-        float(calibration["max_buffer_rate"]),
-        DEFAULT_MAX_BUFFER_RATE,
-    )
+    max_buffer_rate = float(calibration["max_buffer_rate"])
     risk_threshold = float(calibration["risk_threshold"])
-    evaluation_cases = int(calibration.get("evaluation_cases", 0))
-    if evaluation_cases <= 0:
-        raise ValueError(
-            "El amortiguador requiere una evaluacion real con al menos un caso."
-        )
-    # Actuador integral: el area neta respecto al eje cero conserva la
-    # memoria de la evaluacion. Positiva pide reservar; negativa pide liberar.
-    area_control = float(calibration["area_net"]) / evaluation_cases
 
     signed_error_per_m2 = signed_error / valid_area
-
-    # Senal de retroalimentacion (equivalente al retorno de un actuador): el
-    # %dif firmado por m2 del periodo anterior. En entrenamiento se usa el
-    # valor propio del primer registro (no hay periodo previo disponible);
-    # en prediccion se arrastra el ultimo valor real conocido, ya que el
-    # error real de las semanas futuras aun no existe.
-    dif_previo_train = (
-        np.concatenate([signed_error_per_m2[:1], signed_error_per_m2[:-1]])
-        if signed_error_per_m2.size else signed_error_per_m2
-    )
-    ultimo_dif_conocido = (
-        float(signed_error_per_m2[-1]) if signed_error_per_m2.size else 0.0
-    )
 
     train_buffer_features = pd.DataFrame({
         "Prediccion_base": historical_predictions,
         "m2Variedad": np.full(len(historical_predictions), valid_area),
         "Tallos/m2": history["Tallos/m2"].to_numpy(dtype=float),
         "Semana": history["Semana"].to_numpy(dtype=float),
-        "Dif_previo": dif_previo_train,
     })
     prediction_buffer_features = pd.DataFrame({
         "Prediccion_base": base_predictions,
         "m2Variedad": np.full(len(base_predictions), valid_area),
         "Tallos/m2": evaluation_df["Tallos/m2"].to_numpy(dtype=float),
         "Semana": evaluation_df["Semana"].to_numpy(dtype=float),
-        "Dif_previo": np.full(len(base_predictions), ultimo_dif_conocido),
     })
     buffer_model = RandomForestRegressor(**MODEL_PARAMS)
     buffer_model.fit(
@@ -428,21 +333,9 @@ def apply_overestimation_buffer(
     estimated_error = buffer_model.predict(
         prediction_buffer_features[BUFFER_COLUMNS]
     ) * valid_area
-    estimated_error += base_predictions * area_control
-    negative_error_ratio = float(np.mean(signed_error < 0.0))
-    positive_error_ratio = float(np.mean(signed_error > 0.0))
-    dominant_direction = None
-    if negative_error_ratio >= 0.75:
-        dominant_direction = -1.0
-        estimated_error = -np.abs(estimated_error)
-    elif positive_error_ratio >= 0.75:
-        dominant_direction = 1.0
-        estimated_error = np.abs(estimated_error)
 
     direction_labels = signed_error > 0
-    if dominant_direction is not None:
-        direction_probability = np.ones_like(base_predictions)
-    elif np.unique(direction_labels).size == 1:
+    if np.unique(direction_labels).size == 1:
         direction_probability = np.ones_like(base_predictions)
     else:
         risk_model = RandomForestClassifier(
@@ -469,7 +362,6 @@ def apply_overestimation_buffer(
     buffer = np.where(
         direction_probability >= risk_threshold, estimated_buffer, 0.0
     )
-    # Signo alineado con %dif=(real-estimado)/real: positivo=subestima, negativo=sobreestima.
     prediction_mean = float(np.mean(base_predictions)
                             ) if base_predictions.size else 0.0
     buffer_rate = float(
@@ -520,11 +412,8 @@ def calculate_buffer_area_from_projection(
         buffer_stems, projected_productivity
     )
     valid_area = np.isfinite(buffer_area)
-    # Se usa floor para que el redondeo posterior de las exportaciones nunca
-    # convierta el limite en un valor superior al 10% del area disponible.
-    max_buffer_area = np.floor(total_area * DEFAULT_MAX_BUFFER_RATE)
     buffer_area[valid_area] = np.sign(buffer_area[valid_area]) * np.minimum(
-        np.abs(buffer_area[valid_area]), max_buffer_area
+        np.abs(buffer_area[valid_area]), np.floor(total_area)
     )
     return projected_productivity, buffer_area
 
@@ -646,241 +535,6 @@ def _prepare_production_dataset(
     return working.reset_index(drop=True)
 
 
-def calcular_ajuste_factor_diferencia_2026(
-    evaluation_dir: "Path | None" = None,
-    peso_ajuste: float = PESO_AJUSTE_REAL_2026,
-) -> dict[str, Any]:
-    """Corrige el factor estacional de 2025 con el error real observado en 2026.
-
-    Usa `errores_evaluacion_modelo.csv` (Anio==2026) y calcula, por variedad,
-    la razon `sum(Produccion) / sum(Estimado_modelo)`: valores <1 indican que
-    el modelo esta sobreestimando en la realidad reciente. `peso_ajuste`
-    amplifica (>1) o atenua (<1) la desviacion de esa razon respecto a 1.0
-    antes de limitar el resultado a [0.5, 1.5], para dar mas o menos peso a
-    la correccion real de 2026 frente al factor estacional de 2025.
-    """
-    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
-    ajustes: dict[str, float] = {}
-    ajuste_global = 1.0
-    errores_path = directorio / "errores_evaluacion_modelo.csv"
-    if not errores_path.exists():
-        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
-
-    try:
-        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
-    except Exception:
-        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
-
-    requeridas = {"Anio", "Bloque", "Variedad",
-                  "Estimado_modelo", "Produccion"}
-    if not requeridas.issubset(errores_df.columns):
-        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
-
-    trabajo = errores_df.copy()
-    trabajo["Anio"] = pd.to_numeric(trabajo["Anio"], errors="coerce")
-    trabajo["Estimado_modelo"] = pd.to_numeric(
-        trabajo["Estimado_modelo"], errors="coerce")
-    trabajo["Produccion"] = pd.to_numeric(
-        trabajo["Produccion"], errors="coerce")
-    # 'Bloque&Varid' en este CSV viene prefijado con la semana; se reconstruye
-    # el identificador canonico (igual al de factor_diferencia_2025_por_variedad.csv)
-    # a partir de 'Bloque' y 'Variedad'.
-    bloque_numerico = pd.to_numeric(trabajo["Bloque"], errors="coerce")
-    trabajo["__bloque_varid"] = np.where(
-        bloque_numerico.notna(),
-        bloque_numerico.astype("Int64").astype(str).str.zfill(3)
-        + trabajo["Variedad"].astype(str).str.strip(),
-        np.nan,
-    )
-    trabajo = trabajo[trabajo["Anio"] == 2026].dropna(
-        subset=["Estimado_modelo", "Produccion", "__bloque_varid"]
-    )
-    if trabajo.empty:
-        return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
-
-    limite_inferior, limite_superior = 0.5, 1.5
-
-    def _ponderar(ratio: float) -> float:
-        ratio_ponderado = 1.0 + peso_ajuste * (ratio - 1.0)
-        return float(np.clip(ratio_ponderado, limite_inferior, limite_superior))
-
-    for variedad, grupo in trabajo.groupby("__bloque_varid"):
-        suma_estimado = float(grupo["Estimado_modelo"].sum())
-        suma_real = float(grupo["Produccion"].sum())
-        if suma_estimado > 0:
-            ajustes[str(variedad)] = _ponderar(suma_real / suma_estimado)
-
-    suma_estimado_total = float(trabajo["Estimado_modelo"].sum())
-    suma_real_total = float(trabajo["Produccion"].sum())
-    if suma_estimado_total > 0:
-        ajuste_global = _ponderar(suma_real_total / suma_estimado_total)
-
-    return {"ajustes_por_variedad": ajustes, "ajuste_global": ajuste_global}
-
-
-def calcular_ajuste_reciente_4_semanas(
-    evaluation_dir: "Path | None" = None,
-    max_semanas: int = 4,
-    factor_minimo: float = 0.85,
-    factor_maximo: float = 1.15,
-    peso_individual: float = 0.70,
-) -> dict[str, Any]:
-    """Calcula un ajuste reciente por caso a partir de la evaluacion real.
-
-    El ajuste compara la produccion real contra ``Estimado_modelo`` en las
-    cuatro semanas mas recientes disponibles. Se usa la razon de sumas, que
-    evita dar el mismo peso a una variedad pequena y a una grande. Los casos
-    individuales se contraen hacia el factor global y se limitan para evitar
-    que una muestra corta produzca una correccion extrema.
-    """
-    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
-    errores_path = directorio / "errores_evaluacion_modelo.csv"
-    vacio = {
-        "ajustes_por_variedad": {},
-        "ajuste_global": 1.0,
-        "semanas": [],
-        "filas": 0,
-    }
-    if not errores_path.exists():
-        return vacio
-
-    try:
-        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
-    except Exception:
-        return vacio
-
-    requeridas = {
-        "Anio", "Semana", "Bloque", "Variedad",
-        "Estimado_modelo", "Produccion",
-    }
-    if not requeridas.issubset(errores_df.columns):
-        return vacio
-
-    trabajo = errores_df.copy()
-    for columna in ["Anio", "Semana", "Estimado_modelo", "Produccion"]:
-        trabajo[columna] = pd.to_numeric(trabajo[columna], errors="coerce")
-    trabajo = trabajo.dropna(subset=list(requeridas))
-    trabajo = trabajo[
-        (trabajo["Estimado_modelo"] > 0) & (trabajo["Produccion"] >= 0)
-    ].copy()
-    if trabajo.empty:
-        return vacio
-
-    periodos = (
-        trabajo[["Anio", "Semana"]]
-        .drop_duplicates()
-        .sort_values(["Anio", "Semana"])
-    )
-    periodos = periodos.tail(max(1, int(max_semanas)))
-    trabajo = trabajo.merge(periodos, on=["Anio", "Semana"], how="inner")
-    if trabajo.empty:
-        return vacio
-
-    bloque = pd.to_numeric(trabajo["Bloque"], errors="coerce")
-    trabajo["__bloque_varid"] = np.where(
-        bloque.notna(),
-        bloque.astype("Int64").astype(str).str.zfill(3)
-        + trabajo["Variedad"].astype(str).str.strip(),
-        np.nan,
-    )
-    trabajo = trabajo.dropna(subset=["__bloque_varid"])
-    if trabajo.empty:
-        return vacio
-
-    def razon(grupo: pd.DataFrame) -> float | None:
-        estimado = float(grupo["Estimado_modelo"].sum())
-        if estimado <= 0:
-            return None
-        return float(grupo["Produccion"].sum() / estimado)
-
-    razon_global = razon(trabajo)
-    if razon_global is None:
-        return vacio
-
-    peso = float(np.clip(peso_individual, 0.0, 1.0))
-
-    def limitar(valor: float) -> float:
-        return float(np.clip(valor, factor_minimo, factor_maximo))
-
-    ajuste_global = limitar(razon_global)
-    ajustes = {}
-    for variedad, grupo in trabajo.groupby("__bloque_varid"):
-        razon_variedad = razon(grupo)
-        if razon_variedad is not None:
-            ajustes[str(variedad)] = limitar(
-                peso * razon_variedad + (1.0 - peso) * razon_global
-            )
-
-    return {
-        "ajustes_por_variedad": ajustes,
-        "ajuste_global": ajuste_global,
-        "semanas": [
-            f"{int(fila.Anio)}-{int(fila.Semana):02d}"
-            for fila in periodos.itertuples(index=False)
-        ],
-        "filas": int(len(trabajo)),
-    }
-
-
-def calcular_moda_signo_evaluacion_2026(
-    evaluation_dir: "Path | None" = None,
-) -> dict[str, Any]:
-    """Calcula el signo moda (mas frecuente) del error real de 2026 por variedad.
-
-    Usa el signo de `%dif` (positivo=subestima, negativo=sobreestima) de las
-    filas `Anio == 2026` en `errores_evaluacion_modelo.csv`. Por `Bloque&Varid`
-    devuelve `1` si predominan semanas de subestimacion, `-1` si predominan de
-    sobreestimacion, o `0` si hay empate o no hay datos suficientes. Tambien
-    calcula una moda global (agregando todas las variedades) como respaldo.
-    """
-    directorio = evaluation_dir or Path(__file__).with_name("Evaluacion")
-    modas: dict[str, int] = {}
-    moda_global = 0
-    errores_path = directorio / "errores_evaluacion_modelo.csv"
-    if not errores_path.exists():
-        return {"moda_por_variedad": modas, "moda_global": moda_global}
-
-    try:
-        errores_df = pd.read_csv(errores_path, encoding="utf-8-sig")
-    except Exception:
-        return {"moda_por_variedad": modas, "moda_global": moda_global}
-
-    requeridas = {"Anio", "Bloque", "Variedad", "%dif"}
-    if not requeridas.issubset(errores_df.columns):
-        return {"moda_por_variedad": modas, "moda_global": moda_global}
-
-    trabajo = errores_df.copy()
-    trabajo["Anio"] = pd.to_numeric(trabajo["Anio"], errors="coerce")
-    trabajo["%dif"] = pd.to_numeric(trabajo["%dif"], errors="coerce")
-    bloque_numerico = pd.to_numeric(trabajo["Bloque"], errors="coerce")
-    trabajo["__bloque_varid"] = np.where(
-        bloque_numerico.notna(),
-        bloque_numerico.astype("Int64").astype(str).str.zfill(3)
-        + trabajo["Variedad"].astype(str).str.strip(),
-        np.nan,
-    )
-    trabajo = trabajo[trabajo["Anio"] == 2026].dropna(
-        subset=["%dif", "__bloque_varid"]
-    )
-    if trabajo.empty:
-        return {"moda_por_variedad": modas, "moda_global": moda_global}
-
-    def _moda_signo(serie_dif: pd.Series) -> int:
-        positivos = int((serie_dif > 0).sum())
-        negativos = int((serie_dif < 0).sum())
-        if positivos > negativos:
-            return 1
-        if negativos > positivos:
-            return -1
-        return 0
-
-    for variedad, grupo in trabajo.groupby("__bloque_varid"):
-        modas[str(variedad)] = _moda_signo(grupo["%dif"])
-
-    moda_global = _moda_signo(trabajo["%dif"])
-    return {"moda_por_variedad": modas, "moda_global": moda_global}
-
-
 def _load_difference_factors() -> dict[str, Any]:
     evaluation_dir = Path(__file__).with_name("Evaluacion")
     factors_path = evaluation_dir / "factor_diferencia_2025_por_variedad.csv"
@@ -904,16 +558,6 @@ def _load_difference_factors() -> dict[str, Any]:
             value = pd.to_numeric(summary_df.loc[0, column], errors="coerce")
             if pd.notna(value) and np.isfinite(value) and value > 0:
                 global_factor = float(value)
-
-    ajuste_real_2026 = calcular_ajuste_factor_diferencia_2026(evaluation_dir)
-    ajustes_por_variedad = ajuste_real_2026["ajustes_por_variedad"]
-    ajuste_global = ajuste_real_2026["ajuste_global"]
-    factors = {
-        variedad: valor * ajustes_por_variedad.get(variedad, ajuste_global)
-        for variedad, valor in factors.items()
-    }
-    global_factor *= ajuste_global
-
     return {"factores_por_variedad": factors, "factor_global": global_factor}
 
 
@@ -1053,11 +697,6 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
 
     target_rows = df[df["Bloque&Varid"].astype(
         str) == str(selected_var)].copy()
-    target_age = prepare_crop_age_series(target_rows)
-    target_stage = (
-        str(target_age["Etapa_cultivo"].iloc[-1])
-        if not target_age.empty else None
-    )
 
     candidates: list[dict[str, Any]] = []
     grouped = df.dropna(subset=["Bloque&Varid"]).groupby("Bloque&Varid")
@@ -1068,26 +707,16 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
         if not has_sufficient_pattern_history(target_rows, candidate_rows):
             continue
 
-        mse = calculate_age_aligned_normalized_stems_mse(
-            target_rows,
-            candidate_rows,
-        )
+        mse = calculate_normalized_stems_mse(target_rows, candidate_rows)
         if mse is None:
             continue
-        candidate_age = prepare_crop_age_series(candidate_rows)
-        if candidate_age.empty:
-            continue
-        stage_penalty = int(
-            target_stage is not None
-            and str(candidate_age["Etapa_cultivo"].iloc[-1]) != target_stage
-        )
+
         candidate_series = pd.to_numeric(
             candidate_rows["Tallos/m2"], errors="coerce").dropna().reset_index(drop=True)
         candidates.append(
             {
                 "reference_var": candidate_name,
                 "mse": mse,
-                "stage_penalty": stage_penalty,
                 "series": candidate_series,
             }
         )
@@ -1095,7 +724,7 @@ def find_reference_pattern(df: pd.DataFrame, selected_var: str) -> dict[str, Any
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (item["stage_penalty"], item["mse"]))
+    candidates.sort(key=lambda item: item["mse"])
     return candidates[0]
 
 
@@ -1146,124 +775,11 @@ def calculate_normalized_stems_mse(
     return float(np.mean((target_normalized - candidate_normalized) ** 2))
 
 
-def prepare_crop_age_series(rows: pd.DataFrame) -> pd.DataFrame:
-    """Agrega edad del cultivo y etapa a una serie semanal.
-
-    Cuando no existe una columna de siembra, la primera semana observada se
-    usa como inicio del cultivo. La primera semana con produccion positiva
-    marca el inicio productivo; esto permite distinguir crecimiento, picos
-    iniciales y estabilizacion.
-    """
-    required = {"Anio", "Semana", "Tallos/m2"}
-    if not required.issubset(rows.columns):
-        return pd.DataFrame()
-
-    working = rows.copy()
-    working["__anio"] = pd.to_numeric(working["Anio"], errors="coerce")
-    working["__semana"] = pd.to_numeric(working["Semana"], errors="coerce")
-    working["__tallos"] = pd.to_numeric(working["Tallos/m2"], errors="coerce")
-    if "Produccion" in working.columns:
-        working["__produccion"] = pd.to_numeric(
-            working["Produccion"], errors="coerce"
-        )
-    else:
-        working["__produccion"] = np.nan
-
-    working = working.dropna(subset=["__anio", "__semana", "__tallos"])
-    if working.empty:
-        return pd.DataFrame()
-    working = working.sort_values(
-        ["__anio", "__semana"]).reset_index(drop=True)
-    ordinal = working["__anio"] * 53 + working["__semana"]
-    start_ordinal = float(ordinal.min())
-    working["Edad_cultivo"] = (ordinal - start_ordinal).astype(int)
-
-    productive = working.loc[
-        working["__produccion"].fillna(0.0) > 0.0, "Edad_cultivo"
-    ]
-    first_productive_age = (
-        int(productive.min()) if not productive.empty else None
-    )
-    if first_productive_age is None:
-        working["Etapa_cultivo"] = "crecimiento_sin_produccion"
-    else:
-        working["Etapa_cultivo"] = np.select(
-            [
-                working["Edad_cultivo"] < first_productive_age,
-                working["Edad_cultivo"] < 52,
-            ],
-            ["crecimiento_sin_produccion", "picos_iniciales"],
-            default="estabilizacion",
-        )
-    return working
-
-
-def is_recent_sowing_series(rows: pd.DataFrame) -> bool:
-    """Identifica una serie con crecimiento inicial sin produccion."""
-    prepared = prepare_crop_age_series(rows)
-    if prepared.empty or "__produccion" not in prepared.columns:
-        return False
-
-    produccion = prepared["__produccion"].fillna(0.0)
-    primera_productiva = prepared.loc[
-        produccion > 0.0, "Edad_cultivo"
-    ]
-    if primera_productiva.empty:
-        return False
-    edad_inicio_productivo = int(primera_productiva.min())
-    return edad_inicio_productivo >= 4
-
-
-def normalize_pattern_identifier(value: object) -> str:
-    """Normaliza identificadores para comparar Bloque&Varid sin formato."""
-    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
-
-
-def calculate_age_aligned_normalized_stems_mse(
-    target_rows: pd.DataFrame,
-    candidate_rows: pd.DataFrame,
-) -> float | None:
-    """Compara patrones por semanas desde el inicio del cultivo."""
-    target = prepare_crop_age_series(target_rows)
-    candidate = prepare_crop_age_series(candidate_rows)
-    if target.empty or candidate.empty:
-        return None
-
-    target = target[["Edad_cultivo", "__tallos"]].rename(
-        columns={"__tallos": "target"}
-    )
-    candidate = candidate[["Edad_cultivo", "__tallos"]].rename(
-        columns={"__tallos": "candidate"}
-    )
-    aligned = target.merge(candidate, on="Edad_cultivo", how="inner").dropna()
-    if len(aligned) < 4:
-        return None
-
-    target_values = aligned["target"].to_numpy(dtype=float)
-    candidate_values = aligned["candidate"].to_numpy(dtype=float)
-    target_std = float(np.std(target_values, ddof=0))
-    candidate_std = float(np.std(candidate_values, ddof=0))
-    if np.isclose(target_std, 0.0) or np.isclose(candidate_std, 0.0):
-        return None
-
-    target_normalized = (target_values - np.mean(target_values)) / target_std
-    candidate_normalized = (
-        candidate_values - np.mean(candidate_values)
-    ) / candidate_std
-    return float(np.mean((target_normalized - candidate_normalized) ** 2))
-
-
 def calculate_pattern_signal_to_noise(
     pattern_values: "pd.Series | np.ndarray",
     model_values: "pd.Series | np.ndarray",
     actual_values: "pd.Series | np.ndarray",
 ) -> tuple[float, float, float]:
-    """Calculate S/N while penalizing a pattern that misses the real series.
-
-    The model error and the pattern error are both noise sources. This keeps
-    an apparently strong S/N from being produced by a pattern with high
-    power but poor point-by-point agreement with the real production.
-    """
     values = pd.DataFrame({
         "pattern": pd.to_numeric(
             pd.Series(pattern_values).reset_index(drop=True), errors="coerce"
@@ -1279,13 +795,9 @@ def calculate_pattern_signal_to_noise(
         return np.nan, np.nan, np.nan
 
     signal_power = float(np.mean(values["pattern"].to_numpy() ** 2))
-    model_error_power = float(np.mean(
+    noise_power = float(np.mean(
         (values["model"].to_numpy() - values["actual"].to_numpy()) ** 2
     ))
-    pattern_error_power = float(np.mean(
-        (values["pattern"].to_numpy() - values["actual"].to_numpy()) ** 2
-    ))
-    noise_power = model_error_power + pattern_error_power
     if signal_power <= 0:
         sn_ratio_db = np.nan
     elif np.isclose(noise_power, 0.0):
