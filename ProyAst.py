@@ -78,6 +78,17 @@ RECOMENDACION_AMORTIGUADOR_IA = (
 )
 
 
+def cargar_readme_como_contexto_ia():
+    """Carga README.md como fuente de reglas para las consultas IA."""
+    ruta_readme = Path(__file__).with_name('README.md')
+    if not ruta_readme.exists():
+        return 'README.md no disponible en el proyecto.'
+    try:
+        return ruta_readme.read_text(encoding='utf-8')
+    except UnicodeDecodeError:
+        return ruta_readme.read_text(errors='replace')
+
+
 def obtener_ruta_control_acceso():
     ruta_configurada = obtener_valor_env('ACCESS_DB_PATH')
     if ruta_configurada:
@@ -1239,6 +1250,8 @@ def resumir_proyeccion_individual(var_proy, patron_seleccionado,
         'Analiza esta proyeccion agricola y responde en espanol SOLO con el '
         'desempeno de analisis. Entrega un unico parrafo corto (maximo 3 lineas), '
         'sin bullets, sin recomendaciones y sin detallar semanas especificas.\n\n'
+        'README.md es la fuente autorizada para las reglas del modelo.\n'
+        f'{cargar_readme_como_contexto_ia()}\n\n'
         f'Variedad proyectada: {var_proy}\n'
         f'Patron seleccionado: {patron_seleccionado}\n'
         f'MSE modelo: {mse_modelo:.4f}\n'
@@ -1269,6 +1282,8 @@ def resumir_proyeccion_masiva(selected_finca, resumen, errores, df_export_estima
         'Analiza esta corrida masiva agricola y responde en espanol SOLO con el '
         'desempeno general. Entrega un unico parrafo corto (maximo 3 lineas), '
         # 'sin bullets, sin recomendaciones y sin listar variedades especificas.\n\n'
+        'README.md es la fuente autorizada para las reglas del modelo.\n'
+        f'{cargar_readme_como_contexto_ia()}\n\n'
         f'Finca: {selected_finca}\n'
         f'Total variedades evaluadas: {total_variedades}\n'
         f'Variedades proyectadas: {len(resumen)}\n'
@@ -1475,12 +1490,17 @@ def responder_pregunta_anthropic(df_base, pregunta_usuario, finca_contexto=None,
     prompt = (
         'Eres un analista de datos del negocio floricola. '
         'Responde en espanol. '
+        'Usa README.md como fuente autorizada para reglas, definiciones y '
+        'comportamiento del sistema. Si la pregunta contradice el README, '
+        'explica la regla documentada y no inventes otra. '
         f'{alcance_respuesta}'
         f'{DEFINICION_AMORTIGUADOR_IA} '
         f'{RECOMENDACION_AMORTIGUADOR_IA} '
         'Nunca afirmes que el amortiguador no forma parte de la informacion. '
         f'{restricciones_respuesta}\n\n'
         f'Finca en contexto: {finca_contexto}\n'
+        'README.md - fuente autorizada del proyecto:\n'
+        f'{cargar_readme_como_contexto_ia()}\n'
         'Resumen exclusivo de Analisis Avanzado (csv):\n'
         f'{resumen_info}\n'
         f'{contexto_web}\n'
@@ -2042,8 +2062,13 @@ def construir_prompt_dashboard_anthropic(df_base, base_modelo, instruccion_extra
     resumen = [
         'Genera un resumen ejecutivo corto del dashboard agricola.',
         'Separa la respuesta por: ANIO, SEMANAS, FINCA, PRODUCTO, VARIEDAD y DESVIACIONES.',
-        'Responde en espanol, directo y accionable.'
+        'Responde en espanol, directo y accionable.',
+        'Usa README.md como fuente autorizada para interpretar las reglas '
+        'del modelo, ajustes, amortiguador y exportaciones.'
     ]
+
+    resumen.append('README.md - fuente autorizada del proyecto:')
+    resumen.append(cargar_readme_como_contexto_ia())
 
     if instruccion_extra and instruccion_extra.strip():
         resumen.append(f'Instruccion adicional: {instruccion_extra.strip()}')

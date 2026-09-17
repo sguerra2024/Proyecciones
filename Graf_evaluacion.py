@@ -348,6 +348,7 @@ def mostrar_grafica_en_dialogo(fig, title='Gráfica de evaluación'):
     """Muestra la figura en una ventana Tkinter después de guardarla."""
     try:
         import tkinter as tk
+        from tkinter import filedialog, messagebox
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     except Exception as exc:
         print(f'No se pudo abrir la vista previa: {exc}')
@@ -361,9 +362,34 @@ def mostrar_grafica_en_dialogo(fig, title='Gráfica de evaluación'):
         canvas = FigureCanvasTkAgg(fig, master=window)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=8)
-        tk.Button(window, text='Cerrar', command=window.destroy, width=12).pack(
-            pady=(0, 10)
-        )
+
+        def guardar_grafica():
+            destino = filedialog.asksaveasfilename(
+                title='Guardar gráfica de evaluación',
+                defaultextension='.png',
+                filetypes=[
+                    ('Imagen PNG', '*.png'),
+                    ('Documento PDF', '*.pdf'),
+                    ('Todos los archivos', '*.*'),
+                ],
+                parent=window,
+            )
+            if destino:
+                fig.savefig(destino, dpi=200, bbox_inches='tight')
+                messagebox.showinfo(
+                    'Gráfica guardada',
+                    f'La gráfica se guardó en:\n{destino}',
+                    parent=window,
+                )
+
+        botones = tk.Frame(window)
+        botones.pack(pady=(0, 10))
+        tk.Button(
+            botones, text='Guardar gráfica', command=guardar_grafica, width=16
+        ).pack(side='left', padx=5)
+        tk.Button(
+            botones, text='Cerrar', command=window.destroy, width=12
+        ).pack(side='left', padx=5)
         window.mainloop()
         return True
     except Exception as exc:
