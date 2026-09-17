@@ -31,8 +31,12 @@ MODEL_PARAMS = {
 }
 BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10
+MAX_BUFFER_AREA_RATE = 0.10
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
+RECENT_ADJUSTMENT_WEEKS = 4
+RECENT_ADJUSTMENT_MIN_FACTOR = 0.85
+RECENT_ADJUSTMENT_MAX_FACTOR = 1.15
 REAL_PRODUCTION_TARGET_WEIGHT = 0.70
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
 
@@ -241,6 +245,101 @@ def calculate_model_error_report(
     return report
 
 
+def load_recent_media_adjustments(
+    evaluation_path: "str | Path | None" = None,
+) -> dict[str, Any]:
+    """Carga el factor de media de las últimas cuatro semanas por caso."""
+    path = Path(evaluation_path) if evaluation_path else (
+        Path(__file__).with_name("Evaluacion")
+        / "errores_evaluacion_modelo.csv"
+    )
+    result = {
+        "available": False,
+        "global_factor": 1.0,
+        "factors_by_case": {},
+        "source": str(path),
+    }
+    if not path.exists():
+        return result
+    try:
+        evaluation = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return result
+
+    error_column = next(
+        (column for column in evaluation.columns
+         if str(column).strip().casefold() in {"%dif", "error_relativo"}),
+        None,
+    )
+    if error_column is None or not {"Anio", "Semana"}.issubset(evaluation.columns):
+        return result
+
+    working = evaluation.copy()
+    working["__anio"] = pd.to_numeric(working["Anio"], errors="coerce")
+    working["__semana"] = pd.to_numeric(working["Semana"], errors="coerce")
+    working["__dif"] = pd.to_numeric(working[error_column], errors="coerce")
+    working = working.dropna(subset=["__anio", "__semana", "__dif"])
+    if working.empty:
+        return result
+
+    if {"Bloque", "Variedad"}.issubset(working.columns):
+        bloque = working["Bloque"].astype(str).str.strip()
+        variedad = working["Variedad"].astype(str).str.strip()
+        working["__caso"] = bloque + variedad
+    elif "Bloque&Varid" in working.columns:
+        working["__caso"] = working["Bloque&Varid"].astype(str).str.strip()
+    else:
+        working["__caso"] = "__global__"
+
+    def factor(values):
+        return float(np.clip(
+            1.0 + float(np.mean(values)),
+            RECENT_ADJUSTMENT_MIN_FACTOR,
+            RECENT_ADJUSTMENT_MAX_FACTOR,
+        ))
+
+    working = working.sort_values(["__anio", "__semana"])
+    recent_global = working.tail(RECENT_ADJUSTMENT_WEEKS)
+    result["global_factor"] = factor(recent_global["__dif"].to_numpy())
+    for case, group in working.groupby("__caso", sort=False):
+        recent = group.sort_values(["__anio", "__semana"]).tail(
+            RECENT_ADJUSTMENT_WEEKS
+        )
+        if case != "__global__" and not recent.empty:
+            result["factors_by_case"][str(case)] = factor(
+                recent["__dif"].to_numpy()
+            )
+    result["available"] = True
+    return result
+
+
+def apply_recent_media_adjustment(
+    predictions: np.ndarray,
+    evaluation_df: pd.DataFrame,
+    selected_case: str,
+    adjustments: dict[str, Any],
+) -> tuple[np.ndarray, float, str]:
+    """Aplica el factor evaluado solo a las cuatro filas finales del caso."""
+    adjusted = np.asarray(predictions, dtype=float).copy().reshape(-1)
+    factors = adjustments.get("factors_by_case", {})
+    case = str(selected_case).strip()
+    factor = float(factors.get(case, adjustments.get("global_factor", 1.0)))
+    origin = "case" if case in factors else "global"
+    if not adjustments.get("available") or evaluation_df is None:
+        return adjusted, 1.0, "pending"
+    if not {"Anio", "Semana"}.issubset(evaluation_df.columns):
+        return adjusted, factor, origin
+    periods = evaluation_df.copy()
+    periods["__anio"] = pd.to_numeric(periods["Anio"], errors="coerce")
+    periods["__semana"] = pd.to_numeric(periods["Semana"], errors="coerce")
+    positions = periods.dropna(subset=["__anio", "__semana"]).sort_values(
+        ["__anio", "__semana"]
+    ).index.to_numpy(dtype=int)[-RECENT_ADJUSTMENT_WEEKS:]
+    positions = positions[positions < len(adjusted)]
+    adjusted[positions] *= factor
+    return adjusted, factor, origin
+
+
 def apply_overestimation_buffer(
     production_model: RandomForestRegressor,
     training_features: pd.DataFrame,
@@ -309,7 +408,10 @@ def apply_overestimation_buffer(
     if signed_error.size == 0 or not np.any(~np.isclose(signed_error, 0.0)):
         return base_predictions.copy(), np.zeros_like(base_predictions), average_error, 0.0
 
-    max_buffer_rate = float(calibration["max_buffer_rate"])
+    max_buffer_rate = min(
+        float(calibration["max_buffer_rate"]),
+        DEFAULT_MAX_BUFFER_RATE,
+    )
     risk_threshold = float(calibration["risk_threshold"])
 
     signed_error_per_m2 = signed_error / valid_area
@@ -412,8 +514,9 @@ def calculate_buffer_area_from_projection(
         buffer_stems, projected_productivity
     )
     valid_area = np.isfinite(buffer_area)
+    maximum_area = total_area * MAX_BUFFER_AREA_RATE
     buffer_area[valid_area] = np.sign(buffer_area[valid_area]) * np.minimum(
-        np.abs(buffer_area[valid_area]), np.floor(total_area)
+        np.abs(buffer_area[valid_area]), maximum_area
     )
     return projected_productivity, buffer_area
 

@@ -23,12 +23,14 @@ from datetime import datetime, timezone
 
 from projection_core import (
     add_buffer_projection_columns,
+    apply_recent_media_adjustment,
     apply_overestimation_buffer,
     calculate_model_error_report,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
     fit_production_model,
     has_sufficient_pattern_history,
+    load_recent_media_adjustments,
 )
 
 agents_dir = Path(__file__).with_name("agents")
@@ -192,12 +194,14 @@ def exigir_acceso_al_sistema():
     if st.session_state.get('usuario_autenticado'):
         return
 
-    st.title('Control de acceso')
-    st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
-    with st.form('form_control_acceso'):
-        usuario = st.text_input('Usuario')
-        clave = st.text_input('Clave', type='password')
-        ingresar = st.form_submit_button('Ingresar')
+    _, columna_acceso, _ = st.columns([1, 1, 1])
+    with columna_acceso:
+        st.title('Control de acceso')
+        st.caption('Ingresa Usuario y Clave para iniciar el sistema.')
+        with st.form('form_control_acceso'):
+            usuario = st.text_input('Usuario')
+            clave = st.text_input('Clave', type='password')
+            ingresar = st.form_submit_button('Ingresar')
     if ingresar:
         if autenticar_usuario(usuario, clave):
             st.session_state['usuario_autenticado'] = usuario.strip()
@@ -1023,9 +1027,9 @@ def preparar_salida_proyeccion_masiva(df_proyeccion, columnas_identificacion):
         columna for columna in columnas_identificacion
         if columna in salida.columns
     ]
+    # %dif se conserva para evaluación interna, pero no se exporta en la
+    # proyección masiva. Se calcula posteriormente con Graf_evaluacion.
     columnas_resultado = ['Estimado_modelo']
-    if '%dif' in salida.columns:
-        columnas_resultado.append('%dif')
     return salida[identificadores + columnas_resultado].reset_index(drop=True)
 
 
@@ -2513,39 +2517,6 @@ if file_path is not None:
                 )
                 if mse is None:
                     continue
-                patron_weekly = construir_patron_semanal(group)
-                trabajo = (
-                    df_variedad_objetivo[[
-                        'Anio', 'Semana', 'Tallos/m2', 'Produccion']]
-                    .dropna()
-                    .reset_index(drop=True)
-                )
-                trabajo['Anio'] = pd.to_numeric(
-                    trabajo['Anio'], errors='coerce')
-                trabajo['Semana'] = pd.to_numeric(
-                    trabajo['Semana'], errors='coerce')
-                trabajo['Tallos/m2'] = pd.to_numeric(
-                    trabajo['Tallos/m2'], errors='coerce')
-                trabajo['Produccion'] = pd.to_numeric(
-                    trabajo['Produccion'], errors='coerce')
-                trabajo = trabajo.dropna(
-                    subset=['Anio', 'Semana', 'Tallos/m2', 'Produccion']
-                )
-                trabajo['Anio'] = trabajo['Anio'].astype(int)
-                trabajo['Semana'] = trabajo['Semana'].astype(int)
-                trabajo = trabajo.sort_values(
-                    ['Anio', 'Semana']).reset_index(drop=True)
-                trabajo = trabajo.merge(
-                    patron_weekly,
-                    on=['Anio', 'Semana'],
-                    how='left'
-                )
-                trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
-                    trabajo['Tallos/m2']
-                )
-                trabajo['Produccion_patron'] = trabajo['Produccion_patron'].fillna(
-                    trabajo['Produccion']
-                )
                 arr_list.append((candidate_name, mse))
             except Exception:
                 continue
@@ -2902,20 +2873,48 @@ if file_path is not None:
     ]
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
+    config_ajuste_reciente = load_recent_media_adjustments()
 
-    def proyectar_variedad_masiva(df_base, var_proy, cache_patrones=None):
-        df_filtered_ = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
+    def proyectar_variedad_masiva(
+        df_base,
+        var_proy,
+        cache_patrones=None,
+        cache_casos=None,
+        cache_modelos=None,
+        cache_selecciones=None,
+    ):
+        # El modelo usa el mismo historial que el flujo individual: toda la
+        # base para el caso; df_base solo determina qué casos se exportan.
+        df_filtered_ = (
+            cache_casos.get(str(var_proy), pd.DataFrame()).copy()
+            if cache_casos is not None
+            else df[df['Bloque&Varid'].isin([var_proy])].copy()
+        )
         if df_filtered_.empty:
             raise ValueError('Sin datos para la variedad seleccionada.')
 
-        patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
-            df,
-            df_filtered_,
-            var_proy
-        )
+        selection_key = str(var_proy)
+        if cache_selecciones is not None and selection_key in cache_selecciones:
+            patron_seleccionado, usar_patron_sin_dependencia = (
+                cache_selecciones[selection_key]
+            )
+        else:
+            patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
+                df,
+                df_filtered_,
+                var_proy
+            )
+            if cache_selecciones is not None:
+                cache_selecciones[selection_key] = (
+                    patron_seleccionado,
+                    usar_patron_sin_dependencia,
+                )
 
-        df_patron = df[df['Bloque&Varid'].isin(
-            [patron_seleccionado])]
+        df_patron = (
+            cache_casos.get(str(patron_seleccionado), pd.DataFrame()).copy()
+            if cache_casos is not None
+            else df[df['Bloque&Varid'].isin([patron_seleccionado])].copy()
+        )
         if df_patron.empty:
             raise ValueError('No hay datos del patron seleccionado.')
 
@@ -2931,9 +2930,8 @@ if file_path is not None:
         m2_1 = np.float64(df_filtered_.iloc[0][m2_col])
         proy = pd.Series(np.float64(np.array(df_patron['Tallos/m2'])) * m2_1)
 
-        y_actual = df_base[df_base['Bloque&Varid'].isin([var_proy])].copy()
-        patron_actual = df[df['Bloque&Varid'].isin(
-            [patron_seleccionado])].copy()
+        y_actual = df_filtered_.copy()
+        patron_actual = df_patron.copy()
 
         patron_weekly = None
         if cache_patrones is not None and str(patron_seleccionado) in cache_patrones:
@@ -2944,11 +2942,12 @@ if file_path is not None:
         patron_feature_weight = 0.0 if usar_patron_sin_dependencia else PATRON_FEATURE_WEIGHT
         patron_prediction_weight = 0.0 if usar_patron_sin_dependencia else PATRON_PREDICTION_WEIGHT
 
-        entrenamiento_df = preparar_dataset_modelo(
+        eval_actual_df = preparar_dataset_modelo(
             y_actual,
             patron_weekly,
             patron_feature_weight
         )
+        entrenamiento_df = eval_actual_df.copy()
         # Entrenar con todo el historial desde 2025 en adelante (incluye 2026+).
         entrenamiento_df = entrenamiento_df[
             entrenamiento_df['Anio'] >= 2025
@@ -2960,12 +2959,6 @@ if file_path is not None:
             PATRON_TRAIN_TARGET_WEIGHT
         )
         entrenamiento_df['Produccion_ajustada'] = prod_train
-
-        eval_actual_df = preparar_dataset_modelo(
-            y_actual,
-            patron_weekly,
-            patron_feature_weight
-        )
 
         if len(entrenamiento_df) < 5 or len(eval_actual_df) == 0:
             raise ValueError(
@@ -2986,16 +2979,24 @@ if file_path is not None:
 
         model_name = ''.join(
             ch if ch.isalnum() else '_' for ch in str(var_proy))
-        train_key = f'entrenado_masivo_{model_name}_cal_v4'
+        train_key = f'entrenado_{model_name}_cal_v4'
 
-        if train_key not in st.session_state:
+        model_cache_key = (str(var_proy), str(patron_seleccionado),
+                           int(len(x_train_df)))
+        if cache_modelos is not None and model_cache_key in cache_modelos:
+            modelo = cache_modelos[model_cache_key]
+        elif train_key not in st.session_state:
             modelo = fit_production_model(
                 x_train_df.iloc[:split_idx],
                 y_train_df.iloc[:split_idx].values.ravel()
             )
             st.session_state[train_key] = modelo
+            if cache_modelos is not None:
+                cache_modelos[model_cache_key] = modelo
         else:
             modelo = st.session_state[train_key]
+            if cache_modelos is not None:
+                cache_modelos[model_cache_key] = modelo
 
         y_pred = pd.DataFrame(modelo.predict(x_frame),
                               columns=['Estimado_modelo'])
@@ -3022,14 +3023,27 @@ if file_path is not None:
             var_proy,
             config_factor_diferencia
         )
-        pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
-            modelo,
-            x_frame,
-            eval_actual_df,
-            eval_actual_df.iloc[:len(pred_vals)],
-            pred_vals,
-            float(m2_1),
-        )
+        if config_ajuste_reciente.get('available'):
+            pred_vals, factor_ajuste_reciente, origen_ajuste_reciente = apply_recent_media_adjustment(
+                pred_vals,
+                eval_actual_df,
+                var_proy,
+                config_ajuste_reciente,
+            )
+            pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
+                modelo,
+                x_frame,
+                eval_actual_df,
+                eval_actual_df.iloc[:len(pred_vals)],
+                pred_vals,
+                float(m2_1),
+            )
+        else:
+            factor_ajuste_reciente = 1.0
+            origen_ajuste_reciente = 'evaluacion_pendiente'
+            amortiguador = np.zeros_like(pred_vals)
+            error_sobreestimacion_promedio = 0.0
+            porcentaje_amortiguador = 0.0
 
         y_pred['Estimado_modelo'] = pred_vals
 
@@ -3055,6 +3069,8 @@ if file_path is not None:
             'Factor_diferencia_2025': [factor_variedad] * n_export,
             'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
             'Origen_factor_2025': [origen_factor] * n_export,
+            'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
+            'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
         })
         df_export = add_buffer_projection_columns(
             df_export,
@@ -3113,7 +3129,13 @@ if file_path is not None:
         resumen = []
         errores = []
         progreso = progreso_placeholder.progress(0)
-        cache_patrones = construir_cache_patrones_semanales(df_masivo)
+        cache_casos = {
+            str(nombre): grupo.copy()
+            for nombre, grupo in df.groupby('Bloque&Varid', sort=False)
+        }
+        cache_patrones = construir_cache_patrones_semanales(df)
+        cache_modelos = {}
+        cache_selecciones = {}
 
         for i, var_item in enumerate(variedades_todas, start=1):
             try:
@@ -3121,6 +3143,9 @@ if file_path is not None:
                     df_masivo,
                     var_item,
                     cache_patrones=cache_patrones,
+                    cache_casos=cache_casos,
+                    cache_modelos=cache_modelos,
+                    cache_selecciones=cache_selecciones,
                 )
                 resultados_export.append(resultado['df_export'])
                 tabla_mse_item = construir_tabla_mse_patron(
@@ -3595,6 +3620,16 @@ if file_path is not None:
         var_proy,
         config_factor_diferencia
     )
+    if config_ajuste_reciente.get('available'):
+        pred_vals, factor_ajuste_reciente, origen_ajuste_reciente = apply_recent_media_adjustment(
+            pred_vals,
+            eval_actual_df,
+            var_proy,
+            config_ajuste_reciente,
+        )
+    else:
+        factor_ajuste_reciente = 1.0
+        origen_ajuste_reciente = 'evaluacion_pendiente'
     pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
         modelo,
         x_frame,
@@ -3736,6 +3771,8 @@ if file_path is not None:
         'Factor_diferencia_2025': [factor_variedad] * n_export,
         'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
         'Origen_factor_2025': [origen_factor] * n_export,
+        'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
+        'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
     })
     df_export = add_buffer_projection_columns(
         df_export,
