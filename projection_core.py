@@ -28,6 +28,7 @@ MODEL_PARAMS = {
     "min_samples_leaf": 1,
     "min_samples_split": 2,
     "max_features": "sqrt",
+    "n_jobs": -1,
 }
 BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
 DEFAULT_MAX_BUFFER_RATE = 0.10

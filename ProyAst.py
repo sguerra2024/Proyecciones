@@ -2724,33 +2724,86 @@ if file_path is not None:
 
         return candidatos[0]
 
-    def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy):
+    def _calcular_estadisticas_patron(grupo):
+        columnas_requeridas = ['Anio', 'Semana', 'Tallos/m2', 'Produccion']
+        if not set(columnas_requeridas).issubset(grupo.columns):
+            return {'len4': 0, 'serie': np.array([], dtype=float)}
+        len4 = len(grupo.dropna(subset=columnas_requeridas))
+        ordenado = grupo
+        if {'Anio', 'Semana'}.issubset(ordenado.columns):
+            ordenado = ordenado.sort_values(['Anio', 'Semana'])
+        serie = pd.to_numeric(
+            ordenado['Tallos/m2'], errors='coerce'
+        ).dropna().to_numpy(dtype=float)
+        return {'len4': len4, 'serie': serie}
+
+    def _mse_normalizado_desde_series(serie_objetivo, serie_candidato):
+        common_length = min(len(serie_objetivo), len(serie_candidato))
+        if common_length < 4:
+            return None
+        objetivo = serie_objetivo[:common_length]
+        candidato = serie_candidato[:common_length]
+        std_objetivo = float(np.std(objetivo, ddof=0))
+        std_candidato = float(np.std(candidato, ddof=0))
+        if np.isclose(std_objetivo, 0.0) or np.isclose(std_candidato, 0.0):
+            return None
+        objetivo_norm = (objetivo - np.mean(objetivo)) / std_objetivo
+        candidato_norm = (candidato - np.mean(candidato)) / std_candidato
+        return float(np.mean((objetivo_norm - candidato_norm) ** 2))
+
+    def construir_cache_estadisticas_patrones(cache_casos_base):
+        return {
+            str(nombre): _calcular_estadisticas_patron(grupo)
+            for nombre, grupo in cache_casos_base.items()
+        }
+
+    def calcular_patron_compatible_individual(df_patrones, df_variedad_objetivo, var_proy, cache_estadisticas=None):
         # Replica exacta de la comparacion del flujo individual para mantener
-        # el mismo patron seleccionado en la corrida masiva.
-        arr_list = []
-        for name, group in df_patrones.groupby(['Bloque&Varid']):
-            try:
-                raw_name = name[0] if isinstance(name, tuple) else name
-                candidate_name = str(raw_name).strip()
-                if candidate_name.upper() == str(var_proy).strip().upper():
-                    continue
-                if not has_sufficient_pattern_history(
-                    df_variedad_objetivo,
-                    group,
-                    required_columns=(
-                        'Anio', 'Semana', 'Tallos/m2', 'Produccion'
+        # el mismo patron seleccionado en la corrida masiva, evitando
+        # recalcular series/MSE ya conocidas para cada variedad.
+        var_obj_norm = str(var_proy).strip().upper()
+
+        if cache_estadisticas is not None:
+            objetivo_stats = cache_estadisticas.get(str(var_proy))
+            if objetivo_stats is None:
+                objetivo_stats = next(
+                    (
+                        v for k, v in cache_estadisticas.items()
+                        if str(k).strip().upper() == var_obj_norm
                     ),
-                ):
-                    continue
-                mse = calculate_normalized_stems_mse(
-                    df_variedad_objetivo,
-                    group,
+                    None,
                 )
-                if mse is None:
-                    continue
-                arr_list.append((candidate_name, mse))
-            except Exception:
+            candidatos_iter = cache_estadisticas.items()
+        else:
+            objetivo_stats = None
+            candidatos_iter = None
+
+        if objetivo_stats is None:
+            objetivo_stats = _calcular_estadisticas_patron(
+                df_variedad_objetivo)
+
+        if candidatos_iter is None:
+            candidatos_iter = (
+                (
+                    name[0] if isinstance(name, tuple) else name,
+                    _calcular_estadisticas_patron(group),
+                )
+                for name, group in df_patrones.groupby(['Bloque&Varid'])
+            )
+
+        arr_list = []
+        for nombre_candidato, stats_candidato in candidatos_iter:
+            candidate_name = str(nombre_candidato).strip()
+            if candidate_name.upper() == var_obj_norm:
                 continue
+            if stats_candidato['len4'] < objetivo_stats['len4']:
+                continue
+            mse = _mse_normalizado_desde_series(
+                objetivo_stats['serie'], stats_candidato['serie']
+            )
+            if mse is None:
+                continue
+            arr_list.append((candidate_name, mse))
 
         if not arr_list:
             raise ValueError('No hay suficientes patrones para comparar.')
@@ -3115,6 +3168,7 @@ if file_path is not None:
         cache_casos=None,
         cache_modelos=None,
         cache_selecciones=None,
+        cache_estadisticas=None,
     ):
         # El modelo usa el mismo historial que el flujo individual: toda la
         # base para el caso; df_base solo determina qué casos se exportan.
@@ -3135,7 +3189,8 @@ if file_path is not None:
             patron_seleccionado, usar_patron_sin_dependencia = calcular_patron_compatible_individual(
                 df,
                 df_filtered_,
-                var_proy
+                var_proy,
+                cache_estadisticas=cache_estadisticas,
             )
             if cache_selecciones is not None:
                 cache_selecciones[selection_key] = (
@@ -3367,6 +3422,8 @@ if file_path is not None:
             for nombre, grupo in df.groupby('Bloque&Varid', sort=False)
         }
         cache_patrones = construir_cache_patrones_semanales(df)
+        cache_estadisticas_patrones = construir_cache_estadisticas_patrones(
+            cache_casos)
         cache_modelos = {}
         cache_selecciones = {}
 
@@ -3379,6 +3436,7 @@ if file_path is not None:
                     cache_casos=cache_casos,
                     cache_modelos=cache_modelos,
                     cache_selecciones=cache_selecciones,
+                    cache_estadisticas=cache_estadisticas_patrones,
                 )
                 resultados_export.append(resultado['df_export'])
                 tabla_mse_item = construir_tabla_mse_patron(
