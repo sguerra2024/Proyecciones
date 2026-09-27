@@ -540,19 +540,19 @@ def test_area_amortiguador_es_fraccion_del_area_total():
     )
 
     np.testing.assert_array_equal(productivity, [10.0, 20.0])
-    np.testing.assert_array_equal(area, [10.0, 10.0])
+    np.testing.assert_array_equal(area, [15.0, 10.0])
     assert np.all(area <= 100.0)
 
 
-def test_area_amortiguador_no_supera_el_diez_por_ciento_por_variedad():
+def test_area_amortiguador_no_supera_el_quince_por_ciento_por_variedad():
     _, area = calculate_buffer_area_from_projection(
         buffer_stems=np.array([100.0, -100.0]),
         projected_stems=np.array([1000.0, 1000.0]),
         total_area_m2=95.0,
     )
 
-    assert np.all(np.abs(area) <= 95.0 * 0.10)
-    np.testing.assert_array_equal(area, [9.0, -9.0])
+    assert np.all(np.abs(area) <= 95.0 * 0.15)
+    np.testing.assert_array_equal(area, [10.0, -10.0])
 
 
 def test_columnas_amortiguador_son_compartidas_por_proyeccion_masiva():

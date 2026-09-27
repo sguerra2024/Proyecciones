@@ -115,7 +115,131 @@ def inicializar_tabla_usuarios():
             )
             '''
         )
+        columnas = {
+            fila[1] for fila in conexion.execute('PRAGMA table_info(usuarios)')
+        }
+        if 'tiempo_actividad_segundos' not in columnas:
+            conexion.execute(
+                'ALTER TABLE usuarios ADD COLUMN '
+                'tiempo_actividad_segundos REAL NOT NULL DEFAULT 0'
+            )
+        if 'sesion_inicio_utc' not in columnas:
+            conexion.execute(
+                'ALTER TABLE usuarios ADD COLUMN sesion_inicio_utc TEXT'
+            )
+        if 'ultimo_acceso_utc' not in columnas:
+            conexion.execute(
+                'ALTER TABLE usuarios ADD COLUMN ultimo_acceso_utc TEXT'
+            )
     return ruta
+
+
+def registrar_inicio_sesion(usuario):
+    usuario_limpio = str(usuario or '').strip()
+    if not usuario_limpio:
+        return
+    ahora = datetime.now(timezone.utc).isoformat()
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        conexion.execute(
+            '''
+            UPDATE usuarios
+            SET sesion_inicio_utc = ?, ultimo_acceso_utc = ?
+            WHERE usuario = ?
+            ''',
+            (ahora, ahora, usuario_limpio),
+        )
+
+
+def registrar_cierre_sesion(usuario):
+    usuario_limpio = str(usuario or '').strip()
+    if not usuario_limpio:
+        return
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        fila = conexion.execute(
+            'SELECT sesion_inicio_utc, tiempo_actividad_segundos '
+            'FROM usuarios WHERE usuario = ?',
+            (usuario_limpio,),
+        ).fetchone()
+        if not fila or not fila[0]:
+            return
+        try:
+            inicio = datetime.fromisoformat(fila[0])
+        except ValueError:
+            inicio = None
+        acumulado = float(fila[1] or 0)
+        if inicio is not None:
+            transcurrido = (
+                datetime.now(timezone.utc) - inicio
+            ).total_seconds()
+            acumulado += max(transcurrido, 0)
+        conexion.execute(
+            '''
+            UPDATE usuarios
+            SET tiempo_actividad_segundos = ?, sesion_inicio_utc = NULL
+            WHERE usuario = ?
+            ''',
+            (acumulado, usuario_limpio),
+        )
+
+
+def formatear_tiempo_actividad(segundos):
+    total_segundos = int(max(float(segundos or 0), 0))
+    horas, resto = divmod(total_segundos, 3600)
+    minutos, _segundos = divmod(resto, 60)
+    return f'{horas}h {minutos}m'
+
+
+def listar_usuarios():
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        filas = conexion.execute(
+            '''
+            SELECT usuario, activo, creado_en_utc, ultimo_acceso_utc,
+                   tiempo_actividad_segundos, sesion_inicio_utc
+            FROM usuarios
+            ORDER BY usuario COLLATE NOCASE
+            '''
+        ).fetchall()
+
+    usuarios = []
+    for usuario, activo, creado_en_utc, ultimo_acceso_utc, segundos, sesion_inicio in filas:
+        tiempo_total = float(segundos or 0)
+        if sesion_inicio:
+            try:
+                inicio = datetime.fromisoformat(sesion_inicio)
+                tiempo_total += max(
+                    (datetime.now(timezone.utc) - inicio).total_seconds(), 0
+                )
+            except ValueError:
+                pass
+        usuarios.append({
+            'usuario': usuario,
+            'activo': bool(activo),
+            'creado_en_utc': creado_en_utc,
+            'ultimo_acceso_utc': ultimo_acceso_utc or '',
+            'tiempo_actividad': formatear_tiempo_actividad(tiempo_total),
+            'sesion_activa': bool(sesion_inicio),
+        })
+    return usuarios
+
+
+def eliminar_usuario(usuario):
+    usuario_limpio = str(usuario or '').strip()
+    if not usuario_limpio:
+        raise ValueError('Usuario invalido.')
+    if usuario_limpio.casefold() == 'admin':
+        raise ValueError('No se puede eliminar el usuario Admin.')
+
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        cursor = conexion.execute(
+            'DELETE FROM usuarios WHERE usuario = ? COLLATE NOCASE',
+            (usuario_limpio,),
+        )
+    if cursor.rowcount == 0:
+        raise ValueError('El usuario no existe.')
 
 
 def crear_usuario(usuario, clave):
@@ -216,6 +340,7 @@ def exigir_acceso_al_sistema():
     if ingresar:
         if autenticar_usuario(usuario, clave):
             st.session_state['usuario_autenticado'] = usuario.strip()
+            registrar_inicio_sesion(usuario.strip())
             st.rerun()
         st.error('Usuario o clave incorrectos.')
 
@@ -244,6 +369,42 @@ def usuario_puede_gestionar_acceso(usuario=None):
     return str(usuario_actual or '').strip().casefold() == 'admin'
 
 
+def render_cerrar_sesion():
+    usuario_actual = st.session_state.get('usuario_autenticado', '')
+    if not usuario_actual:
+        return
+    st.markdown(
+        '''
+        <style>
+        .st-key-boton_cerrar_sesion {
+            display: flex;
+            justify-content: flex-end;
+        }
+        .st-key-boton_cerrar_sesion button {
+            font-family: "Source Sans Pro", sans-serif;
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 1.6;
+            color: rgb(49, 51, 63);
+            background-color: transparent;
+            border: none;
+            padding: 0.25rem 0.75rem;
+            min-height: auto;
+        }
+        .st-key-boton_cerrar_sesion button:hover {
+            color: rgb(255, 75, 75);
+            background-color: rgba(151, 166, 195, 0.15);
+        }
+        </style>
+        ''',
+        unsafe_allow_html=True,
+    )
+    if st.button('Cerrar sesión', key='boton_cerrar_sesion'):
+        registrar_cierre_sesion(usuario_actual)
+        st.session_state['usuario_autenticado'] = None
+        st.rerun()
+
+
 def render_gestion_usuarios():
     if not usuario_puede_gestionar_acceso():
         return
@@ -266,6 +427,41 @@ def render_gestion_usuarios():
                     st.success('Usuario creado correctamente.')
                 except ValueError as exc:
                     st.error(str(exc))
+
+        st.divider()
+        st.caption(
+            'Tiempo de actividad acumulado y eliminación de usuarios.'
+        )
+        usuario_actual = st.session_state.get('usuario_autenticado', '')
+        for datos_usuario in listar_usuarios():
+            columna_info, columna_tiempo, columna_accion = st.columns(
+                [2, 1, 1]
+            )
+            with columna_info:
+                etiqueta = datos_usuario['usuario']
+                if not datos_usuario['activo']:
+                    etiqueta += ' (inactivo)'
+                st.write(etiqueta)
+            with columna_tiempo:
+                st.write(datos_usuario['tiempo_actividad'])
+            with columna_accion:
+                es_admin = datos_usuario['usuario'].strip(
+                ).casefold() == 'admin'
+                es_uno_mismo = (
+                    datos_usuario['usuario'].strip().casefold()
+                    == str(usuario_actual).strip().casefold()
+                )
+                if st.button(
+                    'Eliminar',
+                    key=f"eliminar_usuario_{datos_usuario['usuario']}",
+                    disabled=es_admin or es_uno_mismo,
+                ):
+                    try:
+                        eliminar_usuario(datos_usuario['usuario'])
+                        st.success('Usuario eliminado correctamente.')
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
 
 
 def obtener_valor_env(*claves):
@@ -685,8 +881,13 @@ def es_error_modelo_inexistente(exc):
     )
 
 
+def reemplazar_astroflores_por_finca(texto):
+    """Evita exponer el nombre real de la finca en los prompts/respuestas de IA."""
+    return re.sub(r'(?i)astroflores', 'Finca', str(texto or ''))
+
+
 def consultar_llm(prompt_usuario):
-    prompt_original = str(prompt_usuario)
+    prompt_original = reemplazar_astroflores_por_finca(str(prompt_usuario))
     prompt_enviado = (
         f'{DEFINICION_PATRON_IA}\n'
         'Definicion autorizada de AMORTIGUADOR M2: '
@@ -712,6 +913,7 @@ def consultar_llm(prompt_usuario):
             raise RuntimeError(
                 'LLM_PROVIDER no soportado. Usa anthropic, github u openai.'
             )
+        respuesta = reemplazar_astroflores_por_finca(respuesta)
     except Exception as exc:
         finalizar_registro_consulta_ia(
             registro_id,
@@ -1865,8 +2067,12 @@ models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
 
 logo_path = Path(__file__).with_name("agromejora_data_logo.jpg")
-if logo_path.exists():
-    st.image(str(logo_path), width=100)
+columna_logo, columna_cerrar_sesion = st.columns([5, 1])
+with columna_logo:
+    if logo_path.exists():
+        st.image(str(logo_path), width=100)
+with columna_cerrar_sesion:
+    render_cerrar_sesion()
 
 readme_path = Path(__file__).with_name("README.md")
 if readme_path.exists():
@@ -2797,6 +3003,8 @@ if file_path is not None:
             valor_num = pd.to_numeric(valor, errors='coerce')
             if pd.notna(valor_num) and valor_num > 13:
                 return 'background-color: #C6EFCE; color: #006100; font-weight: 700;'
+            if pd.notna(valor_num) and valor_num < 7:
+                return 'background-color: #FF6A00; color: #FFFFFF; font-weight: 700;'
             return ''
 
         return df_tabla.style.map(estilo_sn, subset=[col_sn])
@@ -3694,6 +3902,15 @@ if file_path is not None:
     lim_inf_produccion_real = media_produccion_real - desv_produccion_real
     lim_sup_produccion_real = media_produccion_real + desv_produccion_real
 
+    # Oculta solo la visualizacion de las ultimas 5 semanas de Produccion; Modelo se ve completo.
+    # Proy_patron se recorta a la misma longitud visible que Produccion.
+    SEMANAS_OCULTAS_GRAFICO = 5
+    n_visible = max(0, n_puntos - SEMANAS_OCULTAS_GRAFICO)
+    x_pos_grafico = range(n_visible)
+    y_produccion_grafico = y_produccion_plot[:n_visible]
+    y_patron_grafico = y_patron_plot[:n_visible]
+    y_patron_ajustado_grafico = y_patron_ajustado_plot[:n_visible]
+
     fig, ax = plt.subplots(figsize=(12, 5))
 
     def plot_linea_segura(x_vals, y_vals, **kwargs):
@@ -3711,30 +3928,30 @@ if file_path is not None:
     ):
         hubo_desajuste = True
     if not plot_linea_segura(
-        x_pos, y_produccion_plot, label='Produccion', color='red', linestyle='--'
+        x_pos_grafico, y_produccion_grafico, label='Produccion', color='red', linestyle='--'
     ):
         hubo_desajuste = True
     if not plot_linea_segura(
-        x_pos, y_patron_plot, label='Proy_patron', color='green', linestyle='-'
+        x_pos_grafico, y_patron_grafico, label='Proy_patron', color='green', linestyle='-'
     ):
         hubo_desajuste = True
     if not plot_linea_segura(
-        x_pos, y_patron_ajustado_plot, color='purple', linewidth=2, linestyle='-.'
+        x_pos_grafico, y_patron_ajustado_grafico, color='purple', linewidth=2, linestyle='-.'
     ):
         hubo_desajuste = True
 
     ax.plot(
-        list(x_pos),
-        [media_produccion_real] * len(x_pos),
+        list(x_pos_grafico),
+        [media_produccion_real] * len(x_pos_grafico),
         color='gray',
         linewidth=1.0,
         alpha=0.7,
         label='Media Producción Real'
     )
     ax.fill_between(
-        list(x_pos),
-        [lim_inf_produccion_real] * len(x_pos),
-        [lim_sup_produccion_real] * len(x_pos),
+        list(x_pos_grafico),
+        [lim_inf_produccion_real] * len(x_pos_grafico),
+        [lim_sup_produccion_real] * len(x_pos_grafico),
         color='gray',
         alpha=0.12,
         label='±1σ'
