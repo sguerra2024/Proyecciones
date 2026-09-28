@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 
 from projection_core import (
     add_buffer_projection_columns,
+    adjust_model_mean_if_below_references,
+    align_pattern_to_target_level,
     apply_recent_media_adjustment,
     apply_overestimation_buffer,
     calculate_model_error_report,
@@ -3120,6 +3122,17 @@ if file_path is not None:
             on=['Anio', 'Semana'],
             how='left'
         )
+        for columna_real, columna_patron, columna_incremento in [
+            ('Tallos/m2', 'Tallos_m2_patron', 'Incremento_tallos_patron'),
+            ('Produccion', 'Produccion_patron', 'Incremento_produccion_patron'),
+        ]:
+            patron_ajustado, factor_nivel = align_pattern_to_target_level(
+                trabajo[columna_real], trabajo[columna_patron]
+            )
+            trabajo[columna_patron] = patron_ajustado
+            trabajo[columna_incremento] = pd.to_numeric(
+                trabajo[columna_incremento], errors='coerce'
+            ) * factor_nivel
         trabajo['Tallos_m2_patron'] = trabajo['Tallos_m2_patron'].fillna(
             trabajo['Tallos/m2']
         )
@@ -3160,6 +3173,16 @@ if file_path is not None:
 
     config_factor_diferencia = cargar_factor_diferencia_por_variedad()
     config_ajuste_reciente = load_recent_media_adjustments()
+    if (
+        config_ajuste_reciente.get('available')
+        and not config_ajuste_reciente.get('factors_by_case')
+    ):
+        st.warning(
+            'La calibracion de %Dif no contiene identificadores de finca/bloque/'
+            'variedad. El ajuste reciente individual esta pendiente. Vuelve a '
+            'calibrar desde Graf_evaluacion usando un Excel/CSV que incluya '
+            'Bloque y Variedad (o Bloque&Varid), Anio, Semana y %Dif.'
+        )
 
     def proyectar_variedad_masiva(
         df_base,
@@ -3216,7 +3239,6 @@ if file_path is not None:
                 'No se encontro la columna m2Variedad en la base de datos.')
 
         m2_1 = np.float64(df_filtered_.iloc[0][m2_col])
-        proy = pd.Series(np.float64(np.array(df_patron['Tallos/m2'])) * m2_1)
 
         y_actual = df_filtered_.copy()
         patron_actual = df_patron.copy()
@@ -3235,6 +3257,8 @@ if file_path is not None:
             patron_weekly,
             patron_feature_weight
         )
+        proy = eval_actual_df['Produccion_patron'].reset_index(
+            drop=True).copy()
         entrenamiento_df = eval_actual_df.copy()
         # Entrenar con todo el historial desde 2025 en adelante (incluye 2026+).
         entrenamiento_df = entrenamiento_df[
@@ -3318,6 +3342,26 @@ if file_path is not None:
                 var_proy,
                 config_ajuste_reciente,
             )
+        else:
+            factor_ajuste_reciente = 1.0
+            origen_ajuste_reciente = 'evaluacion_pendiente'
+        if (
+            origen_ajuste_reciente == 'case_pending'
+            and config_ajuste_reciente.get('factors_by_case')
+        ):
+            st.warning(
+                f'No hay calibracion reciente individual para {var_proy}; '
+                'no se aplico un factor global ni el de otra variedad.'
+            )
+
+        pred_vals, factor_ajuste_media_baja = (
+            adjust_model_mean_if_below_references(
+                pred_vals,
+                y_frame.iloc[:len(pred_vals), 0],
+                eval_actual_df['Produccion_patron'].iloc[:len(pred_vals)],
+            )
+        )
+        if config_ajuste_reciente.get('available'):
             pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
                 modelo,
                 x_frame,
@@ -3327,8 +3371,6 @@ if file_path is not None:
                 float(m2_1),
             )
         else:
-            factor_ajuste_reciente = 1.0
-            origen_ajuste_reciente = 'evaluacion_pendiente'
             amortiguador = np.zeros_like(pred_vals)
             error_sobreestimacion_promedio = 0.0
             porcentaje_amortiguador = 0.0
@@ -3359,6 +3401,7 @@ if file_path is not None:
             'Origen_factor_2025': [origen_factor] * n_export,
             'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
             'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
+            'Factor_ajuste_media_baja': [factor_ajuste_media_baja] * n_export,
         })
         df_export = add_buffer_projection_columns(
             df_export,
@@ -3463,6 +3506,28 @@ if file_path is not None:
         else:
             df_export_todo = pd.DataFrame(
                 columns=['Variedad_proyectada', 'Anio_Semana', 'Estimado_modelo'])
+
+        if (
+            not df_export_todo.empty
+            and 'Origen_ajuste_reciente' in df_export_todo.columns
+            and config_ajuste_reciente.get('factors_by_case')
+        ):
+            casos_pendientes = (
+                df_export_todo.loc[
+                    df_export_todo['Origen_ajuste_reciente'] == 'case_pending',
+                    'Variedad_proyectada',
+                ]
+                .dropna()
+                .astype(str)
+                .drop_duplicates()
+                .tolist()
+            )
+            if casos_pendientes:
+                st.warning(
+                    'No se aplico ajuste reciente individual a '
+                    f'{len(casos_pendientes)} variedades sin calibracion propia: '
+                    + ', '.join(casos_pendientes[:10])
+                )
 
         if (
             not df_export_todo.empty
@@ -3733,10 +3798,6 @@ if file_path is not None:
         var_proy
     )
 
-    # Preparar datos para el patrón
-    df_filtered = df[df['Bloque&Varid'].isin([patron_seleccionado])]
-# df_filtered_ = df[df['Bloque&Varid'].isin(var_proy)]
-    index = np.array(df_filtered['Tallos/m2'])
     m2 = df_filtered_.iloc[0]
     m2_col = next(
         (col for col in df_filtered_.columns if str(
@@ -3747,11 +3808,6 @@ if file_path is not None:
         st.error('No se encontro la columna m2Variedad en la base de datos.')
         st.stop()
     m2_1 = np.float64(m2[m2_col])
-    print(var_proy, m2[m2_col], 'M2')
-    index_1 = np.float64(index)
-    print(index_1*m2_1)
-    proy = pd.Series(index_1*m2_1)
-    # st.write(proy.tail(6))
 
 
 # Entrenamiento modelo
@@ -3791,6 +3847,7 @@ if file_path is not None:
         patron_weekly,
         patron_feature_weight
     )
+    proy = eval_actual_df['Produccion_patron'].reset_index(drop=True).copy()
     y_frame = pd.DataFrame(eval_actual_df['Produccion']).reset_index(drop=True)
 
     # Promedio semanal de Tallos/m2 por cada anio para calcular factor de correccion.
@@ -3921,6 +3978,11 @@ if file_path is not None:
     else:
         factor_ajuste_reciente = 1.0
         origen_ajuste_reciente = 'evaluacion_pendiente'
+    pred_vals, factor_ajuste_media_baja = adjust_model_mean_if_below_references(
+        pred_vals,
+        y_frame.iloc[:len(pred_vals), 0],
+        eval_actual_df['Produccion_patron'].iloc[:len(pred_vals)],
+    )
     pred_vals, amortiguador, error_sobreestimacion_promedio, porcentaje_amortiguador = apply_overestimation_buffer(
         modelo,
         x_frame,
@@ -3954,6 +4016,37 @@ if file_path is not None:
                                      0].reset_index(drop=True).to_numpy()
     y_patron_plot = proy.iloc[:n_puntos].reset_index(drop=True).to_numpy()
     y_patron_ajustado_plot = np.asarray(proy_vals[:n_puntos]).reshape(-1)
+    periodos_ajuste = eval_actual_df[['Anio', 'Semana']].reset_index(
+        drop=True
+    ).copy()
+    periodos_ajuste['Anio'] = pd.to_numeric(
+        periodos_ajuste['Anio'], errors='coerce'
+    )
+    periodos_ajuste['Semana'] = pd.to_numeric(
+        periodos_ajuste['Semana'], errors='coerce'
+    )
+    ultimas_semanas_ajuste = (
+        periodos_ajuste.dropna()
+        .drop_duplicates()
+        .sort_values(['Anio', 'Semana'])
+        .tail(4)
+    )
+    claves_ultimas_semanas = set(map(
+        tuple,
+        ultimas_semanas_ajuste[['Anio', 'Semana']].to_numpy(),
+    ))
+    posiciones_ajustadas = [
+        posicion
+        for posicion, fila in periodos_ajuste.iterrows()
+        if pd.notna(fila['Anio'])
+        and pd.notna(fila['Semana'])
+        and (fila['Anio'], fila['Semana']) in claves_ultimas_semanas
+        and posicion < n_puntos
+    ]
+    semanas_ajustadas_texto = ', '.join(
+        f"{int(fila.Anio)}-{int(fila.Semana):02d}"
+        for fila in ultimas_semanas_ajuste.itertuples(index=False)
+    )
 
     media_produccion_real = float(np.nanmean(y_produccion_plot))
     desv_produccion_real = float(np.nanstd(y_produccion_plot, ddof=0))
@@ -3985,6 +4078,17 @@ if file_path is not None:
         x_pos, y_modelo_plot, label='Modelo', color='orange', linewidth=2
     ):
         hubo_desajuste = True
+    if origen_ajuste_reciente == 'case' and posiciones_ajustadas:
+        ax.scatter(
+            posiciones_ajustadas,
+            y_modelo_plot[posiciones_ajustadas],
+            label='Ajuste reciente individual %Dif',
+            color='#7b2cbf',
+            edgecolors='white',
+            linewidths=0.8,
+            s=58,
+            zorder=5,
+        )
     if not plot_linea_segura(
         x_pos_grafico, y_produccion_grafico, label='Produccion', color='red', linestyle='--'
     ):
@@ -4038,6 +4142,25 @@ if file_path is not None:
     plt.tight_layout()
     st.pyplot(fig, clear_figure=True)
 
+    if origen_ajuste_reciente == 'case':
+        st.success(
+            'Ajuste reciente individual aplicado desde %Dif: '
+            f'factor {factor_ajuste_reciente:.3f} en '
+            f'{semanas_ajustadas_texto}.'
+        )
+    elif origen_ajuste_reciente == 'case_pending':
+        st.warning(
+            f'No se aplico ajuste reciente a {var_proy}: falta calibracion propia.'
+        )
+    media_modelo_grafica = float(np.nanmean(y_modelo_plot))
+    media_patron_grafica = float(np.nanmean(y_patron_plot))
+    st.caption(
+        'Medias de las series: '
+        f'produccion real {media_produccion_real:,.2f} | '
+        f'modelo {media_modelo_grafica:,.2f} | '
+        f'patron ajustado {media_patron_grafica:,.2f} | '
+        f'factor por media baja {factor_ajuste_media_baja:.6f}'
+    )
     st.write('Factor de correccion aplicado', round(factor_correccion, 4))
     st.write(
         'Factor por cambio de media 2025 aplicado (semanas 24-52 de 2026)',
@@ -4073,6 +4196,7 @@ if file_path is not None:
         'Origen_factor_2025': [origen_factor] * n_export,
         'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
         'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
+        'Factor_ajuste_media_baja': [factor_ajuste_media_baja] * n_export,
     })
     df_export = add_buffer_projection_columns(
         df_export,

@@ -36,10 +36,28 @@ MAX_BUFFER_AREA_RATE = 0.15
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
 RECENT_ADJUSTMENT_WEEKS = 4
-RECENT_ADJUSTMENT_MIN_FACTOR = 0.85
-RECENT_ADJUSTMENT_MAX_FACTOR = 1.15
+RECENT_ADJUSTMENT_MIN_FACTOR = 0.75
+RECENT_ADJUSTMENT_MAX_FACTOR = 1.30
 REAL_PRODUCTION_TARGET_WEIGHT = 0.70
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
+
+
+def _normalize_recent_case(value: Any) -> str:
+    """Normaliza el identificador compuesto de bloque y variedad."""
+    text = "" if value is None or pd.isna(value) else str(value)
+    text = "".join(text.split())
+    prefix_length = len(text) - len(text.lstrip("0123456789"))
+    if 0 < prefix_length < 3 and prefix_length < len(text):
+        text = text[:prefix_length].zfill(3) + text[prefix_length:]
+    return text.casefold()
+
+
+def _normalize_block(value: Any) -> str:
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+    if pd.notna(numeric) and np.isfinite(numeric) and float(numeric).is_integer():
+        return f"{int(numeric):03d}"
+    return text
 
 
 def load_overestimation_calibration(
@@ -213,6 +231,81 @@ def fit_production_model(
     return model
 
 
+def align_pattern_to_target_level(
+    target_values: pd.Series,
+    pattern_values: pd.Series,
+) -> tuple[pd.Series, float]:
+    """Escala el patron para igualar la media objetivo en semanas coincidentes."""
+    target = np.asarray(
+        pd.to_numeric(target_values, errors="coerce"), dtype=float
+    ).reshape(-1)
+    pattern = np.asarray(
+        pd.to_numeric(pattern_values, errors="coerce"), dtype=float
+    ).reshape(-1)
+    if target.size != pattern.size:
+        raise ValueError("Objetivo y patron deben tener igual longitud.")
+
+    valid = np.isfinite(target) & np.isfinite(pattern)
+    if not valid.any():
+        return pd.Series(pattern, index=pattern_values.index,
+                         name=pattern_values.name), 1.0
+
+    target_mean = float(np.mean(target[valid]))
+    pattern_mean = float(np.mean(pattern[valid]))
+    if np.isclose(pattern_mean, 0.0):
+        return pd.Series(pattern, index=pattern_values.index,
+                         name=pattern_values.name), 1.0
+
+    factor = target_mean / pattern_mean
+    if not np.isfinite(factor) or factor < 0.0:
+        return pd.Series(pattern, index=pattern_values.index,
+                         name=pattern_values.name), 1.0
+
+    aligned = pattern.copy()
+    aligned[valid] *= factor
+    return pd.Series(aligned, index=pattern_values.index,
+                     name=pattern_values.name), float(factor)
+
+
+def adjust_model_mean_if_below_references(
+    predictions: np.ndarray,
+    actual_values: "pd.Series | np.ndarray",
+    pattern_values: "pd.Series | np.ndarray",
+) -> tuple[np.ndarray, float]:
+    """Eleva la media del modelo al promedio real/patron si queda bajo ambos."""
+    adjusted = np.asarray(predictions, dtype=float).reshape(-1).copy()
+    actual = np.asarray(
+        pd.to_numeric(pd.Series(actual_values), errors="coerce"), dtype=float
+    ).reshape(-1)
+    pattern = np.asarray(
+        pd.to_numeric(pd.Series(pattern_values), errors="coerce"), dtype=float
+    ).reshape(-1)
+    if not (adjusted.size == actual.size == pattern.size):
+        raise ValueError(
+            "Predicciones, produccion real y patron deben tener igual longitud."
+        )
+
+    valid = np.isfinite(adjusted) & np.isfinite(actual) & np.isfinite(pattern)
+    if not valid.any():
+        return adjusted, 1.0
+
+    model_mean = float(np.mean(adjusted[valid]))
+    actual_mean = float(np.mean(actual[valid]))
+    pattern_mean = float(np.mean(pattern[valid]))
+    reference_mean = (actual_mean + pattern_mean) / 2.0
+    if (
+        model_mean <= 0.0
+        or reference_mean <= 0.0
+        or not model_mean < actual_mean
+        or not model_mean < pattern_mean
+        or np.isclose(model_mean, reference_mean)
+    ):
+        return adjusted, 1.0
+
+    factor = reference_mean / model_mean
+    return adjusted * factor, float(factor)
+
+
 def calculate_model_error_report(
     actual_values: "pd.Series | np.ndarray",
     estimated_values: "pd.Series | np.ndarray",
@@ -249,7 +342,7 @@ def calculate_model_error_report(
 def load_recent_media_adjustments(
     evaluation_path: "str | Path | None" = None,
 ) -> dict[str, Any]:
-    """Carga el factor de media de las últimas cuatro semanas por caso."""
+    """Calcula factores desde el %Dif medio de las cuatro semanas más recientes."""
     path = Path(evaluation_path) if evaluation_path else (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
@@ -283,12 +376,25 @@ def load_recent_media_adjustments(
     if working.empty:
         return result
 
-    if {"Bloque", "Variedad"}.issubset(working.columns):
-        bloque = working["Bloque"].astype(str).str.strip()
-        variedad = working["Variedad"].astype(str).str.strip()
-        working["__caso"] = bloque + variedad
-    elif "Bloque&Varid" in working.columns:
-        working["__caso"] = working["Bloque&Varid"].astype(str).str.strip()
+    normalized_columns = {
+        "".join(str(column).split()).casefold(): column
+        for column in working.columns
+    }
+    block_column = normalized_columns.get("bloque")
+    variety_column = normalized_columns.get("variedad")
+    case_column = normalized_columns.get("bloque&varid")
+    if block_column is not None and variety_column is not None:
+        working["__caso"] = [
+            _normalize_recent_case(
+                _normalize_block(block)
+                + ("" if pd.isna(variety) else str(variety).strip())
+            )
+            for block, variety in zip(
+                working[block_column], working[variety_column]
+            )
+        ]
+    elif case_column is not None:
+        working["__caso"] = working[case_column].map(_normalize_recent_case)
     else:
         working["__caso"] = "__global__"
 
@@ -299,12 +405,19 @@ def load_recent_media_adjustments(
             RECENT_ADJUSTMENT_MAX_FACTOR,
         ))
 
-    working = working.sort_values(["__anio", "__semana"])
-    recent_global = working.tail(RECENT_ADJUSTMENT_WEEKS)
+    weekly_global = (
+        working.groupby(["__anio", "__semana"], as_index=False)["__dif"]
+        .mean()
+        .sort_values(["__anio", "__semana"])
+    )
+    recent_global = weekly_global.tail(RECENT_ADJUSTMENT_WEEKS)
     result["global_factor"] = factor(recent_global["__dif"].to_numpy())
     for case, group in working.groupby("__caso", sort=False):
-        recent = group.sort_values(["__anio", "__semana"]).tail(
-            RECENT_ADJUSTMENT_WEEKS
+        recent = (
+            group.groupby(["__anio", "__semana"], as_index=False)["__dif"]
+            .mean()
+            .sort_values(["__anio", "__semana"])
+            .tail(RECENT_ADJUSTMENT_WEEKS)
         )
         if case != "__global__" and not recent.empty:
             result["factors_by_case"][str(case)] = factor(
@@ -320,22 +433,38 @@ def apply_recent_media_adjustment(
     selected_case: str,
     adjustments: dict[str, Any],
 ) -> tuple[np.ndarray, float, str]:
-    """Aplica el factor evaluado solo a las cuatro filas finales del caso."""
+    """Aplica el factor a todas las filas de las cuatro semanas finales."""
     adjusted = np.asarray(predictions, dtype=float).copy().reshape(-1)
-    factors = adjustments.get("factors_by_case", {})
-    case = str(selected_case).strip()
-    factor = float(factors.get(case, adjustments.get("global_factor", 1.0)))
-    origin = "case" if case in factors else "global"
     if not adjustments.get("available") or evaluation_df is None:
         return adjusted, 1.0, "pending"
+    factors = adjustments.get("factors_by_case", {})
+    case = _normalize_recent_case(selected_case)
+    if factors:
+        if case not in factors:
+            return adjusted, 1.0, "case_pending"
+        factor = float(factors[case])
+        origin = "case"
+    else:
+        return adjusted, 1.0, "case_pending"
     if not {"Anio", "Semana"}.issubset(evaluation_df.columns):
         return adjusted, factor, origin
-    periods = evaluation_df.copy()
+    periods = evaluation_df[["Anio", "Semana"]].reset_index(drop=True).copy()
     periods["__anio"] = pd.to_numeric(periods["Anio"], errors="coerce")
     periods["__semana"] = pd.to_numeric(periods["Semana"], errors="coerce")
-    positions = periods.dropna(subset=["__anio", "__semana"]).sort_values(
-        ["__anio", "__semana"]
-    ).index.to_numpy(dtype=int)[-RECENT_ADJUSTMENT_WEEKS:]
+    valid_periods = periods.dropna(subset=["__anio", "__semana"])
+    recent_weeks = (
+        valid_periods[["__anio", "__semana"]]
+        .drop_duplicates()
+        .sort_values(["__anio", "__semana"])
+        .tail(RECENT_ADJUSTMENT_WEEKS)
+    )
+    recent_keys = set(map(tuple, recent_weeks.to_numpy()))
+    year_values = periods["__anio"].to_numpy()
+    week_values = periods["__semana"].to_numpy()
+    positions = np.flatnonzero([
+        pd.notna(year) and pd.notna(week) and (year, week) in recent_keys
+        for year, week in zip(year_values, week_values)
+    ])
     positions = positions[positions < len(adjusted)]
     adjusted[positions] *= factor
     return adjusted, factor, origin
@@ -615,6 +744,17 @@ def _prepare_production_dataset(
     working = working.dropna().sort_values(["Anio", "Semana"])
     working[["Anio", "Semana"]] = working[["Anio", "Semana"]].astype(int)
     working = working.merge(weekly_pattern, on=["Anio", "Semana"], how="left")
+    for target_column, pattern_column, increment_column in [
+        ("Tallos/m2", "Tallos_m2_patron", "Incremento_tallos_patron"),
+        ("Produccion", "Produccion_patron", "Incremento_produccion_patron"),
+    ]:
+        aligned, factor = align_pattern_to_target_level(
+            working[target_column], working[pattern_column]
+        )
+        working[pattern_column] = aligned
+        working[increment_column] = pd.to_numeric(
+            working[increment_column], errors="coerce"
+        ) * factor
     working["Tallos_m2_patron"] = working["Tallos_m2_patron"].fillna(
         working["Tallos/m2"]
     )
@@ -742,6 +882,18 @@ def train_projection_model(
     predictions, factor, affected_weeks, factor_origin = _apply_difference_factor(
         predictions, evaluation_df, str(selected_var)
     )
+    recent_adjustments = load_recent_media_adjustments()
+    predictions, recent_factor, recent_origin = apply_recent_media_adjustment(
+        predictions,
+        evaluation_df,
+        str(selected_var),
+        recent_adjustments,
+    )
+    predictions, low_mean_factor = adjust_model_mean_if_below_references(
+        predictions,
+        real_production,
+        evaluation_df["Produccion_patron"],
+    )
     m2_values = pd.to_numeric(subset["m2Variedad"], errors="coerce").dropna()
     if m2_values.empty:
         raise ValueError("m2Variedad no contiene valores numericos validos.")
@@ -786,6 +938,9 @@ def train_projection_model(
         "factor_diferencia_2025": factor,
         "factor_origin": factor_origin,
         "factor_affected_weeks": affected_weeks,
+        "factor_ajuste_reciente_4_semanas": recent_factor,
+        "origen_ajuste_reciente": recent_origin,
+        "factor_ajuste_media_baja": low_mean_factor,
         "amortiguador_promedio_historico": average_overestimation,
         "amortiguador_porcentaje": buffer_rate * 100.0,
         "preview": chart_df.tail(20).to_dict(orient="records"),

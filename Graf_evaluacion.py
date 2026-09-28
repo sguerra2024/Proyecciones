@@ -82,16 +82,19 @@ def seleccionar_archivo_y_columna():
 
         dialog = tk.Toplevel(root)
         dialog.title('Configurar gráfica')
-        dialog.geometry('680x470')
+        dialog.geometry('680x570')
         dialog.resizable(False, False)
         dialog.attributes('-topmost', True)
         dialog.columnconfigure(0, weight=1)
 
         selected_file = tk.StringVar(value=str(files[0]))
         selected_column = tk.StringVar()
+        selected_sheet = tk.StringVar()
         selected_chart = tk.StringVar(value='Línea')
+        usar_calibracion = tk.BooleanVar(value=True)
         folder_label = tk.StringVar(value=f'Carpeta: {folder_path}')
-        result = {'column': None, 'chart_type': None}
+        result = {'column': None, 'chart_type': None,
+                  'sheet': None, 'calibrar_amortiguador': False}
 
         tk.Label(
             dialog,
@@ -174,6 +177,10 @@ def seleccionar_archivo_y_columna():
             )
             if new_folder:
                 refresh_file_tree(new_folder)
+                column_selector['values'] = []
+                selected_column.set('')
+                estado_carga.set(
+                    'Archivo sin cargar. Presiona "Cargar archivo".')
 
         tk.Button(
             dialog,
@@ -184,16 +191,49 @@ def seleccionar_archivo_y_columna():
 
         refresh_file_tree(folder_path)
 
-        tk.Label(dialog, text='Columna numérica:', anchor='w').grid(
-            row=3, column=0, padx=18, pady=4, sticky='ew'
+        estado_carga = tk.StringVar(
+            value='Archivo sin cargar. Presiona "Cargar archivo".'
+        )
+        carga_frame = tk.Frame(dialog)
+        carga_frame.grid(row=3, column=0, padx=18, pady=(6, 4), sticky='ew')
+        carga_frame.columnconfigure(0, weight=1)
+        tk.Label(
+            carga_frame, textvariable=estado_carga, anchor='w', fg='#555555'
+        ).grid(row=0, column=0, sticky='ew')
+        tk.Button(
+            carga_frame,
+            text='Cargar archivo',
+            command=lambda: load_columns(),
+            width=16,
+        ).grid(row=0, column=1, padx=(8, 0))
+
+        hoja_frame = tk.Frame(dialog)
+        hoja_frame.grid(row=4, column=0, padx=18, pady=(2, 4), sticky='ew')
+        hoja_frame.columnconfigure(1, weight=1)
+        tk.Label(hoja_frame, text='Hoja:', anchor='w').grid(
+            row=0, column=0, sticky='w'
+        )
+        sheet_selector = ttk.Combobox(
+            hoja_frame, textvariable=selected_sheet, state='disabled'
+        )
+        sheet_selector.grid(row=0, column=1, sticky='ew', padx=(8, 0))
+
+        tk.Label(dialog, text='Columna a graficar:', anchor='w').grid(
+            row=5, column=0, padx=18, pady=4, sticky='ew'
         )
         column_selector = ttk.Combobox(
-            dialog, textvariable=selected_column, state='readonly'
+            dialog, textvariable=selected_column, state='disabled'
         )
-        column_selector.grid(row=4, column=0, padx=18, pady=4, sticky='ew')
+        column_selector.grid(row=6, column=0, padx=18, pady=4, sticky='ew')
+
+        ttk.Checkbutton(
+            dialog,
+            text='Guardar %Dif e identificadores para ajustar las últimas 4 semanas por caso',
+            variable=usar_calibracion,
+        ).grid(row=7, column=0, padx=18, pady=(0, 4), sticky='w')
 
         tk.Label(dialog, text='Tipo de gráfica:', anchor='w').grid(
-            row=5, column=0, padx=18, pady=4, sticky='ew'
+            row=8, column=0, padx=18, pady=4, sticky='ew'
         )
         chart_selector = ttk.Combobox(
             dialog,
@@ -201,60 +241,146 @@ def seleccionar_archivo_y_columna():
             values=list(CHART_TYPES),
             state='readonly',
         )
-        chart_selector.grid(row=6, column=0, padx=18, pady=4, sticky='ew')
+        chart_selector.grid(row=9, column=0, padx=18, pady=4, sticky='ew')
+
+        def _elegir_hoja_por_defecto(excel_file, hojas):
+            mejor_hoja = hojas[0]
+            mejor_score = -1
+            for nombre in hojas:
+                try:
+                    columnas = pd.read_excel(
+                        excel_file, sheet_name=nombre, nrows=0
+                    ).columns
+                except Exception:
+                    continue
+                score = sum(
+                    1 for col in columnas
+                    if not str(col).startswith('Unnamed:')
+                )
+                if score > mejor_score:
+                    mejor_score = score
+                    mejor_hoja = nombre
+            return mejor_hoja
 
         def load_columns(*_):
             path = Path(selected_file.get())
             columns = []
-            if path.suffix.lower() in EXCEL_EXTENSIONS | {'.csv'}:
-                try:
-                    dataframe = (
-                        pd.read_excel(path)
-                        if path.suffix.lower() in EXCEL_EXTENSIONS
-                        else pd.read_csv(path)
+            try:
+                if path.suffix.lower() in EXCEL_EXTENSIONS:
+                    excel_file = pd.ExcelFile(path)
+                    hojas = excel_file.sheet_names
+                    if not hojas:
+                        raise ValueError('El archivo Excel no tiene hojas.')
+                    hoja_actual = selected_sheet.get()
+                    if hoja_actual not in hojas:
+                        hoja_actual = _elegir_hoja_por_defecto(
+                            excel_file, hojas)
+                        selected_sheet.set(hoja_actual)
+                    sheet_selector['values'] = hojas
+                    sheet_selector.configure(
+                        state='readonly' if len(hojas) > 1 else 'disabled'
                     )
-                    columns = [
-                        str(column) for column in dataframe.columns
-                        if not pd.to_numeric(
-                            dataframe[column], errors='coerce'
-                        ).dropna().empty
-                    ]
-                except Exception as exc:
-                    messagebox.showerror(
-                        'Error al cargar archivo', str(exc), parent=dialog
-                    )
+                    dataframe = pd.read_excel(
+                        excel_file, sheet_name=hoja_actual)
+                    columns = [str(column) for column in dataframe.columns]
+                elif path.suffix.lower() == '.csv':
+                    selected_sheet.set('')
+                    sheet_selector['values'] = []
+                    sheet_selector.configure(state='disabled')
+                    dataframe = pd.read_csv(path)
+                    columns = [str(column) for column in dataframe.columns]
+                else:
+                    selected_sheet.set('')
+                    sheet_selector['values'] = []
+                    sheet_selector.configure(state='disabled')
+            except Exception as exc:
+                messagebox.showerror(
+                    'Error al cargar archivo', str(exc), parent=dialog
+                )
+                estado_carga.set('No se pudo cargar el archivo.')
+                column_selector.configure(state='disabled')
+                column_selector['values'] = []
+                selected_column.set('')
+                return
             column_selector['values'] = columns
             selected_column.set(columns[0] if columns else '')
+            if columns:
+                column_selector.configure(state='readonly')
+                sufijo_hoja = (
+                    f" (hoja '{selected_sheet.get()}')"
+                    if selected_sheet.get() else ''
+                )
+                estado_carga.set(
+                    f'Archivo cargado: {path.name}{sufijo_hoja} '
+                    f'({len(columns)} columnas).'
+                )
+            else:
+                column_selector.configure(state='disabled')
+                estado_carga.set(
+                    f'{path.name} no tiene columnas seleccionables.'
+                )
+
+        sheet_selector.bind('<<ComboboxSelected>>', lambda _e: load_columns())
 
         def select_file(_event=None):
             selection = file_tree.selection()
             if selection:
                 selected_file.set(selection[0])
-                load_columns()
+                selected_sheet.set('')
+                sheet_selector['values'] = []
+                sheet_selector.configure(state='disabled')
+                column_selector.configure(state='disabled')
+                column_selector['values'] = []
+                selected_column.set('')
+                estado_carga.set(
+                    'Archivo sin cargar. Presiona "Cargar archivo".')
+
+        def select_file_por_clic(event):
+            fila = file_tree.identify_row(event.y)
+            if fila:
+                file_tree.selection_set(fila)
+                file_tree.focus(fila)
+                selected_file.set(fila)
+                selected_sheet.set('')
+                sheet_selector['values'] = []
+                sheet_selector.configure(state='disabled')
+                column_selector.configure(state='disabled')
+                column_selector['values'] = []
+                selected_column.set('')
+                estado_carga.set(
+                    'Archivo sin cargar. Presiona "Cargar archivo".')
 
         file_tree.bind('<<TreeviewSelect>>', select_file)
+        file_tree.bind('<ButtonRelease-1>', select_file_por_clic)
+        file_tree.bind('<<TreeviewOpen>>', select_file)
+        file_tree.bind('<Up>', lambda _e: dialog.after(1, select_file))
+        file_tree.bind('<Down>', lambda _e: dialog.after(1, select_file))
         first_item = file_tree.get_children()[0]
         file_tree.selection_set(first_item)
         file_tree.focus(first_item)
-        load_columns()
 
         def accept():
-            if column_selector['values'] and not selected_column.get():
+            path = Path(selected_file.get())
+            requiere_columna = path.suffix.lower() in EXCEL_EXTENSIONS | {
+                '.csv'}
+            if requiere_columna and not selected_column.get():
                 messagebox.showwarning(
-                    'Selecciona una columna',
-                    'Elige una columna numérica para graficar.',
+                    'Carga el archivo',
+                    'Presiona "Cargar archivo" y elige una columna antes de graficar.',
                     parent=dialog,
                 )
                 return
             result['column'] = selected_column.get() or None
             result['chart_type'] = CHART_TYPES[selected_chart.get()]
+            result['sheet'] = selected_sheet.get() or None
+            result['calibrar_amortiguador'] = bool(usar_calibracion.get())
             dialog.destroy()
 
         def cancel():
             dialog.destroy()
 
         buttons = tk.Frame(dialog)
-        buttons.grid(row=7, column=0, pady=14)
+        buttons.grid(row=10, column=0, pady=14)
         tk.Button(buttons, text='Graficar', command=accept, width=12).pack(
             side='left', padx=5
         )
@@ -264,28 +390,37 @@ def seleccionar_archivo_y_columna():
         dialog.protocol('WM_DELETE_WINDOW', cancel)
         dialog.grab_set()
         root.wait_window(dialog)
-        return selected_file.get() if result['chart_type'] else '', result['column'], result['chart_type']
+        return (
+            selected_file.get() if result['chart_type'] else '',
+            result['column'],
+            result['chart_type'],
+            result['sheet'],
+            result['calibrar_amortiguador'],
+        )
     except Exception as exc:
         print(f'No se pudo abrir el selector de archivos: {exc}')
-        return '', None, None
+        return '', None, None, None, False
     finally:
         root.destroy()
 
 
 def seleccionar_archivo():
-    file_path, _, _ = seleccionar_archivo_y_columna()
+    file_path, _, _, _, _ = seleccionar_archivo_y_columna()
     return file_path
 
 
-def extraer_valores_desde_archivo(file_path, column=None):
+def extraer_valores_desde_archivo(file_path, column=None, sheet_name=None):
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f'No se encontró el archivo: {file_path}')
 
     suffix = path.suffix.lower()
     if suffix in EXCEL_EXTENSIONS | {'.csv'}:
-        df = pd.read_excel(
-            path) if suffix in EXCEL_EXTENSIONS else pd.read_csv(path)
+        df = (
+            pd.read_excel(path, sheet_name=sheet_name if sheet_name else 0)
+            if suffix in EXCEL_EXTENSIONS
+            else pd.read_csv(path)
+        )
         if column is not None:
             if column not in df.columns:
                 raise ValueError(
@@ -310,14 +445,106 @@ def extraer_valores_desde_archivo(file_path, column=None):
     return [float(match.replace(',', '.')) for match in matches]
 
 
-def obtener_rango_semanas(file_path):
+def guardar_calibracion_amortiguador(
+    file_path, column, sheet_name=None, destination_path=None
+):
+    """Persiste el %Dif graficado y claves para el ajuste reciente por caso."""
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    if suffix in EXCEL_EXTENSIONS:
+        dataframe = pd.read_excel(
+            path, sheet_name=sheet_name if sheet_name else 0)
+    elif suffix == '.csv':
+        dataframe = pd.read_csv(path)
+    else:
+        raise ValueError(
+            'Solo se puede calibrar el amortiguador desde Excel o CSV.'
+        )
+
+    if column not in dataframe.columns:
+        raise ValueError(f'No existe la columna seleccionada: {column}')
+
+    nombre_columna = ''.join(str(column).split()).casefold()
+    if nombre_columna not in {'%dif', 'error_relativo'}:
+        raise ValueError(
+            'Para el ajuste reciente debes graficar la columna %Dif '
+            '(o error_relativo), no otra métrica.'
+        )
+
+    normalized_columns = {
+        ''.join(str(col).split()).casefold(): col for col in dataframe.columns
+    }
+    columna_anio = normalized_columns.get('anio')
+    columna_semana = normalized_columns.get('semana')
+    columna_bloque = normalized_columns.get('bloque')
+    columna_variedad = normalized_columns.get('variedad')
+    columna_caso = normalized_columns.get('bloque&varid')
+    if columna_anio is None or columna_semana is None:
+        raise ValueError(
+            'El archivo debe incluir Anio y Semana para seleccionar '
+            'las cuatro semanas recientes.'
+        )
+    if not (
+        (columna_bloque is not None and columna_variedad is not None)
+        or columna_caso is not None
+    ):
+        raise ValueError(
+            'El archivo debe incluir Bloque y Variedad, o Bloque&Varid, '
+            'para calibrar el ajuste individual.'
+        )
+
+    serie = pd.to_numeric(dataframe[column], errors='coerce')
+    valido = serie.notna()
+    if not valido.any():
+        raise ValueError(
+            f'La columna seleccionada no contiene valores numéricos: {column}'
+        )
+
+    reporte = pd.DataFrame({'error_relativo': serie[valido].to_numpy()})
+    reporte['%dif'] = reporte['error_relativo']
+
+    for nombre_canonico in ['Finca', 'Bloque', 'Variedad', 'Bloque&Varid']:
+        columna_origen = normalized_columns.get(
+            ''.join(nombre_canonico.split()).casefold()
+        )
+        if columna_origen is not None:
+            reporte[nombre_canonico] = dataframe.loc[
+                valido, columna_origen
+            ].to_numpy()
+
+    reporte['Anio'] = pd.to_numeric(
+        dataframe.loc[valido, columna_anio], errors='coerce'
+    ).to_numpy()
+    reporte['Semana'] = pd.to_numeric(
+        dataframe.loc[valido, columna_semana], errors='coerce'
+    ).to_numpy()
+
+    destino = Path(destination_path) if destination_path else (
+        Path(__file__).with_name('Evaluacion') /
+        'errores_evaluacion_modelo.csv'
+    )
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    reporte.to_csv(destino, index=False, encoding='utf-8-sig')
+
+    periodos = pd.DataFrame()
+    if {'Anio', 'Semana'}.issubset(reporte.columns):
+        periodos = reporte[['Anio', 'Semana']].dropna().drop_duplicates()
+
+    return {
+        'rows': int(reporte['error_relativo'].notna().sum()),
+        'evaluated_weeks': int(len(periodos)),
+        'source': str(destino),
+    }
+
+
+def obtener_rango_semanas(file_path, sheet_name=None):
     """Obtiene el mínimo y máximo de la columna Semana del archivo."""
     path = Path(file_path)
     if path.suffix.lower() not in EXCEL_EXTENSIONS | {'.csv'}:
         return None
 
     dataframe = (
-        pd.read_excel(path)
+        pd.read_excel(path, sheet_name=sheet_name if sheet_name else 0)
         if path.suffix.lower() in EXCEL_EXTENSIONS
         else pd.read_csv(path)
     )
@@ -403,14 +630,16 @@ def generar_grafica(
     column=None,
     chart_type='line',
     mostrar_dialogo=False,
+    sheet_name=None,
 ):
     if not file_path:
         file_path = str(DEFAULT_SERIES_PATH)
 
-    values = extraer_valores_desde_archivo(file_path, column=column)
+    values = extraer_valores_desde_archivo(
+        file_path, column=column, sheet_name=sheet_name)
     values = sorted(values, reverse=True)
     x_values = list(range(1, len(values) + 1))
-    rango_semanas = obtener_rango_semanas(file_path)
+    rango_semanas = obtener_rango_semanas(file_path, sheet_name=sheet_name)
 
     fig, ax = plt.subplots(figsize=(12, 5))
     if chart_type == 'bar':
@@ -426,15 +655,12 @@ def generar_grafica(
         ax.plot(x_values, values, color='#1f77b4', linewidth=1.5)
     ax.axhline(0, color='black', linewidth=0.8, alpha=0.7)
 
-    title_column = f' - {column}' if column else ''
+    titulo_base = 'Grafica de Evaluacion diferencias (Real-proy)/Real'
     if rango_semanas:
         semana_minima, semana_maxima = rango_semanas
-        titulo = (
-            f'EVALUACION MODELO VS REALES - SEMANAS '
-            f'{semana_minima} A {semana_maxima}{title_column}'
-        )
+        titulo = f'{titulo_base} - SEMANAS {semana_minima} A {semana_maxima}'
     else:
-        titulo = f'EVALUACION MODELO VS REALES{title_column}'
+        titulo = titulo_base
     ax.set_title(titulo)
     ax.set_xlabel('Número de caso')
     ax.set_ylabel('Valor')
@@ -468,13 +694,18 @@ def generar_grafica(
             1 for v in values if previous_threshold < abs(v) <= threshold
         )
         previous_threshold = threshold
+    total_graficado = len(values)
 
     metrics_text = '\n'.join([
         f'Área positiva / subestimación: {area_positive:.3f}',
         f'Área negativa / sobreestimación: {area_negative:.3f}',
         f'Áreas: positiva {area_positive_pct:.1f}% | negativa {area_negative_pct:.1f}%',
         f'Datos acumulados entre ±25%: {cumulative_25_pct:.1f}%',
-        *[f'Datos entre {label}: {count}' for label, count in counts.items()],
+        *[
+            f'Datos entre {label}: {count} '
+            f'({count / total_graficado * 100 if total_graficado else 0:.1f}%)'
+            for label, count in counts.items()
+        ],
     ])
 
     if chart_type == 'line':
@@ -534,20 +765,57 @@ if __name__ == '__main__':
                         help='Nombre de la columna numérica que se desea graficar')
     parser.add_argument('--tipo-grafica', choices=list(CHART_TYPES.values()),
                         default='line', help='Tipo de gráfica')
+    parser.add_argument('--hoja', default='',
+                        help='Nombre de la hoja de Excel a usar (si aplica)')
     args = parser.parse_args()
 
     archivo_seleccionado = args.archivo
     columna_seleccionada = args.columna or None
     tipo_grafica = args.tipo_grafica
+    hoja_seleccionada = args.hoja or None
+    calibrar_amortiguador = False
     if args.dialogo or not archivo_seleccionado:
-        archivo_seleccionado, columna_dialogo, grafica_dialogo = seleccionar_archivo_y_columna()
+        (
+            archivo_seleccionado, columna_dialogo, grafica_dialogo,
+            hoja_dialogo, calibrar_dialogo,
+        ) = seleccionar_archivo_y_columna()
         columna_seleccionada = columna_dialogo or columna_seleccionada
         tipo_grafica = grafica_dialogo or tipo_grafica
+        hoja_seleccionada = hoja_dialogo or hoja_seleccionada
+        calibrar_amortiguador = bool(calibrar_dialogo)
 
     if not archivo_seleccionado:
         archivo_seleccionado = str(DEFAULT_SERIES_PATH)
 
     output_path = Path(args.salida) if args.salida else DEFAULT_OUTPUT_PATH
+
+    if calibrar_amortiguador and columna_seleccionada:
+        try:
+            info_calibracion = guardar_calibracion_amortiguador(
+                archivo_seleccionado,
+                columna_seleccionada,
+                sheet_name=hoja_seleccionada,
+            )
+            mensaje_calibracion = (
+                'Ajuste reciente individual actualizado desde %Dif: '
+                f"{info_calibracion['rows']} filas, "
+                f"{info_calibracion['evaluated_weeks']} semanas evaluadas -> "
+                f"{info_calibracion['source']}"
+            )
+            print(mensaje_calibracion)
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                aviso = tk.Tk()
+                aviso.withdraw()
+                messagebox.showinfo(
+                    'Calibracion actualizada', mensaje_calibracion)
+                aviso.destroy()
+            except Exception:
+                pass
+        except Exception as exc:
+            print(
+                f'No se pudo actualizar la calibracion del amortiguador: {exc}')
 
     generar_grafica(
         file_path=archivo_seleccionado,
@@ -555,4 +823,5 @@ if __name__ == '__main__':
         column=columna_seleccionada,
         chart_type=tipo_grafica,
         mostrar_dialogo=True,
+        sheet_name=hoja_seleccionada,
     )
