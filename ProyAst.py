@@ -244,6 +244,23 @@ def eliminar_usuario(usuario):
         raise ValueError('El usuario no existe.')
 
 
+def acreditar_usuario(usuario, acreditado=True):
+    usuario_limpio = str(usuario or '').strip()
+    if not usuario_limpio:
+        raise ValueError('Usuario invalido.')
+    if not acreditado and usuario_limpio.casefold() == 'admin':
+        raise ValueError('No se puede suspender el usuario Admin.')
+
+    ruta = inicializar_tabla_usuarios()
+    with sqlite3.connect(ruta, timeout=5) as conexion:
+        cursor = conexion.execute(
+            'UPDATE usuarios SET activo = ? WHERE usuario = ? COLLATE NOCASE',
+            (1 if acreditado else 0, usuario_limpio),
+        )
+    if cursor.rowcount == 0:
+        raise ValueError('El usuario no existe.')
+
+
 def crear_usuario(usuario, clave):
     usuario_limpio = str(usuario or '').strip()
     clave_texto = str(clave or '')
@@ -432,34 +449,70 @@ def render_gestion_usuarios():
 
         st.divider()
         st.caption(
-            'Tiempo de actividad acumulado y eliminación de usuarios.'
+            'Usuarios registrados: acredita, suspende o elimina cualquier '
+            'cuenta.'
         )
         usuario_actual = st.session_state.get('usuario_autenticado', '')
-        for datos_usuario in listar_usuarios():
-            columna_info, columna_tiempo, columna_accion = st.columns(
+        usuarios_registrados = listar_usuarios()
+        if not usuarios_registrados:
+            st.info('Todavia no hay usuarios registrados.')
+            return
+
+        tabla_usuarios = pd.DataFrame([
+            {
+                'Usuario': datos['usuario'],
+                'Acreditado': 'Si' if datos['activo'] else 'No',
+                'Sesion activa': 'Si' if datos['sesion_activa'] else 'No',
+                'Tiempo actividad': datos['tiempo_actividad'],
+                'Ultimo acceso (UTC)': datos['ultimo_acceso_utc'],
+                'Creado (UTC)': datos['creado_en_utc'],
+            }
+            for datos in usuarios_registrados
+        ])
+        st.dataframe(
+            tabla_usuarios, use_container_width=True, hide_index=True
+        )
+
+        for datos_usuario in usuarios_registrados:
+            columna_info, columna_acreditar, columna_eliminar = st.columns(
                 [2, 1, 1]
             )
+            nombre_usuario = datos_usuario['usuario']
+            es_admin = nombre_usuario.strip().casefold() == 'admin'
+            es_uno_mismo = (
+                nombre_usuario.strip().casefold()
+                == str(usuario_actual).strip().casefold()
+            )
             with columna_info:
-                etiqueta = datos_usuario['usuario']
+                etiqueta = nombre_usuario
                 if not datos_usuario['activo']:
-                    etiqueta += ' (inactivo)'
+                    etiqueta += ' (no acreditado)'
                 st.write(etiqueta)
-            with columna_tiempo:
-                st.write(datos_usuario['tiempo_actividad'])
-            with columna_accion:
-                es_admin = datos_usuario['usuario'].strip(
-                ).casefold() == 'admin'
-                es_uno_mismo = (
-                    datos_usuario['usuario'].strip().casefold()
-                    == str(usuario_actual).strip().casefold()
-                )
+            with columna_acreditar:
+                acreditar = not datos_usuario['activo']
+                if st.button(
+                    'Acreditar' if acreditar else 'Suspender',
+                    key=f'acreditar_usuario_{nombre_usuario}',
+                    # Suspenderse a si mismo dejaria al Admin fuera del sistema.
+                    disabled=(not acreditar) and (es_admin or es_uno_mismo),
+                ):
+                    try:
+                        acreditar_usuario(nombre_usuario, acreditar)
+                        st.success(
+                            'Usuario acreditado.' if acreditar
+                            else 'Usuario suspendido.'
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+            with columna_eliminar:
                 if st.button(
                     'Eliminar',
-                    key=f"eliminar_usuario_{datos_usuario['usuario']}",
+                    key=f'eliminar_usuario_{nombre_usuario}',
                     disabled=es_admin or es_uno_mismo,
                 ):
                     try:
-                        eliminar_usuario(datos_usuario['usuario'])
+                        eliminar_usuario(nombre_usuario)
                         st.success('Usuario eliminado correctamente.')
                         st.rerun()
                     except ValueError as exc:
@@ -3600,7 +3653,7 @@ if file_path is not None:
             'Estimado_modelo', '%dif', 'Tallos_m2_variedad',
             'Amortiguador_sobreestimacion',
             'M2_amortiguador_adicional', 'M2_variedad_disponibles',
-            'Estimado_con_amortiguador_IA'
+            'Estimado_con_amortiguador_IA', 'Estimado_final_corregido'
         ]
         columnas_ia = columnas_ia_numericas + ['Estado_M2_amortiguador']
         for columna_ia in columnas_ia:
@@ -3615,7 +3668,7 @@ if file_path is not None:
             how='left'
         ).sort_values('_orden_original')
 
-        # Exportar solo las 4 ultimas semanas por cada Bloque&Varid.
+        # Exportar las 5 ultimas semanas por cada Bloque&Varid.
         df_estimado_ordenado['__anio'] = pd.to_numeric(
             df_estimado_ordenado['Anio'], errors='coerce')
         df_estimado_ordenado['__semana'] = pd.to_numeric(
@@ -3634,7 +3687,7 @@ if file_path is not None:
             .cumcount() + 1
         )
         df_estimado_ordenado = df_estimado_ordenado[
-            df_estimado_ordenado['__rank_ultimas'] <= 4
+            df_estimado_ordenado['__rank_ultimas'] <= 5
         ].copy()
         df_estimado_ordenado = df_estimado_ordenado.sort_values(
             '_orden_original')
@@ -4246,8 +4299,27 @@ if file_path is not None:
         pares_patron_ind['Proy_patron']
     ) if not pares_patron_ind.empty else np.nan
 
+    # El Excel individual publica las mismas cinco semanas que el recuadro
+    # de Estimado Modelo y la exportacion masiva.
+    periodos_export = df_export['Anio_Semana'].astype(str).str.split(
+        '-', n=1, expand=True
+    )
+    periodos_export.columns = ['__anio_export', '__semana_export']
+    periodos_export = periodos_export.apply(pd.to_numeric, errors='coerce')
+    indices_ultimas_5 = (
+        periodos_export.assign(__pos_export=np.arange(len(df_export)))
+        .dropna(subset=['__anio_export', '__semana_export'])
+        .drop_duplicates(subset=['__anio_export', '__semana_export'])
+        .sort_values(['__anio_export', '__semana_export'])
+        .tail(5)['__pos_export']
+        .astype(int)
+        .sort_values()
+        .tolist()
+    )
+    df_export_ultimas_5 = df_export.iloc[indices_ultimas_5].copy()
+
     df_export_original = preparar_salida_proyeccion_masiva(
-        df_export,
+        df_export_ultimas_5,
         ['Variedad_proyectada', 'Anio_Semana'],
     )
     buffer_individual = io.BytesIO()
@@ -4257,19 +4329,19 @@ if file_path is not None:
         )
 
     df_export_amortiguado_individual = simplificar_salida_amortiguada(
-        df_export,
+        df_export_ultimas_5,
         ['Variedad_proyectada', 'Anio_Semana'],
     )
     base_proy_individual = df_export_amortiguado_individual.copy()
     base_proy_individual['Finca_proyectada'] = str(selected_finca)
     base_proy_individual['Estimado_modelo'] = np.rint(pd.to_numeric(
-        df_export['Estimado_modelo'], errors='coerce'
+        df_export_ultimas_5['Estimado_modelo'], errors='coerce'
     )).astype('Int64')
     base_proy_individual['M2_variedad_disponibles'] = pd.to_numeric(
-        df_export['M2_variedad_disponibles'], errors='coerce'
+        df_export_ultimas_5['M2_variedad_disponibles'], errors='coerce'
     ).reset_index(drop=True)
     base_proy_individual['Tallos_por_m2'] = pd.to_numeric(
-        df_export['Tallos_m2_variedad'], errors='coerce'
+        df_export_ultimas_5['Tallos_m2_variedad'], errors='coerce'
     ).reset_index(drop=True)
     base_actual = st.session_state.get('base_proyeccion_anthropic')
     if base_actual is None or base_actual.empty:
@@ -4300,11 +4372,19 @@ if file_path is not None:
         st.session_state['dashboard_export_name'],
         st.session_state['dashboard_export_mime']
     )
-    y_pred_tail = y_pred.tail(4).round(0).copy()
-    etiquetas_tail = etiquetas_anio_semana.iloc[:len(
-        y_pred)].tail(len(y_pred_tail)).values
-    y_pred_tail.index = etiquetas_tail
-    st.write(y_pred_tail)
+    estimado_modelo_ultimas_5 = df_export_ultimas_5[[
+        'Anio_Semana', 'Estimado_modelo'
+    ]].copy()
+    estimado_modelo_ultimas_5['Estimado_modelo'] = np.rint(
+        pd.to_numeric(
+            estimado_modelo_ultimas_5['Estimado_modelo'], errors='coerce'
+        )
+    ).astype('Int64')
+    estimado_modelo_ultimas_5 = estimado_modelo_ultimas_5.set_index(
+        'Anio_Semana'
+    )
+    st.markdown('**Estimado Modelo - últimas 5 semanas**')
+    st.write(estimado_modelo_ultimas_5)
 
     if not mostrar_analisis_avanzado:
         st.divider()
