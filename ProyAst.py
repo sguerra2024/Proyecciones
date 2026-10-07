@@ -3794,34 +3794,37 @@ if file_path is not None:
             int(registros_proyectados)
         )
 
-        base_proy_masiva = df_export_amortiguado.copy()
+        base_proy_masiva = df_export_amortiguado.copy().reset_index(drop=True)
         base_proy_masiva['Finca_proyectada'] = str(selected_finca)
         base_proy_masiva['Variedad_proyectada'] = (
-            df_estimado_ordenado['Variedad_proyectada'].reset_index(drop=True)
+            df_estimado_ordenado['Variedad_proyectada'].reset_index(
+                drop=True).to_numpy()
         )
         base_proy_masiva['Anio_Semana'] = (
-            df_estimado_ordenado['Anio_Semana'].reset_index(drop=True)
+            df_estimado_ordenado['Anio_Semana'].reset_index(
+                drop=True).to_numpy()
         )
         base_proy_masiva['Estimado_modelo'] = (
-            df_estimado_ordenado['Estimado_modelo'].reset_index(drop=True)
+            df_estimado_ordenado['Estimado_modelo'].reset_index(
+                drop=True).to_numpy()
         )
         base_proy_masiva['M2_variedad_disponibles'] = pd.to_numeric(
             df_estimado_ordenado[
                 'M2_variedad_disponibles'
             ].reset_index(drop=True),
             errors='coerce',
-        )
+        ).to_numpy()
         base_proy_masiva['Tallos_por_m2'] = pd.to_numeric(
             df_estimado_ordenado['Tallos_m2_variedad'].reset_index(drop=True),
             errors='coerce',
-        )
+        ).to_numpy()
         # Respaldo: productividad historica real cuando la proyectada es NaN.
         if 'Tallos_m2_patron' in df_estimado_ordenado.columns:
             base_proy_masiva['Tallos_m2_historico'] = pd.to_numeric(
                 df_estimado_ordenado['Tallos_m2_patron'].reset_index(
                     drop=True),
                 errors='coerce',
-            )
+            ).to_numpy()
         resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
             base_proy_masiva
         )
