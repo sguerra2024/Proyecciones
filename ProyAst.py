@@ -1584,6 +1584,15 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     if columna_tallos is None or not requeridas.issubset(trabajo.columns):
         return pd.DataFrame(columns=columnas_salida)
 
+    # Respaldo: productividad historica real cuando la proyectada es NaN.
+    columna_tallos_respaldo = next(
+        (
+            columna for columna in ['Tallos_m2_historico', 'Tallos/m2']
+            if columna in trabajo.columns
+        ),
+        None,
+    )
+
     if 'Anio_Semana' in trabajo.columns:
         partes = trabajo['Anio_Semana'].astype(str).str.split(
             '-', n=1, expand=True
@@ -1601,6 +1610,13 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
     trabajo['__tallos_m2'] = pd.to_numeric(
         trabajo[columna_tallos], errors='coerce'
     )
+    if columna_tallos_respaldo is not None:
+        tallos_respaldo = pd.to_numeric(
+            trabajo[columna_tallos_respaldo], errors='coerce'
+        )
+        trabajo['__tallos_m2'] = trabajo['__tallos_m2'].fillna(
+            tallos_respaldo
+        )
     trabajo['__area_m2'] = pd.to_numeric(
         trabajo['M2 Amortiguador'], errors='coerce'
     )
@@ -4351,6 +4367,19 @@ if file_path is not None:
     base_proy_individual['Tallos_por_m2'] = pd.to_numeric(
         df_export_ultimas_5['Tallos_m2_variedad'], errors='coerce'
     ).reset_index(drop=True)
+    # Productividad historica real del Excel, como respaldo cuando la
+    # proyectada (Estimado_modelo / area) llega como NaN.
+    columna_tallos_real = next(
+        (
+            columna for columna in ['Tallos/m2', 'Tallos_m2_patron']
+            if columna in df_export_ultimas_5.columns
+        ),
+        None,
+    )
+    if columna_tallos_real is not None:
+        base_proy_individual['Tallos_m2_historico'] = pd.to_numeric(
+            df_export_ultimas_5[columna_tallos_real], errors='coerce'
+        ).reset_index(drop=True)
     base_actual = st.session_state.get('base_proyeccion_anthropic')
     if base_actual is None or base_actual.empty:
         st.session_state['base_proyeccion_anthropic'] = base_proy_individual
