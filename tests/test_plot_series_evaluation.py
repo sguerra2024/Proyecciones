@@ -1,3 +1,7 @@
+from plot_series_evaluation import (
+    _area_percentages,
+    _cumulative_data_percentage,
+)
 import sys
 from pathlib import Path
 
@@ -6,11 +10,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from plot_series_evaluation import (
-    _area_percentages,
-    _cumulative_data_percentage,
-)
 
 
 def test_areas_de_evaluacion_se_muestran_como_porcentajes_que_suman_100():
@@ -25,10 +24,11 @@ def test_areas_sin_valor_se_muestran_como_cero():
     assert _area_percentages(0.0, 0.0) == (0.0, 0.0)
 
 
-def test_porcentaje_acumulado_incluye_los_limites_de_menos_y_mas_25():
+def test_porcentaje_acumulado_al_15_por_ciento_incluye_solo_el_rango():
     valores = [-0.30, -0.25, 0.10, 0.25, 0.40]
 
-    assert _cumulative_data_percentage(valores) == pytest.approx(60.0)
+    assert _cumulative_data_percentage(
+        valores, limit=0.15) == pytest.approx(20.0)
 
 
 def test_porcentaje_acumulado_sin_datos_es_cero():

@@ -41,7 +41,7 @@ def _area_percentages(area_positive, area_negative):
     return 100.0 * positive / total, 100.0 * negative / total
 
 
-def _cumulative_data_percentage(values, limit=0.25):
+def _cumulative_data_percentage(values, limit=0.15):
     """Porcentaje de observaciones dentro del rango [-limit, limit]."""
     numeric_values = [float(value) for value in values]
     if not numeric_values:
@@ -684,7 +684,7 @@ def generar_grafica(
     area_positive_pct, area_negative_pct = _area_percentages(
         area_positive, area_negative
     )
-    cumulative_25_pct = _cumulative_data_percentage(values)
+    cumulative_15_pct = _cumulative_data_percentage(values)
 
     thresholds = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     counts = {}
@@ -700,7 +700,7 @@ def generar_grafica(
         f'Área positiva / subestimación: {area_positive:.3f}',
         f'Área negativa / sobreestimación: {area_negative:.3f}',
         f'Áreas: positiva {area_positive_pct:.1f}% | negativa {area_negative_pct:.1f}%',
-        f'Datos acumulados entre ±25%: {cumulative_25_pct:.1f}%',
+        f'Datos acumulados entre ±15%: {cumulative_15_pct:.1f}%',
         *[
             f'Datos entre {label}: {count} '
             f'({count / total_graficado * 100 if total_graficado else 0:.1f}%)'

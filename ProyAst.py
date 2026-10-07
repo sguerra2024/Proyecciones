@@ -35,7 +35,7 @@ from projection_core import (
     load_recent_media_adjustments,
 )
 
-agents_dir = Path(__file__).with_name("agents")
+agents_dir = Path(__file__).with_name("Agente_Analista")
 if agents_dir.exists():
     sys.path.insert(0, str(agents_dir))
 
@@ -1620,6 +1620,11 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
         areas_validas = ultimas['__area_m2'].dropna()
         m2_variedad_validos = ultimas['__m2_variedad'].dropna()
         tallos_validos = ultimas['__tallos_m2'].dropna()
+        if tallos_validos.empty:
+            # Respaldo: si las ultimas 12 semanas no tienen tallos/m2,
+            # usa todo el historial de la variedad para no dejar el
+            # calculo de tallos sin productividad.
+            tallos_validos = grupo['__tallos_m2'].dropna()
         area_actual = areas_validas.iloc[-1] if not areas_validas.empty else np.nan
         m2_variedad = (
             float(m2_variedad_validos.iloc[-1])
@@ -1643,7 +1648,10 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
         producto_area_tallos = (
             int(np.rint(float(area_actual) * promedio_tallos))
             if pd.notna(area_actual) and pd.notna(promedio_tallos)
-            else np.nan
+            else (
+                0 if pd.notna(area_actual) and float(area_actual) == 0.0
+                else np.nan
+            )
         )
         filas.append({
             'Variedad_proyectada': variedad,

@@ -1,14 +1,14 @@
 """
 Gestor de agentes especializados para análisis de datos y mercados.
-Integración con Anthropic Claude para consultas avanzadas.
+Integración con OpenRouter (API compatible con OpenAI) para consultas avanzadas.
 """
 import importlib
 import os
 from pathlib import Path
 
-anthropic = None
+openai = None
 try:
-    anthropic = importlib.import_module('anthropic')
+    openai = importlib.import_module('openai')
 except ImportError:
     pass
 
@@ -17,6 +17,14 @@ try:
     pd = importlib.import_module('pandas')
 except ImportError:
     pass
+
+try:
+    from .conocimiento import BaseConocimiento
+except ImportError:  # uso como módulo suelto fuera del paquete
+    try:
+        from conocimiento import BaseConocimiento
+    except ImportError:
+        BaseConocimiento = None
 
 
 def calcular_estadisticas(datos, decimales=2):
@@ -51,34 +59,17 @@ def calcular_estadisticas(datos, decimales=2):
     }
 
 
-class AgenteAnalistasMercados:
+class AgenteAnalista:
     """Agente especializado en análisis de datos, mercados y gestión de cambios."""
 
     SYSTEM_PROMPT = """Eres un analista de datos y mercados experto, especializado en maximizar beneficios empresariales.
 
 Tus capacidades incluyen:
 
-1. ANÁLISIS FINANCIERO Y KPIs:
-   - Análisis de rentabilidad y márgenes de ganancia
-   - Cálculo de KPIs financieros clave
-   - Proyecciones de beneficios y flujo de caja
-
-2. INVESTIGACIÓN DE MERCADOS:
-   - Análisis de precios y elasticidad de demanda
-   - Identificación de tendencias emergentes
-   - Segmentación de mercados y competencia
-
-3. GESTIÓN DE CAMBIOS Y ERRORES:
-   - Cálculo del costo real de cambios solicitados por cliente
-   - Cálculo del impacto de errores en estimados
-   - Presentación de opciones adaptadas con impacto económico
-   - Identificación de patrones recurrentes
-
-4. MEDIDAS PREVENTIVAS:
-   - Propuestas basadas en datos históricos
-   - Estrategias para minimizar errores futuros
-   - Mejora continua de procesos
-
+1. ANALISTA DE CASOS, Te guio en el planteamiento del problema,
+y encontrar varias rutas de solución.
+2. DECISIONES BASADAS EN DATOS, Te ayudo a interpretar las estadísticas y 
+cifras proporcionadas para tomar decisiones informadas.
 INSTRUCCIONES:
 - Prioriza recomendaciones por potencial de impacto económico
 - Traduce análisis técnicos en decisiones claras y accionables
@@ -88,21 +79,37 @@ INSTRUCCIONES:
 - Usa exclusivamente las estadísticas y cifras que se te entregan en el contexto 
   (media, mediana, desviación, etc.); no las recalcules ni inventes valores nuevos"""
 
-    def __init__(self, api_key=None):
-        """Inicializa el agente con credenciales de Anthropic."""
-        if anthropic is None:
+    def __init__(self, api_key=None, ruta_conocimiento=None):
+        """Inicializa el agente con credenciales de OpenRouter.
+
+        Args:
+            api_key: clave de OpenRouter (o variable OPENROUTER_API_KEY)
+            ruta_conocimiento: ruta a la base SQLite de teoría; si no se
+                indica, se usa Agente_Analista/data/teoria.db cuando existe.
+        """
+        if openai is None:
             raise RuntimeError(
-                'La libreria anthropic no esta instalada. '
-                'Instala con: pip install anthropic'
+                'La libreria openai no esta instalada. '
+                'Instala con: pip install openai'
             )
-        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY', '').strip()
+        self.api_key = api_key or os.getenv('OPENROUTER_API_KEY', '').strip()
         if not self.api_key:
             raise RuntimeError(
-                'No se encontro ANTHROPIC_API_KEY. '
+                'No se encontro OPENROUTER_API_KEY. '
                 'Define la variable de entorno o pasa api_key como argumento.'
             )
-        self.modelo = os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-4-6')
-        self.cliente = anthropic.Anthropic(api_key=self.api_key)
+        self.modelo = os.getenv(
+            'OPENROUTER_MODEL', 'anthropic/claude-sonnet-4.5')
+        self.cliente = openai.OpenAI(
+            base_url='https://openrouter.ai/api/v1',
+            api_key=self.api_key,
+        )
+        self.conocimiento = None
+        if BaseConocimiento is not None:
+            ruta_bd = ruta_conocimiento or (
+                Path(__file__).resolve().parent / 'data' / 'teoria.db')
+            if ruta_bd == ':memory:' or Path(ruta_bd).exists():
+                self.conocimiento = BaseConocimiento(ruta_bd)
 
     def consultar(self, pregunta, contexto_adicional=None):
         """
@@ -115,17 +122,25 @@ INSTRUCCIONES:
         Returns:
             str: Respuesta del agente
         """
-        if contexto_adicional:
-            pregunta_completa = f"{contexto_adicional}\n\nPregunta: {pregunta}"
+        contexto_teoria = ''
+        if self.conocimiento is not None:
+            contexto_teoria = self.conocimiento.formatear_contexto(pregunta)
+        partes = [c for c in (contexto_teoria, contexto_adicional) if c]
+        if partes:
+            pregunta_completa = '\n\n'.join(
+                partes) + f"\n\nPregunta: {pregunta}"
         else:
             pregunta_completa = pregunta
 
         try:
-            respuesta = self.cliente.messages.create(
+            respuesta = self.cliente.chat.completions.create(
                 model=self.modelo,
                 max_tokens=1024,
-                system=self.SYSTEM_PROMPT,
                 messages=[
+                    {
+                        'role': 'system',
+                        'content': self.SYSTEM_PROMPT
+                    },
                     {
                         'role': 'user',
                         'content': pregunta_completa
@@ -133,8 +148,9 @@ INSTRUCCIONES:
                 ]
             )
             textos = []
-            for bloque in respuesta.content:
-                texto = getattr(bloque, 'text', None)
+            for opcion in respuesta.choices or []:
+                mensaje = getattr(opcion, 'message', None)
+                texto = getattr(mensaje, 'content', None) if mensaje else None
                 if texto:
                     textos.append(texto)
             return '\n'.join(textos).strip()
@@ -143,9 +159,9 @@ INSTRUCCIONES:
                 f'Error al consultar agente especializado: {exc}'
             )
 
-    def analizar_cambio_cliente(self, descripcion_cambio, impacto_estimado=None):
+    def analizar_sistema(self, descripcion_cambio, impacto_estimado=None):
         """
-        Analiza el costo e impacto de un cambio solicitado por el cliente.
+        Analiza componentes y el impacto en el sistema.
 
         Args:
             descripcion_cambio (str): Descripción del cambio

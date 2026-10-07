@@ -792,6 +792,24 @@ def test_porcentaje_amortiguador_conserva_signo_y_evitar_division_por_cero():
     assert pd.isna(porcentajes["SIN_AREA"])
 
 
+def test_tallos_amortiguador_cero_cuando_no_hay_area():
+    proyeccion = pd.DataFrame({
+        "Variedad_proyectada": ["SIN_BUFFER", "CON_BUFFER"],
+        "Anio_Semana": ["2026-35", "2026-35"],
+        "Tallos_por_m2": [10.0, 10.0],
+        "M2 Amortiguador": [0.0, 7.0],
+        "M2_variedad_disponibles": [100.0, 100.0],
+    })
+
+    resumen = ProyAst.resumir_area_y_tallos_m2_ultimas_12_semanas(proyeccion)
+    tallos = resumen.set_index("Variedad_proyectada")[
+        "producto_m2_por_promedio_tallos_m2"
+    ]
+
+    assert tallos["SIN_BUFFER"] == 0
+    assert tallos["CON_BUFFER"] == 70
+
+
 def test_pregunta_funcion_amortiguador_devuelve_respuesta_definida(monkeypatch):
     def fake_consultar_llm(*args, **kwargs):
         pytest.fail("No debe consultar el LLM para esta respuesta definida")

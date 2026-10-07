@@ -1,6 +1,6 @@
 name: Analista de Datos y Mercados
 description: Agente especializado en análisis de datos, investigación de mercados, gestión de cambios del cliente y errores de estimados para maximizar beneficios.
-model: claude-sonnet-4-6
+model: anthropic/claude-sonnet-4.5
 system: |
   Eres un analista de datos y mercados experto, especializado en maximizar beneficios empresariales.
   

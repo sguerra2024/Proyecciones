@@ -655,7 +655,11 @@ def add_buffer_projection_columns(
     projection_df: pd.DataFrame,
     total_area_m2: float,
 ) -> pd.DataFrame:
-    """Agrega el mismo escenario amortiguado a proyecciones individuales o masivas."""
+    """Agrega el escenario amortiguado a proyecciones individuales o masivas.
+
+    La estimacion corregida solo aplica el amortiguador a las cuatro semanas
+    mas recientes. ``Estimado_modelo`` permanece sin modificar.
+    """
     required = {"Estimado_modelo", "Amortiguador_sobreestimacion"}
     missing = required - set(projection_df.columns)
     if missing:
@@ -665,11 +669,63 @@ def add_buffer_projection_columns(
         )
 
     result = projection_df.copy()
-    result["Estimado_con_amortiguador_IA"] = pd.to_numeric(
-        result["Estimado_modelo"], errors="coerce"
-    )
+    base_estimate = pd.to_numeric(result["Estimado_modelo"], errors="coerce")
+    buffer = pd.to_numeric(
+        result["Amortiguador_sobreestimacion"], errors="coerce"
+    ).fillna(0.0)
+
+    recent_mask = pd.Series(True, index=result.index)
+    if {"Anio", "Semana"}.issubset(result.columns):
+        periods = result[["Anio", "Semana"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        recent_periods = (
+            periods.dropna()
+            .drop_duplicates()
+            .sort_values(["Anio", "Semana"])
+            .tail(4)
+        )
+        recent_keys = set(map(tuple, recent_periods.to_numpy()))
+        recent_mask = pd.Series(
+            [
+                pd.notna(year)
+                and pd.notna(week)
+                and (year, week) in recent_keys
+                for year, week in zip(periods["Anio"], periods["Semana"])
+            ],
+            index=result.index,
+        )
+    elif "Anio_Semana" in result.columns:
+        periods = result["Anio_Semana"].astype(str).str.split(
+            "-", n=1, expand=True
+        )
+        periods.columns = ["Anio", "Semana"]
+        periods = periods.apply(pd.to_numeric, errors="coerce")
+        recent_periods = (
+            periods.dropna()
+            .drop_duplicates()
+            .sort_values(["Anio", "Semana"])
+            .tail(4)
+        )
+        recent_keys = set(map(tuple, recent_periods.to_numpy()))
+        recent_mask = pd.Series(
+            [
+                pd.notna(year)
+                and pd.notna(week)
+                and (year, week) in recent_keys
+                for year, week in zip(periods["Anio"], periods["Semana"])
+            ],
+            index=result.index,
+        )
+
+    applied_buffer = buffer.where(recent_mask, 0.0)
+    result["Estimado_final_corregido"] = base_estimate + applied_buffer
+    # Alias historico para no romper exportaciones o consumidores existentes.
+    result["Estimado_con_amortiguador_IA"] = result[
+        "Estimado_final_corregido"
+    ]
     projected_productivity, buffer_area = calculate_buffer_area_from_projection(
-        result["Amortiguador_sobreestimacion"],
+        applied_buffer,
         result["Estimado_modelo"],
         total_area_m2,
     )
@@ -679,7 +735,7 @@ def add_buffer_projection_columns(
     result["Estado_M2_amortiguador"] = np.select(
         [
             result["M2_amortiguador_adicional"].isna()
-            & ~np.isclose(result["Amortiguador_sobreestimacion"], 0.0),
+            & ~np.isclose(applied_buffer, 0.0),
             result["M2_amortiguador_adicional"] > 0,
             result["M2_amortiguador_adicional"] < 0,
         ],
@@ -905,6 +961,18 @@ def train_projection_model(
         predictions,
         float(m2_values.iloc[0]),
     )
+    projection_with_buffer = add_buffer_projection_columns(
+        pd.DataFrame({
+            "Anio": evaluation_df["Anio"].to_numpy(),
+            "Semana": evaluation_df["Semana"].to_numpy(),
+            "Estimado_modelo": predictions,
+            "Amortiguador_sobreestimacion": buffer,
+        }),
+        float(m2_values.iloc[0]),
+    )
+    corrected_predictions = projection_with_buffer[
+        "Estimado_final_corregido"
+    ].to_numpy(dtype=float)
     metric_df = _exclude_latest_four_weeks(
         evaluation_df.assign(Estimado_modelo=predictions)
     )
@@ -919,8 +987,9 @@ def train_projection_model(
             "produccion_real": real_production.round(2),
             "produccion_patron": evaluation_df["Produccion_patron"].round(2),
             "estimado_modelo": np.round(predictions, 2),
+            "estimado_final_corregido": np.round(corrected_predictions, 2),
             "amortiguador_sobreestimacion": np.round(buffer, 2),
-            "estimado_con_amortiguador_ia": np.round(predictions, 2),
+            "estimado_con_amortiguador_ia": np.round(corrected_predictions, 2),
         }
     )
     chart_df["%dif"] = calculate_model_error_report(

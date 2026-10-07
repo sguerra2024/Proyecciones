@@ -44,13 +44,13 @@
 ### Uso Programático
 
 ```python
-from agent_manager import AgenteAnalistasMercados
+from agent_manager import AgenteAnalista
 
 # Inicializar agente
-agente = AgenteAnalistasMercados()
+agente = AgenteAnalista()
 
 # Análisis de cambio
-respuesta = agente.analizar_cambio_cliente(
+respuesta = agente.analizar_sistema(
     "Aumentar volumen en 20%",
     impacto_estimado={'costo': 5000, 'tiempo_semanas': 2}
 )
@@ -81,14 +81,52 @@ respuesta = agente.optimizar_beneficios(str(datos))
 ### Variables de Entorno Requeridas
 
 ```env
-ANTHROPIC_API_KEY=tu_clave_aqui
-ANTHROPIC_MODEL=claude-sonnet-4-6  # Opcional
+OPENROUTER_API_KEY=tu_clave_aqui
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.5  # Opcional
 ```
+
+## Base de Conocimiento (Teoría de Resolución de Problemas)
+
+El agente puede consultar teoría almacenada en SQLite y la inyecta
+automáticamente como contexto cuando es relevante para la pregunta.
+
+### Importar capítulos
+
+Crea un archivo de texto con un encabezado markdown por capítulo:
+
+```markdown
+# Definición del problema
+Un problema bien definido está medio resuelto...
+
+## Los cinco porqués
+Pregunta "¿por qué?" cinco veces para llegar a la causa raíz...
+```
+
+Luego impórtalo:
+
+```bash
+python Agente_Analista/importar_teoria.py mi_teoria.md
+python Agente_Analista/importar_teoria.py --listar   # ver capítulos cargados
+```
+
+### Uso desde el código
+
+```python
+from agent_manager import AgenteAnalista
+
+# Usa Agente_Analista/data/teoria.db si existe; o indica otra ruta:
+agente = AgenteAnalista(ruta_conocimiento='ruta/a/teoria.db')
+respuesta = agente.consultar('¿Cómo encuentro la causa raíz de esta falla?')
+```
+
+Si no existe la base de datos, el agente funciona normalmente sin teoría.
 
 ## Archivos
 
 - **analista_mercados.yaml** - Definición YAML del agente
-- **agent_manager.py** - Clase Python `AgenteAnalistasMercados` para integración
+- **agent_manager.py** - Clase Python `AgenteAnalista` para integración
+- **conocimiento.py** - Base de conocimiento SQLite (`BaseConocimiento`)
+- **importar_teoria.py** - Script para importar capítulos desde texto
 
 ## Características Clave
 
@@ -120,6 +158,6 @@ Opción 2 (tercerizar) maximiza beneficios con menor exposición al riesgo.
 ## Soporte
 
 Para reportar problemas o sugerencias:
-1. Verifica que `ANTHROPIC_API_KEY` esté configurada
-2. Confirma que la librería `anthropic` esté instalada
+1. Verifica que `OPENROUTER_API_KEY` esté configurada
+2. Confirma que la librería `openai` esté instalada
 3. Revisa los logs en la terminal de Streamlit
