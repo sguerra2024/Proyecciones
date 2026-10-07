@@ -1663,7 +1663,7 @@ def resumir_area_y_tallos_m2_ultimas_12_semanas(df_proyeccion):
             else np.nan
         )
         promedio_tallos = (
-            float(tallos_validos.mean())
+            float(tallos_validos.iloc[-1])
             if not tallos_validos.empty else np.nan
         )
         producto_area_tallos = (
@@ -3199,6 +3199,16 @@ if file_path is not None:
         trabajo['Semana'] = trabajo['Semana'].astype(int)
         trabajo = trabajo.sort_values(
             ['Anio', 'Semana']).reset_index(drop=True)
+        # Valor más reciente de Tallos/m2: se usa como referencia constante
+        # para las semanas proyectadas (2026+), preservando el histórico
+        # para el entrenamiento.
+        ultimo_tallos_m2 = (
+            float(trabajo['Tallos/m2'].iloc[-1])
+            if not trabajo.empty else np.nan
+        )
+        if pd.notna(ultimo_tallos_m2):
+            mascara_proyeccion = trabajo['Anio'] >= 2026
+            trabajo.loc[mascara_proyeccion, 'Tallos/m2'] = ultimo_tallos_m2
         trabajo = trabajo.merge(
             patron_weekly,
             on=['Anio', 'Semana'],
@@ -4369,17 +4379,18 @@ if file_path is not None:
         df_export_ultimas_5,
         ['Variedad_proyectada', 'Anio_Semana'],
     )
-    base_proy_individual = df_export_amortiguado_individual.copy()
+    base_proy_individual = df_export_amortiguado_individual.copy().reset_index(
+        drop=True)
     base_proy_individual['Finca_proyectada'] = str(selected_finca)
     base_proy_individual['Estimado_modelo'] = np.rint(pd.to_numeric(
         df_export_ultimas_5['Estimado_modelo'], errors='coerce'
-    )).astype('Int64')
+    ).reset_index(drop=True)).astype('Int64')
     base_proy_individual['M2_variedad_disponibles'] = pd.to_numeric(
         df_export_ultimas_5['M2_variedad_disponibles'], errors='coerce'
-    ).reset_index(drop=True)
+    ).reset_index(drop=True).to_numpy()
     base_proy_individual['Tallos_por_m2'] = pd.to_numeric(
         df_export_ultimas_5['Tallos_m2_variedad'], errors='coerce'
-    ).reset_index(drop=True)
+    ).reset_index(drop=True).to_numpy()
     # Productividad historica real del Excel, como respaldo cuando la
     # proyectada (Estimado_modelo / area) llega como NaN.
     columna_tallos_real = next(
@@ -4392,7 +4403,7 @@ if file_path is not None:
     if columna_tallos_real is not None:
         base_proy_individual['Tallos_m2_historico'] = pd.to_numeric(
             df_export_ultimas_5[columna_tallos_real], errors='coerce'
-        ).reset_index(drop=True)
+        ).reset_index(drop=True).to_numpy()
     base_actual = st.session_state.get('base_proyeccion_anthropic')
     if base_actual is None or base_actual.empty:
         st.session_state['base_proyeccion_anthropic'] = base_proy_individual
@@ -4446,6 +4457,20 @@ if file_path is not None:
             resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
                 base_proy_individual
             )
+            # Diagnóstico temporal: qué llega al resumen
+            with st.expander('🔍 Diagnóstico tallos', expanded=False):
+                st.caption('Columnas en base_proy_individual: '
+                           + ', '.join(base_proy_individual.columns.tolist()))
+                columnas_diag = [
+                    c for c in ['Anio_Semana', 'M2 Amortiguador',
+                                'Tallos_por_m2', 'Tallos_m2_historico',
+                                'M2_variedad_disponibles']
+                    if c in base_proy_individual.columns
+                ]
+                st.text('Valores base_proy_individual:\n'
+                        + base_proy_individual[columnas_diag].to_string())
+                st.caption('Resumen calculado:')
+                st.text(resumen_ultimo_ciclo.to_string())
             promedio_tallos_m2 = pd.to_numeric(
                 resumen_ultimo_ciclo[
                     'promedio_tallos_m2_ultimas_12_semanas'
