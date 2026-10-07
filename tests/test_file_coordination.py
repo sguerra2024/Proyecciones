@@ -952,7 +952,6 @@ def test_excel_masivo_agrega_tabla_analisis_avanzado():
     proyeccion_original = pd.DataFrame({
         "Bloque&Varid": ["001RED"],
         "Estimado_modelo": [1000],
-        "%dif": [-0.125],
     })
     analisis_avanzado = pd.DataFrame({
         "Variedad_proyectada": ["001RED"],

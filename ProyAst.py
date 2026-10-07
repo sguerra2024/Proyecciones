@@ -1306,11 +1306,16 @@ def crear_excel_proyeccion_masiva(
     df_analisis_avanzado,
 ):
     buffer_excel = io.BytesIO()
+    # %dif se conserva para evaluación interna, pero no se exporta.
+    columnas_analisis = [
+        columna for columna in df_analisis_avanzado.columns
+        if columna != '%dif'
+    ]
     with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
         df_proyeccion_original.to_excel(
             writer, sheet_name='Proyeccion_original', index=False
         )
-        df_analisis_avanzado.to_excel(
+        df_analisis_avanzado[columnas_analisis].to_excel(
             writer, sheet_name='Analisis_avanzado', index=False
         )
     return buffer_excel.getvalue()
@@ -3675,6 +3680,7 @@ if file_path is not None:
 
         columnas_ia_numericas = [
             'Estimado_modelo', '%dif', 'Tallos_m2_variedad',
+            'Tallos_m2_patron',
             'Amortiguador_sobreestimacion',
             'M2_amortiguador_adicional', 'M2_variedad_disponibles',
             'Estimado_con_amortiguador_IA', 'Estimado_final_corregido'
@@ -3799,6 +3805,13 @@ if file_path is not None:
             df_estimado_ordenado['Tallos_m2_variedad'].reset_index(drop=True),
             errors='coerce',
         )
+        # Respaldo: productividad historica real cuando la proyectada es NaN.
+        if 'Tallos_m2_patron' in df_estimado_ordenado.columns:
+            base_proy_masiva['Tallos_m2_historico'] = pd.to_numeric(
+                df_estimado_ordenado['Tallos_m2_patron'].reset_index(
+                    drop=True),
+                errors='coerce',
+            )
         resumen_ultimo_ciclo = resumir_area_y_tallos_m2_ultimas_12_semanas(
             base_proy_masiva
         )
