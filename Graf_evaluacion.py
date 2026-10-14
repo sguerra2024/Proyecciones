@@ -92,9 +92,11 @@ def seleccionar_archivo_y_columna():
         selected_sheet = tk.StringVar()
         selected_chart = tk.StringVar(value='Línea')
         usar_calibracion = tk.BooleanVar(value=True)
+        eliminar_dif = tk.BooleanVar(value=False)
         folder_label = tk.StringVar(value=f'Carpeta: {folder_path}')
         result = {'column': None, 'chart_type': None,
-                  'sheet': None, 'calibrar_amortiguador': False}
+                  'sheet': None, 'calibrar_amortiguador': False,
+                  'eliminar_dif': False}
 
         tk.Label(
             dialog,
@@ -226,11 +228,18 @@ def seleccionar_archivo_y_columna():
         )
         column_selector.grid(row=6, column=0, padx=18, pady=4, sticky='ew')
 
+        checks_frame = tk.Frame(dialog)
+        checks_frame.grid(row=7, column=0, padx=18, pady=(0, 4), sticky='w')
         ttk.Checkbutton(
-            dialog,
+            checks_frame,
             text='Guardar %Dif e identificadores para ajustar las últimas 5 semanas por caso',
             variable=usar_calibracion,
-        ).grid(row=7, column=0, padx=18, pady=(0, 4), sticky='w')
+        ).pack(anchor='w')
+        ttk.Checkbutton(
+            checks_frame,
+            text='Eliminar archivos con %Dif guardados (el ajuste del amortiguador sube como 0)',
+            variable=eliminar_dif,
+        ).pack(anchor='w')
 
         tk.Label(dialog, text='Tipo de gráfica:', anchor='w').grid(
             row=8, column=0, padx=18, pady=4, sticky='ew'
@@ -374,6 +383,7 @@ def seleccionar_archivo_y_columna():
             result['chart_type'] = CHART_TYPES[selected_chart.get()]
             result['sheet'] = selected_sheet.get() or None
             result['calibrar_amortiguador'] = bool(usar_calibracion.get())
+            result['eliminar_dif'] = bool(eliminar_dif.get())
             dialog.destroy()
 
         def cancel():
@@ -396,16 +406,17 @@ def seleccionar_archivo_y_columna():
             result['chart_type'],
             result['sheet'],
             result['calibrar_amortiguador'],
+            result['eliminar_dif'],
         )
     except Exception as exc:
         print(f'No se pudo abrir el selector de archivos: {exc}')
-        return '', None, None, None, False
+        return '', None, None, None, False, False
     finally:
         root.destroy()
 
 
 def seleccionar_archivo():
-    file_path, _, _, _, _ = seleccionar_archivo_y_columna()
+    file_path, _, _, _, _, _ = seleccionar_archivo_y_columna()
     return file_path
 
 
@@ -533,6 +544,56 @@ def guardar_calibracion_amortiguador(
     return {
         'rows': int(reporte['error_relativo'].notna().sum()),
         'evaluated_weeks': int(len(periodos)),
+        'source': str(destino),
+    }
+
+
+def eliminar_calibracion_amortiguador(destination_path=None):
+    """Elimina los CSV con %Dif y deja el ajuste del amortiguador en 0.
+
+    Borra todo archivo de la carpeta de evaluacion cuya cabecera contenga
+    %dif o error_relativo y recrea errores_evaluacion_modelo.csv vacio
+    (solo encabezados). Al no haber datos, los cargadores devuelven
+    available=False y ProyAst fija el amortiguador en 0.
+    """
+    destino = Path(destination_path) if destination_path else (
+        Path(__file__).with_name('Evaluacion') /
+        'errores_evaluacion_modelo.csv'
+    )
+    eliminados = []
+    candidatos = [destino]
+    if destino.parent.exists():
+        candidatos.extend(
+            ruta for ruta in sorted(destino.parent.glob('*.csv'))
+            if ruta != destino
+        )
+    for ruta in candidatos:
+        if not ruta.exists():
+            continue
+        try:
+            lineas = ruta.read_text(
+                encoding='utf-8-sig', errors='ignore').splitlines()
+            encabezado = lineas[0].casefold() if lineas else ''
+        except OSError:
+            continue
+        es_destino = ruta == destino
+        contiene_dif = '%dif' in encabezado or 'error_relativo' in encabezado
+        if (es_destino or contiene_dif) and ruta.exists():
+            try:
+                ruta.unlink()
+                eliminados.append(str(ruta))
+            except OSError:
+                continue
+
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=[
+        'error_relativo', '%dif', 'Finca', 'Bloque', 'Variedad',
+        'Bloque&Varid', 'Anio', 'Semana',
+    ]).to_csv(destino, index=False, encoding='utf-8-sig')
+
+    return {
+        'deleted': len(eliminados),
+        'files': eliminados,
         'source': str(destino),
     }
 
@@ -774,22 +835,46 @@ if __name__ == '__main__':
     tipo_grafica = args.tipo_grafica
     hoja_seleccionada = args.hoja or None
     calibrar_amortiguador = False
+    eliminar_dif_guardado = False
     if args.dialogo or not archivo_seleccionado:
         (
             archivo_seleccionado, columna_dialogo, grafica_dialogo,
-            hoja_dialogo, calibrar_dialogo,
+            hoja_dialogo, calibrar_dialogo, eliminar_dialogo,
         ) = seleccionar_archivo_y_columna()
         columna_seleccionada = columna_dialogo or columna_seleccionada
         tipo_grafica = grafica_dialogo or tipo_grafica
         hoja_seleccionada = hoja_dialogo or hoja_seleccionada
         calibrar_amortiguador = bool(calibrar_dialogo)
+        eliminar_dif_guardado = bool(eliminar_dialogo)
 
     if not archivo_seleccionado:
         archivo_seleccionado = str(DEFAULT_SERIES_PATH)
 
     output_path = Path(args.salida) if args.salida else DEFAULT_OUTPUT_PATH
 
-    if calibrar_amortiguador and columna_seleccionada:
+    if eliminar_dif_guardado:
+        try:
+            info_eliminacion = eliminar_calibracion_amortiguador()
+            mensaje_eliminacion = (
+                'Ajuste del amortiguador reiniciado a 0: '
+                f"{info_eliminacion['deleted']} archivo(s) con %Dif "
+                f"eliminados -> {info_eliminacion['source']}"
+            )
+            print(mensaje_eliminacion)
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                aviso = tk.Tk()
+                aviso.withdraw()
+                messagebox.showinfo(
+                    'Calibracion eliminada', mensaje_eliminacion)
+                aviso.destroy()
+            except Exception:
+                pass
+        except Exception as exc:
+            print(
+                f'No se pudo eliminar la calibracion del amortiguador: {exc}')
+    elif calibrar_amortiguador and columna_seleccionada:
         try:
             info_calibracion = guardar_calibracion_amortiguador(
                 archivo_seleccionado,
