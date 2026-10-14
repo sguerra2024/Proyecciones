@@ -2933,7 +2933,7 @@ if file_path is not None:
         )
         return patron_weekly
 
-    def excluir_ultimas_4_semanas(df_base, columnas_grupo=None):
+    def excluir_ultimas_5_semanas(df_base, columnas_grupo=None):
         if df_base is None or df_base.empty:
             return df_base.copy()
 
@@ -2985,7 +2985,7 @@ if file_path is not None:
             orden_desc['__rank_ultimas_tmp'] = np.arange(len(orden_desc)) + 1
 
         validos_filtrados = orden_desc[
-            orden_desc['__rank_ultimas_tmp'] > 4
+            orden_desc['__rank_ultimas_tmp'] > 5
         ].copy()
 
         resultado = pd.concat(
@@ -3042,7 +3042,7 @@ if file_path is not None:
             'Proy_patron',
             'Tallos_m2_patron'
         ]].copy()
-        tabla = excluir_ultimas_4_semanas(tabla)
+        tabla = excluir_ultimas_5_semanas(tabla)
         tabla['Anio'] = pd.to_numeric(
             tabla['Anio_Semana'].astype(str).str.split('-').str[0],
             errors='coerce'
@@ -3356,7 +3356,7 @@ if file_path is not None:
         entrenamiento_df = entrenamiento_df[
             entrenamiento_df['Anio'] >= 2025
         ].reset_index(drop=True)
-        entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
+        entrenamiento_df = excluir_ultimas_5_semanas(entrenamiento_df)
 
         prod_train = construir_objetivo_entrenamiento_con_patron(
             entrenamiento_df,
@@ -3513,7 +3513,7 @@ if file_path is not None:
             np.nan
         )
 
-        df_metricas = excluir_ultimas_4_semanas(df_export)
+        df_metricas = excluir_ultimas_5_semanas(df_export)
         pares_modelo = df_metricas[[
             'Produccion_real', 'Estimado_modelo']].dropna()
         pares_patron = df_metricas[['Produccion_real', 'Proy_patron']].dropna()
@@ -3937,7 +3937,7 @@ if file_path is not None:
     entrenamiento_df = entrenamiento_df[
         entrenamiento_df['Anio'] >= 2025
     ].reset_index(drop=True)
-    entrenamiento_df = excluir_ultimas_4_semanas(entrenamiento_df)
+    entrenamiento_df = excluir_ultimas_5_semanas(entrenamiento_df)
 
     prod_train = construir_objetivo_entrenamiento_con_patron(
         entrenamiento_df,
@@ -4335,7 +4335,7 @@ if file_path is not None:
                      use_container_width=True, hide_index=True)
     st.session_state['tabla_mse_patron'] = df_mse_patron
 
-    df_metricas_ind = excluir_ultimas_4_semanas(df_export)
+    df_metricas_ind = excluir_ultimas_5_semanas(df_export)
     pares_modelo_ind = df_metricas_ind[[
         'Produccion_real', 'Estimado_modelo']].dropna()
     pares_patron_ind = df_metricas_ind[[

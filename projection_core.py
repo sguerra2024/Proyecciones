@@ -31,11 +31,11 @@ MODEL_PARAMS = {
     "n_jobs": -1,
 }
 BUFFER_COLUMNS = ["Prediccion_base", "m2Variedad", "Tallos/m2", "Semana"]
-DEFAULT_MAX_BUFFER_RATE = 0.10
-MAX_BUFFER_AREA_RATE = 0.15
+DEFAULT_MAX_BUFFER_RATE = 0.25
+MAX_BUFFER_AREA_RATE = 0.25
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
-RECENT_ADJUSTMENT_WEEKS = 4
+RECENT_ADJUSTMENT_WEEKS = 5
 RECENT_ADJUSTMENT_MIN_FACTOR = 0.75
 RECENT_ADJUSTMENT_MAX_FACTOR = 1.30
 REAL_PRODUCTION_TARGET_WEIGHT = 0.70
@@ -342,7 +342,7 @@ def calculate_model_error_report(
 def load_recent_media_adjustments(
     evaluation_path: "str | Path | None" = None,
 ) -> dict[str, Any]:
-    """Calcula factores desde el %Dif medio de las cuatro semanas más recientes."""
+    """Calcula factores desde el %Dif medio de las cinco semanas más recientes."""
     path = Path(evaluation_path) if evaluation_path else (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
@@ -433,7 +433,7 @@ def apply_recent_media_adjustment(
     selected_case: str,
     adjustments: dict[str, Any],
 ) -> tuple[np.ndarray, float, str]:
-    """Aplica el factor a todas las filas de las cuatro semanas finales."""
+    """Aplica el factor a todas las filas de las cinco semanas finales."""
     adjusted = np.asarray(predictions, dtype=float).copy().reshape(-1)
     if not adjustments.get("available") or evaluation_df is None:
         return adjusted, 1.0, "pending"
@@ -657,7 +657,7 @@ def add_buffer_projection_columns(
 ) -> pd.DataFrame:
     """Agrega el escenario amortiguado a proyecciones individuales o masivas.
 
-    La estimacion corregida solo aplica el amortiguador a las cuatro semanas
+    La estimacion corregida solo aplica el amortiguador a las cinco semanas
     mas recientes. ``Estimado_modelo`` permanece sin modificar.
     """
     required = {"Estimado_modelo", "Amortiguador_sobreestimacion"}
@@ -683,7 +683,7 @@ def add_buffer_projection_columns(
             periods.dropna()
             .drop_duplicates()
             .sort_values(["Anio", "Semana"])
-            .tail(4)
+            .tail(5)
         )
         recent_keys = set(map(tuple, recent_periods.to_numpy()))
         recent_mask = pd.Series(
@@ -705,7 +705,7 @@ def add_buffer_projection_columns(
             periods.dropna()
             .drop_duplicates()
             .sort_values(["Anio", "Semana"])
-            .tail(4)
+            .tail(5)
         )
         recent_keys = set(map(tuple, recent_periods.to_numpy()))
         recent_mask = pd.Series(
@@ -749,14 +749,14 @@ def add_buffer_projection_columns(
     return result
 
 
-def _exclude_latest_four_weeks(df: pd.DataFrame) -> pd.DataFrame:
+def _exclude_latest_five_weeks(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()
     working["Anio"] = pd.to_numeric(working["Anio"], errors="coerce")
     working["Semana"] = pd.to_numeric(working["Semana"], errors="coerce")
     working = working.dropna(subset=["Anio", "Semana"])
     working = working.sort_values(
         ["Anio", "Semana"], ascending=[False, False]
-    ).iloc[4:]
+    ).iloc[5:]
     return working.sort_values(["Anio", "Semana"]).reset_index(drop=True)
 
 
@@ -912,7 +912,7 @@ def train_projection_model(
     weekly_pattern = _build_weekly_pattern(pattern_rows)
     evaluation_df = _prepare_production_dataset(subset, weekly_pattern)
     training_df = evaluation_df[evaluation_df["Anio"] >= 2025].copy()
-    training_df = _exclude_latest_four_weeks(training_df)
+    training_df = _exclude_latest_five_weeks(training_df)
     if len(evaluation_df) == 0:
         raise ValueError("No hay datos validos para generar la proyeccion.")
 
@@ -973,7 +973,7 @@ def train_projection_model(
     corrected_predictions = projection_with_buffer[
         "Estimado_final_corregido"
     ].to_numpy(dtype=float)
-    metric_df = _exclude_latest_four_weeks(
+    metric_df = _exclude_latest_five_weeks(
         evaluation_df.assign(Estimado_modelo=predictions)
     )
     rmse = float(np.sqrt(np.mean(

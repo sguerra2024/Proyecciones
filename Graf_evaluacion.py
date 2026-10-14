@@ -228,7 +228,7 @@ def seleccionar_archivo_y_columna():
 
         ttk.Checkbutton(
             dialog,
-            text='Guardar %Dif e identificadores para ajustar las últimas 4 semanas por caso',
+            text='Guardar %Dif e identificadores para ajustar las últimas 5 semanas por caso',
             variable=usar_calibracion,
         ).grid(row=7, column=0, padx=18, pady=(0, 4), sticky='w')
 
@@ -482,7 +482,7 @@ def guardar_calibracion_amortiguador(
     if columna_anio is None or columna_semana is None:
         raise ValueError(
             'El archivo debe incluir Anio y Semana para seleccionar '
-            'las cuatro semanas recientes.'
+            'las cinco semanas recientes.'
         )
     if not (
         (columna_bloque is not None and columna_variedad is not None)
