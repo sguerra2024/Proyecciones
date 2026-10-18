@@ -266,6 +266,30 @@ corrección arbitraria de la proyección oficial.
 
 **Calculo del error y el buffer**
 
+- **Calibracion del peso del patron en el objetivo de entrenamiento**:
+  ProyAst (individual y masivo) y la API comparan pesos de 0% a 80%, en pasos
+  de 10 puntos, incluyendo siempre el peso configurado (30% por defecto).
+  Se usan hasta las cinco semanas recientes con `%dif` guardado por
+  `Graf_evaluacion.py` para ese `Bloque&Varid`. El reporte identifica los
+  periodos; cada candidato se evalua de nuevo contra la produccion real de
+  la base, no se deduce el peso del signo del error anterior.
+  Se necesitan tres semanas evaluadas con produccion no nula y cinco
+  registros de entrenamiento desde 2025 anteriores a la primera semana
+  reservada. Sin evidencia propia suficiente se conserva el peso configurado
+  y se informa el estado; nunca se toma el peso de otra variedad.
+  La seleccion minimiza la media semanal del error absoluto relativo
+  `abs((real - modelo) / real)` antes de correcciones posteriores. Los empates
+  conservan el peso base. La produccion reservada no entra en las variables
+  de validacion ni en la alineacion de niveles del patron; se usa la ultima
+  produccion de entrenamiento cuando hace falta una referencia.
+  Esta es validacion para seleccionar el peso, no una prueba independiente
+  de precision futura. La seleccion del caso patron existente no cambia.
+  El entrenamiento final mantiene su exclusion de las cinco semanas finales.
+  El peso, estado, semanas y errores quedan en `Analisis_avanzado` y en
+  `pattern_target_calibration` de la API; la pantalla individual muestra
+  tambien el resultado. El cache de calibracion incluye los datos y el
+  reporte; el modelo se reentrena cuando cambia su entrada u objetivo.
+  No se modifican los pesos de las variables de entrada ni el amortiguador.
 - El error real del modelo se registra en la columna `%dif` con la formula
 	`(Produccion real - Estimado_modelo) / Produccion real`.
 - Un `%dif` positivo indica subestimacion y uno negativo indica
@@ -464,4 +488,3 @@ flowchart LR
 - +593 985381052
 - +1 (240) 3576750
 - sguerra@agromejoraecuador.com
-

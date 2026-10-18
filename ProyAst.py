@@ -30,6 +30,7 @@ from projection_core import (
     calculate_model_error_report,
     calculate_normalized_stems_mse,
     calculate_pattern_signal_to_noise,
+    calibrate_pattern_target_weight,
     fit_production_model,
     has_sufficient_pattern_history,
     load_recent_media_adjustments,
@@ -2147,6 +2148,20 @@ def construir_objetivo_entrenamiento_con_patron(
     )
 
 
+calibrar_peso_objetivo_patron = st.cache_data(show_spinner=False)(
+    calibrate_pattern_target_weight
+)
+
+
+def construir_clave_modelo_calibrado(variedad, patron, features, target):
+    datos = pd.util.hash_pandas_object(
+        features, index=True
+    ).to_numpy().tobytes()
+    objetivo = np.asarray(target, dtype=float).reshape(-1).tobytes()
+    firma = hashlib.sha256(datos + objetivo).hexdigest()
+    return f'entrenado_{variedad}_{patron}_cal_v5_{firma}'
+
+
 models_dir = Path(__file__).with_name("modelos")
 models_dir.mkdir(exist_ok=True)
 
@@ -3358,9 +3373,18 @@ if file_path is not None:
         ].reset_index(drop=True)
         entrenamiento_df = excluir_ultimas_5_semanas(entrenamiento_df)
 
+        calibracion_peso = calibrar_peso_objetivo_patron(
+            y_actual,
+            patron_weekly,
+            str(var_proy),
+            config_ajuste_reciente,
+            default_weight=PATRON_TRAIN_TARGET_WEIGHT,
+            feature_weight=patron_feature_weight,
+        )
+        peso_objetivo_patron = calibracion_peso['weight']
         prod_train = construir_objetivo_entrenamiento_con_patron(
             entrenamiento_df,
-            PATRON_TRAIN_TARGET_WEIGHT
+            peso_objetivo_patron
         )
         entrenamiento_df['Produccion_ajustada'] = prod_train
 
@@ -3383,10 +3407,11 @@ if file_path is not None:
 
         model_name = ''.join(
             ch if ch.isalnum() else '_' for ch in str(var_proy))
-        train_key = f'entrenado_{model_name}_cal_v4'
+        train_key = construir_clave_modelo_calibrado(
+            model_name, patron_seleccionado, x_train_df, y_train_df
+        )
 
-        model_cache_key = (str(var_proy), str(patron_seleccionado),
-                           int(len(x_train_df)))
+        model_cache_key = train_key
         if cache_modelos is not None and model_cache_key in cache_modelos:
             modelo = cache_modelos[model_cache_key]
         elif train_key not in st.session_state:
@@ -3493,6 +3518,11 @@ if file_path is not None:
             'Origen_factor_2025': [origen_factor] * n_export,
             'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
             'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
+            'Peso_patron_objetivo': [peso_objetivo_patron] * n_export,
+            'Estado_calibracion_patron': [calibracion_peso['status']] * n_export,
+            'Semanas_calibracion_patron': [calibracion_peso['validation_weeks']] * n_export,
+            'MAPE_calibracion_patron': [calibracion_peso['mape']] * n_export,
+            'MAPE_patron_base': [calibracion_peso['baseline_mape']] * n_export,
             'Factor_ajuste_media_baja': [factor_ajuste_media_baja] * n_export,
         })
         df_export = add_buffer_projection_columns(
@@ -3583,6 +3613,8 @@ if file_path is not None:
                     tablas_mse_masivo.append(tabla_mse_item)
                 resumen.append({
                     'Variedad_proyectada': var_item,
+                    'Peso_patron_objetivo': resultado['df_export']['Peso_patron_objetivo'].iloc[0],
+                    'Estado_calibracion_patron': resultado['df_export']['Estado_calibracion_patron'].iloc[0],
                     'MSE_modelo': resultado['mse_modelo'],
                     'MSE_proy_patron': resultado['mse_patron']
                 })
@@ -3939,9 +3971,33 @@ if file_path is not None:
     ].reset_index(drop=True)
     entrenamiento_df = excluir_ultimas_5_semanas(entrenamiento_df)
 
+    calibracion_peso = calibrar_peso_objetivo_patron(
+        y_actual,
+        patron_weekly,
+        str(var_proy),
+        config_ajuste_reciente,
+        default_weight=PATRON_TRAIN_TARGET_WEIGHT,
+        feature_weight=patron_feature_weight,
+    )
+    peso_objetivo_patron = calibracion_peso['weight']
+    st.caption(
+        f'Peso del patron en entrenamiento: {peso_objetivo_patron:.0%}; '
+        f"estado: {calibracion_peso['status']}; "
+        f"semanas de validacion: {calibracion_peso['validation_weeks']}."
+    )
+    if calibracion_peso['status'] != 'calibrado':
+        st.info(
+            'Se conserva el peso configurado del patron: se necesitan al menos '
+            '3 semanas evaluadas propias y 5 registros anteriores desde 2025.'
+        )
+    else:
+        st.caption(
+            f"Error absoluto relativo de validacion: {calibracion_peso['mape']:.2%} "
+            f"(peso base: {calibracion_peso['baseline_mape']:.2%})."
+        )
     prod_train = construir_objetivo_entrenamiento_con_patron(
         entrenamiento_df,
-        PATRON_TRAIN_TARGET_WEIGHT
+        peso_objetivo_patron
     )
     entrenamiento_df['Produccion_ajustada'] = prod_train
 
@@ -4021,7 +4077,9 @@ if file_path is not None:
 
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
-    train_key = f'entrenado_{model_name}_cal_v4'
+    train_key = construir_clave_modelo_calibrado(
+        model_name, patron_seleccionado, x_train_df, y_train_df
+    )
 
     if train_key not in st.session_state:
         modelo = fit_production_model(X_train, y_train.values.ravel())
@@ -4299,6 +4357,11 @@ if file_path is not None:
         'Origen_factor_2025': [origen_factor] * n_export,
         'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
         'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
+        'Peso_patron_objetivo': [peso_objetivo_patron] * n_export,
+        'Estado_calibracion_patron': [calibracion_peso['status']] * n_export,
+        'Semanas_calibracion_patron': [calibracion_peso['validation_weeks']] * n_export,
+        'MAPE_calibracion_patron': [calibracion_peso['mape']] * n_export,
+        'MAPE_patron_base': [calibracion_peso['baseline_mape']] * n_export,
         'Factor_ajuste_media_baja': [factor_ajuste_media_baja] * n_export,
     })
     df_export = add_buffer_projection_columns(

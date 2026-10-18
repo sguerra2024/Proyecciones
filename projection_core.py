@@ -351,6 +351,7 @@ def load_recent_media_adjustments(
         "available": False,
         "global_factor": 1.0,
         "factors_by_case": {},
+        "periods_by_case": {},
         "source": str(path),
     }
     if not path.exists():
@@ -423,6 +424,10 @@ def load_recent_media_adjustments(
             result["factors_by_case"][str(case)] = factor(
                 recent["__dif"].to_numpy()
             )
+            result["periods_by_case"][str(case)] = [
+                (int(year), int(week))
+                for year, week in recent[["__anio", "__semana"]].to_numpy()
+            ]
     result["available"] = True
     return result
 
@@ -791,6 +796,7 @@ def _prepare_production_dataset(
     target_rows: pd.DataFrame,
     weekly_pattern: pd.DataFrame,
     pattern_weight: float = 1.0,
+    alignment_cutoff: tuple[int, int] | None = None,
 ) -> pd.DataFrame:
     working = target_rows[[
         "Anio", "Semana", "Tallos/m2", "Produccion"
@@ -800,14 +806,25 @@ def _prepare_production_dataset(
     working = working.dropna().sort_values(["Anio", "Semana"])
     working[["Anio", "Semana"]] = working[["Anio", "Semana"]].astype(int)
     working = working.merge(weekly_pattern, on=["Anio", "Semana"], how="left")
+    alignment_mask = pd.Series(True, index=working.index)
+    if alignment_cutoff is not None:
+        year, week = alignment_cutoff
+        alignment_mask = (
+            (working["Anio"] < year)
+            | ((working["Anio"] == year) & (working["Semana"] < week))
+        )
     for target_column, pattern_column, increment_column in [
         ("Tallos/m2", "Tallos_m2_patron", "Incremento_tallos_patron"),
         ("Produccion", "Produccion_patron", "Incremento_produccion_patron"),
     ]:
         aligned, factor = align_pattern_to_target_level(
-            working[target_column], working[pattern_column]
+            working.loc[alignment_mask, target_column],
+            working.loc[alignment_mask, pattern_column],
         )
-        working[pattern_column] = aligned
+        working[pattern_column] = (
+            aligned if alignment_cutoff is None
+            else working[pattern_column] * factor
+        )
         working[increment_column] = pd.to_numeric(
             working[increment_column], errors="coerce"
         ) * factor
@@ -833,6 +850,103 @@ def _prepare_production_dataset(
         + weight * working["Produccion_patron"]
     )
     return working.reset_index(drop=True)
+
+
+def calibrate_pattern_target_weight(
+    target_rows: pd.DataFrame,
+    weekly_pattern: pd.DataFrame,
+    selected_case: str,
+    adjustments: dict[str, Any],
+    default_weight: float = PATTERN_PRODUCTION_TARGET_WEIGHT,
+    feature_weight: float = 1.0,
+) -> dict[str, Any]:
+    """Selecciona el peso por error absoluto relativo en semanas posteriores."""
+    if not np.isfinite(default_weight) or not 0 <= default_weight <= 0.80:
+        raise ValueError("El peso del patron debe estar entre 0 y 0.80.")
+    result = {
+        "weight": float(default_weight),
+        "status": "sin_evaluacion_propia",
+        "validation_weeks": 0,
+        "mape": None,
+        "baseline_mape": None,
+    }
+    periods = adjustments.get("periods_by_case", {}).get(
+        _normalize_recent_case(selected_case), []
+    )
+    if not periods:
+        return result
+    columns = ["Anio", "Semana", "Tallos/m2", "Produccion"]
+    rows = target_rows[columns].apply(pd.to_numeric, errors="coerce")
+    rows = rows.replace([np.inf, -np.inf], np.nan).dropna()
+    rows = rows[rows["Anio"] >= 2025].sort_values(
+        ["Anio", "Semana"]
+    ).reset_index(drop=True)
+    keys = list(zip(rows["Anio"], rows["Semana"]))
+    available = sorted(set(keys).intersection(map(tuple, periods)))
+    result["status"] = "datos_insuficientes"
+    if len(available) < 3:
+        return result
+    available = available[-RECENT_ADJUSTMENT_WEEKS:]
+    cutoff = available[0]
+    train_mask = np.array([key < cutoff for key in keys])
+    validation_mask = np.array([key in available for key in keys])
+    valid_actual = ~np.isclose(rows["Produccion"].to_numpy(dtype=float), 0.0)
+    validation_mask &= valid_actual
+    if train_mask.sum() < 5:
+        return result
+    validation_periods = set(
+        key for key, valid in zip(keys, validation_mask) if valid
+    )
+    if len(validation_periods) < 3:
+        return result
+
+    # La produccion real reservada no debe entrar en variables ni alineaciones.
+    safe_rows = rows.copy()
+    safe_rows.loc[~train_mask, "Produccion"] = float(
+        rows.loc[train_mask, "Produccion"].iloc[-1]
+    )
+    prepared = _prepare_production_dataset(
+        safe_rows, weekly_pattern, feature_weight, alignment_cutoff=cutoff
+    )
+    if len(prepared) != len(rows):
+        raise ValueError("El patron debe tener una sola fila por Anio-Semana.")
+    features = prepared[MODEL_COLUMNS].copy()
+    features["Semana_orden"] = np.arange(len(features), dtype=float)
+    real_train = rows.loc[train_mask, "Produccion"].to_numpy(dtype=float)
+    pattern_train = prepared.loc[
+        train_mask, "Produccion_patron"
+    ].to_numpy(dtype=float)
+    actual = rows.loc[validation_mask, "Produccion"].to_numpy(dtype=float)
+    scores: dict[float, float] = {}
+    candidates = [float(default_weight)] + [
+        index / 10 for index in range(9)
+        if not np.isclose(index / 10, default_weight)
+    ]
+    for weight in candidates:
+        target = (1.0 - weight) * real_train + weight * pattern_train
+        model = fit_production_model(features.loc[train_mask], target)
+        predicted = model.predict(features.loc[validation_mask])
+        errors = pd.DataFrame({
+            "Anio": rows.loc[validation_mask, "Anio"].to_numpy(),
+            "Semana": rows.loc[validation_mask, "Semana"].to_numpy(),
+            "error": np.abs((actual - predicted) / actual),
+        })
+        score = float(errors.groupby(["Anio", "Semana"])["error"].mean().mean())
+        if not np.isfinite(score):
+            raise ValueError("La calibracion produjo un error no finito.")
+        scores[weight] = score
+    best = float(default_weight)
+    for weight, score in scores.items():
+        if score < scores[best] and not np.isclose(score, scores[best]):
+            best = weight
+    result.update(
+        weight=best,
+        status="calibrado",
+        validation_weeks=len(validation_periods),
+        mape=scores[best],
+        baseline_mape=scores[float(default_weight)],
+    )
+    return result
 
 
 def _load_difference_factors() -> dict[str, Any]:
@@ -916,10 +1030,15 @@ def train_projection_model(
     if len(evaluation_df) == 0:
         raise ValueError("No hay datos validos para generar la proyeccion.")
 
+    recent_adjustments = load_recent_media_adjustments()
+    calibration = calibrate_pattern_target_weight(
+        subset, weekly_pattern, str(selected_var), recent_adjustments
+    )
+    pattern_target_weight = calibration["weight"]
     target = (
-        REAL_PRODUCTION_TARGET_WEIGHT
+        (1.0 - pattern_target_weight)
         * training_df["Produccion"].to_numpy(dtype=float)
-        + PATTERN_PRODUCTION_TARGET_WEIGHT
+        + pattern_target_weight
         * training_df["Produccion_patron"].to_numpy(dtype=float)
     )
     features = training_df[MODEL_COLUMNS].reset_index(drop=True)
@@ -938,7 +1057,6 @@ def train_projection_model(
     predictions, factor, affected_weeks, factor_origin = _apply_difference_factor(
         predictions, evaluation_df, str(selected_var)
     )
-    recent_adjustments = load_recent_media_adjustments()
     predictions, recent_factor, recent_origin = apply_recent_media_adjustment(
         predictions,
         evaluation_df,
@@ -1003,6 +1121,7 @@ def train_projection_model(
         "rows_used": int(len(training_df)),
         "rmse": rmse,
         "using_reference_pattern": True,
+        "pattern_target_calibration": calibration,
         "production_avg": real_mean,
         "factor_diferencia_2025": factor,
         "factor_origin": factor_origin,
