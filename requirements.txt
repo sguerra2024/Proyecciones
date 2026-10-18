@@ -5,12 +5,11 @@ numpy
 pandas>=2.0
 scikit-learn
 openpyxl
-streamlit
+streamlit>=1.62.0,<2
 python-multipart
-altair<5
+altair>=5,<7
 requests
 anthropic>=0.54.0
 openai>=1.66.0
 python-dotenv
-
 

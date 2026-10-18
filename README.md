@@ -264,6 +264,19 @@ corrección arbitraria de la proyección oficial.
 	(formato `"{Semana}&{Bloque zfill3}&{Variedad}"`) para cotejar cada
 	registro semanal sin ambiguedad junto a su `%dif`.
 
+**Compatibilidad de imagenes en Render**
+
+- Se requiere `streamlit>=1.62.0,<2` y `altair>=5,<7`. Streamlit 1.61.0
+  presenta una incompatibilidad con Starlette 1.8.0 al servir imagenes y
+  videos: `/media/...` devuelve HTTP 500 con
+  `Expected ASGI message 'http.response.start', but got 'http.response.body'`.
+  Esto afecta tanto al logo como a las graficas generadas con `st.pyplot`.
+- Tras actualizar las dependencias, volver a desplegar en Render usando
+  **Clear build cache & deploy**. Comprobar el logo antes del acceso y las
+  graficas despues de iniciar sesion y cargar la base; las peticiones
+  `/media/...` deben devolver HTTP 200. Un `/health` correcto no verifica
+  la entrega de imagenes.
+
 **Calculo del error y el buffer**
 
 - **Calibracion del peso del patron en el objetivo de entrenamiento**:
