@@ -9,9 +9,10 @@ from projection_core import (
     load_recent_media_adjustments,
 )
 from Graf_evaluacion import guardar_calibracion_amortiguador
+import projection_core
 
 
-def test_recent_factor_uses_means_of_four_distinct_weeks(tmp_path):
+def test_recent_factor_uses_means_of_five_distinct_weeks(tmp_path):
     path = tmp_path / 'errores.csv'
     pd.DataFrame({
         'Anio': [2026] * 9,
@@ -21,9 +22,9 @@ def test_recent_factor_uses_means_of_four_distinct_weeks(tmp_path):
 
     adjustments = load_recent_media_adjustments(path)
 
-    # Weeks 11-14 have weekly means [-0.5, 0.2, 0.3, 0.1].
+    # Weeks 10-14 have weekly means [0.9, -0.5, 0.2, 0.3, 0.1].
     assert adjustments['available']
-    assert np.isclose(adjustments['global_factor'], 1.025)
+    assert np.isclose(adjustments['global_factor'], 1.2)
 
 
 def test_recent_factor_is_limited_to_configured_range(tmp_path):
@@ -46,12 +47,14 @@ def test_recent_factor_is_limited_to_configured_range(tmp_path):
     assert low['global_factor'] == RECENT_ADJUSTMENT_MIN_FACTOR == 0.75
 
 
-def test_applies_factor_to_all_rows_in_last_four_distinct_weeks():
+def test_applies_factor_only_to_rows_in_last_five_distinct_weeks():
     evaluation = pd.DataFrame({
-        'Anio': [2026] * 6,
-        'Semana': [1, 2, 2, 3, 4, 5],
+        'Anio': [2026] * 8,
+        'Semana': [1, 2, 3, 4, 5, 6, 7, 7],
     })
-    predictions = np.array([100.0, 200.0, 250.0, 300.0, 400.0, 500.0])
+    predictions = np.array([
+        100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 750.0,
+    ])
     adjustments = {
         'available': True,
         'global_factor': 1.30,
@@ -65,7 +68,7 @@ def test_applies_factor_to_all_rows_in_last_four_distinct_weeks():
     assert factor == 1.30
     assert origin == 'case'
     np.testing.assert_allclose(
-        adjusted, [100.0, 260.0, 325.0, 390.0, 520.0, 650.0]
+        adjusted, [100.0, 200.0, 390.0, 520.0, 650.0, 780.0, 910.0, 975.0]
     )
 
 
@@ -162,6 +165,62 @@ def test_checkbox_calibration_rejects_non_percent_difference_column(tmp_path):
 
     with pytest.raises(ValueError, match='%Dif'):
         guardar_calibracion_amortiguador(source, 'Produccion')
+
+
+@pytest.mark.parametrize('errors,enabled', [
+    ([-0.4, 0.1], True),
+    ([-0.1, 0.4], False),
+    ([-0.2, 0.2], False),
+    ([0.0, 0.0], False),
+    ([np.nan, np.inf], False),
+])
+def test_difference_factor_requires_negative_area_for_own_case(
+    tmp_path, monkeypatch, errors, enabled,
+):
+    import ProyAst
+
+    path = tmp_path / 'evaluacion.csv'
+    pd.DataFrame({
+        'Bloque&Varid': ['006ATOMIC'] * 2 + ['007OTRA'] * 2,
+        'Anio': [2026] * 4,
+        'Semana': [39, 40, 39, 40],
+        '%Dif': errors + [-0.9, -0.9],
+        'error_relativo': [-0.9] * 4,
+    }).to_csv(path, index=False)
+    adjustments = load_recent_media_adjustments(path)
+    monkeypatch.setattr(
+        projection_core, 'load_recent_media_adjustments', lambda: adjustments
+    )
+    monkeypatch.setattr(
+        ProyAst, 'load_recent_media_adjustments', lambda: adjustments
+    )
+    config = {
+        'factores_por_variedad': {'006ATOMIC': 0.8},
+        'factor_global': 0.9,
+    }
+    monkeypatch.setattr(projection_core, '_load_difference_factors', lambda: config)
+    periods = pd.DataFrame({
+        'Anio': [2025, 2026, 2026, 2026, 2027],
+        'Semana': [52, 23, 24, 52, 1],
+    })
+    predictions = np.full(5, 100.0)
+    for case in ['006ATOMIC', '009SIN_DATOS']:
+        expected_enabled = enabled and case == '006ATOMIC'
+        expected = [100, 100, 80, 80, 100] if expected_enabled else [100] * 5
+        results = [
+            projection_core._apply_difference_factor(predictions, periods, case),
+            ProyAst.aplicar_factor_diferencia_2026_semanas_24_52(
+                predictions, periods, case, config
+            ),
+        ]
+        for adjusted, factor, weeks, origin in results:
+            np.testing.assert_allclose(adjusted, expected)
+            assert factor == (0.8 if expected_enabled else 1.0)
+            assert weeks == (2 if expected_enabled else 0)
+            assert origin == (
+                'variedad' if expected_enabled else 'sin_predominio_area_negativa'
+            )
+        np.testing.assert_array_equal(predictions, [100] * 5)
 
 
 def test_checkbox_calibration_rejects_missing_case_identifiers(tmp_path):

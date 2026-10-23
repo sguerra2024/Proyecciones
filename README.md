@@ -279,6 +279,14 @@ corrección arbitraria de la proyección oficial.
 
 **Calculo del error y el buffer**
 
+- El factor por variedad de las semanas 24-52 de 2026 solo se aplica cuando,
+  para ese Bloque&Varid en `Evaluacion/errores_evaluacion_modelo.csv`,
+  la suma de magnitudes de `%dif` negativos supera estrictamente la suma de
+  los positivos. Se usan todos los registros validos de la evaluacion propia,
+  sin compensar con otras variedades. En empate o sin evaluacion propia,
+  el factor aplicado es 1, no se ajusta ninguna semana y el origen se informa
+  como `sin_predominio_area_negativa`. Esta condicion tambien rige en la API
+  y no cambia el ajuste reciente de las ultimas cinco semanas.
 - **Calibracion del peso del patron en el objetivo de entrenamiento**:
   ProyAst (individual y masivo) y la API comparan pesos de 0% a 80%, en pasos
   de 10 puntos, incluyendo siempre el peso configurado (30% por defecto).
@@ -307,6 +315,11 @@ corrección arbitraria de la proyección oficial.
 	`(Produccion real - Estimado_modelo) / Produccion real`.
 - Un `%dif` positivo indica subestimacion y uno negativo indica
 	sobreestimacion; la columna usa proporcion decimal (`0.10` equivale a 10%).
+- ProyAst calcula el factor individual con el `%dif` medio de hasta las cinco
+	semanas evaluadas mas recientes disponibles y lo aplica a las ultimas cinco
+	semanas presentes en la serie que proyecta para ese Bloque&Varid. Si la
+	evaluacion contiene menos de cinco semanas, usa todas las disponibles para
+	calcular el factor; el factor se limita al rango de 0.75 a 1.30.
 - `projection_core.py` usa este error firmado del Excel procesado para entrenar
 	la magnitud y direccion del amortiguador.
 - Al generar la evaluacion con `plot_series_evaluation.py`, el informe se guarda

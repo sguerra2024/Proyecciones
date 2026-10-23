@@ -352,6 +352,7 @@ def load_recent_media_adjustments(
         "global_factor": 1.0,
         "factors_by_case": {},
         "periods_by_case": {},
+        "areas_by_case": {},
         "source": str(path),
     }
     if not path.exists():
@@ -361,10 +362,11 @@ def load_recent_media_adjustments(
     except Exception:
         return result
 
-    error_column = next(
-        (column for column in evaluation.columns
-         if str(column).strip().casefold() in {"%dif", "error_relativo"}),
-        None,
+    normalized_errors = {
+        str(column).strip().casefold(): column for column in evaluation.columns
+    }
+    error_column = normalized_errors.get(
+        "%dif", normalized_errors.get("error_relativo")
     )
     if error_column is None or not {"Anio", "Semana"}.issubset(evaluation.columns):
         return result
@@ -373,6 +375,7 @@ def load_recent_media_adjustments(
     working["__anio"] = pd.to_numeric(working["Anio"], errors="coerce")
     working["__semana"] = pd.to_numeric(working["Semana"], errors="coerce")
     working["__dif"] = pd.to_numeric(working[error_column], errors="coerce")
+    working["__dif"] = working["__dif"].replace([np.inf, -np.inf], np.nan)
     working = working.dropna(subset=["__anio", "__semana", "__dif"])
     if working.empty:
         return result
@@ -421,6 +424,10 @@ def load_recent_media_adjustments(
             .tail(RECENT_ADJUSTMENT_WEEKS)
         )
         if case != "__global__" and not recent.empty:
+            result["areas_by_case"][str(case)] = {
+                "positive": float(group["__dif"].clip(lower=0).sum()),
+                "negative": float(-group["__dif"].clip(upper=0).sum()),
+            }
             result["factors_by_case"][str(case)] = factor(
                 recent["__dif"].to_numpy()
             )
@@ -432,13 +439,26 @@ def load_recent_media_adjustments(
     return result
 
 
+def should_apply_difference_factor(
+    selected_case: str,
+    adjustments: dict[str, Any],
+) -> bool:
+    """Habilita el factor solo si domina el area negativa propia de %Dif."""
+    areas = adjustments.get("areas_by_case", {}).get(
+        _normalize_recent_case(selected_case)
+    )
+    if not adjustments.get("available") or areas is None:
+        return False
+    return bool(areas["negative"] > areas["positive"])
+
+
 def apply_recent_media_adjustment(
     predictions: np.ndarray,
     evaluation_df: pd.DataFrame,
     selected_case: str,
     adjustments: dict[str, Any],
 ) -> tuple[np.ndarray, float, str]:
-    """Aplica el factor a todas las filas de las cinco semanas finales."""
+    """Aplica el factor a las filas de las cinco semanas finales disponibles."""
     adjusted = np.asarray(predictions, dtype=float).copy().reshape(-1)
     if not adjustments.get("available") or evaluation_df is None:
         return adjusted, 1.0, "pending"
@@ -980,6 +1000,15 @@ def _apply_difference_factor(
     evaluation_df: pd.DataFrame,
     selected_var: str,
 ) -> tuple[np.ndarray, float, int, str]:
+    if not should_apply_difference_factor(
+        selected_var, load_recent_media_adjustments()
+    ):
+        return (
+            np.asarray(predictions, dtype=float).copy(),
+            1.0,
+            0,
+            "sin_predominio_area_negativa",
+        )
     config = _load_difference_factors()
     factors = config["factores_por_variedad"]
     if selected_var in factors:

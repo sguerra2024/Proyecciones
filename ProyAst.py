@@ -34,6 +34,7 @@ from projection_core import (
     fit_production_model,
     has_sufficient_pattern_history,
     load_recent_media_adjustments,
+    should_apply_difference_factor,
 )
 
 agents_dir = Path(__file__).with_name("Agente_Analista")
@@ -1428,6 +1429,16 @@ def cargar_factor_diferencia_por_variedad():
 def aplicar_factor_diferencia_2026_semanas_24_52(pred_vals, eval_actual_df, var_proy, config_factor):
     if pred_vals is None:
         return pred_vals, 1.0, 0, 'neutral'
+
+    if not should_apply_difference_factor(
+        var_proy, load_recent_media_adjustments()
+    ):
+        return (
+            np.asarray(pred_vals, dtype=float).copy(),
+            1.0,
+            0,
+            'sin_predominio_area_negativa',
+        )
 
     factores_por_variedad = config_factor.get('factores_por_variedad', {})
     factor_global = config_factor.get('factor_global', 1.0)
@@ -3516,6 +3527,7 @@ if file_path is not None:
             'Factor_diferencia_2025': [factor_variedad] * n_export,
             'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
             'Origen_factor_2025': [origen_factor] * n_export,
+            'Factor_ajuste_reciente_5_semanas': [factor_ajuste_reciente] * n_export,
             'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
             'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
             'Peso_patron_objetivo': [peso_objetivo_patron] * n_export,
@@ -4190,7 +4202,7 @@ if file_path is not None:
         periodos_ajuste.dropna()
         .drop_duplicates()
         .sort_values(['Anio', 'Semana'])
-        .tail(4)
+        .tail(5)
     )
     claves_ultimas_semanas = set(map(
         tuple,
@@ -4355,6 +4367,7 @@ if file_path is not None:
         'Factor_diferencia_2025': [factor_variedad] * n_export,
         'Semanas_factor_2026_24_52': [semanas_factor_aplicadas] * n_export,
         'Origen_factor_2025': [origen_factor] * n_export,
+        'Factor_ajuste_reciente_5_semanas': [factor_ajuste_reciente] * n_export,
         'Factor_ajuste_reciente_4_semanas': [factor_ajuste_reciente] * n_export,
         'Origen_ajuste_reciente': [origen_ajuste_reciente] * n_export,
         'Peso_patron_objetivo': [peso_objetivo_patron] * n_export,
