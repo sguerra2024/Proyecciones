@@ -250,7 +250,8 @@ def test_entrenamiento_api_aplica_peso_global_y_parametros(access_db, monkeypatc
     assert fitted[0][0].max_depth == 3
 
 
-def test_triz_solo_recibe_prompt_publico_y_cierra_recursos(monkeypatch):
+@pytest.mark.parametrize('tema', ['Peso del patrón', 'Lean Production'])
+def test_triz_solo_recibe_prompt_publico_y_cierra_recursos(monkeypatch, tema):
     calls = []
 
     class FakeTRIZ:
@@ -270,12 +271,12 @@ def test_triz_solo_recibe_prompt_publico_y_cierra_recursos(monkeypatch):
     agente = graf.AgenteEvaluacionTRIZ(
         [123.456, -987.654], 'dato-secreto', ('30', '40')
     )
-    assert agente.responder('Peso del patrón') == 'Idea para experimentar'
+    assert agente.responder(tema) == 'Idea para experimentar'
     text = str(calls)
     assert '123.456' not in text
     assert '987.654' not in text
     assert 'dato-secreto' not in text
-    assert calls[0][0] == graf.TEMAS_TRIZ['Peso del patrón']
+    assert calls[0][0] == graf.TEMAS_TRIZ[tema]
     assert calls[-1] == 'closed'
 
 

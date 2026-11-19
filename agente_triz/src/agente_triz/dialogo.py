@@ -131,7 +131,7 @@ def mostrar_dialogo_solucion(agente, parent=None, ruta_banco=None):
         contenedor,
         text=(
             "Describe el efecto, la función afectada, el cambio esperado y "
-            "las restricciones conocidas."
+            "las restricciones conocidas. Puedes pedir recomendaciones Lean Production."
         ),
         wraplength=ancho - 44,
     )

@@ -96,6 +96,17 @@ conflicto y conducir a alternativas comprobables.
 La clase `AgenteAnalista` se conserva como alias de compatibilidad. Para nuevas
 integraciones se recomienda importar `AgenteTRIZ`.
 
+### Recomendaciones Lean Production
+
+Pide recomendaciones Lean al describir el problema, o selecciona **Lean
+Production** en `Graf_evaluacion.py` para ideas generales sobre el ciclo semanal
+de proyección y evaluación. El agente también incorpora Lean cuando la consulta
+trata sobre flujo, desperdicio o variabilidad operativa. Lean complementa las
+vías TRIZ existentes: propone herramientas según el problema, distingue lo
+observado de las hipótesis y sugiere un piloto con un indicador antes y después.
+No estima ahorros sin evidencia ni aplica cambios al modelo. El tema
+predefinido de la gráfica no envía datos de evaluación.
+
 ## Diálogo de exploración de soluciones
 
 El paquete incluye un diálogo modal de escritorio Tkinter para enfocar el

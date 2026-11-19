@@ -80,6 +80,11 @@ def test_consultar_incluye_contexto_y_devuelve_respuesta():
     llamada = agente.cliente.chat.completions.create.call_args.kwargs
     assert llamada["model"] == "modelo-prueba"
     assert "Contexto de prueba" in llamada["messages"][1]["content"]
+    instrucciones = llamada["messages"][0]["content"]
+    assert "Lean Production" in instrucciones
+    assert "sin sustituir" in instrucciones
+    assert "prueba piloto reversible" in instrucciones
+    assert "antes y después" in instrucciones
 
 
 def test_dialogo_consulta_en_segundo_plano_con_contexto_sqlite(monkeypatch, tmp_path):

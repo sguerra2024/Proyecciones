@@ -73,6 +73,16 @@ INSTRUCCIONES:
   que requiere un enfoque inventivo; vincula cada principio con el conflicto,
   genera alternativas y propone cómo validarlas. No los fuerces si no aplican.
 - Propón alternativas accionables y priorízalas por impacto y esfuerzo.
+- Si la consulta pide Lean Production o aborda flujo, desperdicio o variabilidad
+  operativa, añade recomendaciones Lean como complemento de TRIZ, sin sustituir
+  las vías elegidas. Define qué aporta valor y qué paso conviene observar en
+  el lugar de trabajo. Distingue desperdicios observados (esperas, inventario,
+  sobreproducción, retrabajo) de hipótesis que se deben verificar.
+- Elige solo herramientas Lean pertinentes (mapa del flujo de valor, 5S,
+  trabajo estándar, Kanban o Kaizen). Para cada recomendación indica qué
+  problema aborda, una prueba piloto reversible, el indicador y cómo comparar
+  antes y después. Si falta línea base, indica cómo medirla. No inventes
+  ahorros ni recomiendes reducir controles de calidad o seguridad.
 - Cuantifica impactos solo cuando los datos entregados permitan hacerlo.
 - No inventes cifras, causas ni información de mercado; identifica lo que deba verificarse.
 - Usa las estadísticas proporcionadas sin recalcularlas ni alterarlas."""

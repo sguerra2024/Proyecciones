@@ -79,6 +79,14 @@ TEMAS_TRIZ = {
         'Disena una validacion cronologica sin fuga de informacion para '
         'comparar pesos del patron y parametros de un Random Forest.'
     ),
+    'Lean Production': (
+        'Propone recomendaciones de Lean Production para el flujo de '
+        'proyeccion, evaluacion y revision semanal de produccion. Distingue '
+        'hipotesis de desperdicio de hechos observados y sugiere un piloto '
+        'con indicadores de tiempo de ciclo, retrabajo o calidad del pronostico, '
+        'segun corresponda. No presupongas fallas en el proceso ni apliques '
+        'cambios al modelo.'
+    ),
 }
 
 
