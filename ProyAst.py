@@ -18,8 +18,12 @@ import sqlite3
 import time
 import secrets
 import hashlib
-import hmac
 from datetime import datetime, timezone
+from model_configuration import (
+    access_database_path,
+    model_configuration_signature,
+    password_matches,
+)
 
 from projection_core import (
     add_buffer_projection_columns,
@@ -94,13 +98,7 @@ def cargar_readme_como_contexto_ia():
 
 
 def obtener_ruta_control_acceso():
-    ruta_configurada = obtener_valor_env('ACCESS_DB_PATH')
-    if ruta_configurada:
-        ruta = Path(ruta_configurada).expanduser()
-        if not ruta.is_absolute():
-            ruta = Path(__file__).parent / ruta
-    else:
-        ruta = Path(__file__).with_name('data') / 'control_acceso.db'
+    ruta = access_database_path()
     ruta.parent.mkdir(parents=True, exist_ok=True)
     return str(ruta)
 
@@ -313,19 +311,7 @@ def autenticar_usuario(usuario, clave):
     if not fila:
         return False
 
-    partes = str(fila[0]).split('$')
-    if len(partes) != 4 or partes[0] != 'pbkdf2_sha256':
-        return False
-    try:
-        iteraciones = int(partes[1])
-        salt = bytes.fromhex(partes[2])
-        esperado = bytes.fromhex(partes[3])
-    except ValueError:
-        return False
-    calculado = hashlib.pbkdf2_hmac(
-        'sha256', clave_texto.encode('utf-8'), salt, iteraciones
-    )
-    return hmac.compare_digest(calculado, esperado)
+    return password_matches(clave_texto, fila[0])
 
 
 def preparar_usuario_inicial():
@@ -2159,17 +2145,37 @@ def construir_objetivo_entrenamiento_con_patron(
     )
 
 
-calibrar_peso_objetivo_patron = st.cache_data(show_spinner=False)(
-    calibrate_pattern_target_weight
-)
+@st.cache_data(show_spinner=False)
+def _calibrar_peso_objetivo_patron_cache(
+    target_rows, weekly_pattern, selected_case, adjustments,
+    default_weight, feature_weight, configuration_signature,
+):
+    return calibrate_pattern_target_weight(
+        target_rows, weekly_pattern, selected_case, adjustments,
+        default_weight=default_weight, feature_weight=feature_weight,
+    )
 
 
-def construir_clave_modelo_calibrado(variedad, patron, features, target):
+def calibrar_peso_objetivo_patron(
+    target_rows, weekly_pattern, selected_case, adjustments,
+    default_weight=0.30, feature_weight=1.0,
+):
+    return _calibrar_peso_objetivo_patron_cache(
+        target_rows, weekly_pattern, selected_case, adjustments,
+        default_weight, feature_weight, model_configuration_signature(),
+    )
+
+
+def construir_clave_modelo_calibrado(
+    variedad, patron, features, target, configuration_signature='default',
+):
     datos = pd.util.hash_pandas_object(
         features, index=True
     ).to_numpy().tobytes()
     objetivo = np.asarray(target, dtype=float).reshape(-1).tobytes()
-    firma = hashlib.sha256(datos + objetivo).hexdigest()
+    firma = hashlib.sha256(
+        datos + objetivo + configuration_signature.encode('utf-8')
+    ).hexdigest()
     return f'entrenado_{variedad}_{patron}_cal_v5_{firma}'
 
 
@@ -3419,7 +3425,8 @@ if file_path is not None:
         model_name = ''.join(
             ch if ch.isalnum() else '_' for ch in str(var_proy))
         train_key = construir_clave_modelo_calibrado(
-            model_name, patron_seleccionado, x_train_df, y_train_df
+            model_name, patron_seleccionado, x_train_df, y_train_df,
+            configuration_signature=model_configuration_signature(),
         )
 
         model_cache_key = train_key
@@ -3997,7 +4004,12 @@ if file_path is not None:
         f"estado: {calibracion_peso['status']}; "
         f"semanas de validacion: {calibracion_peso['validation_weeks']}."
     )
-    if calibracion_peso['status'] != 'calibrado':
+    if calibracion_peso['status'] == 'global_aprobado':
+        st.info(
+            'Se usa el peso global aprobado por el administrador. '
+            'No representa una mejora validada del error.'
+        )
+    elif calibracion_peso['status'] != 'calibrado':
         st.info(
             'Se conserva el peso configurado del patron: se necesitan al menos '
             '3 semanas evaluadas propias y 5 registros anteriores desde 2025.'
@@ -4090,7 +4102,8 @@ if file_path is not None:
     model_name = ''.join(ch if ch.isalnum() else '_' for ch in str(var_proy))
     model_file = models_dir / f'rf_{model_name}.pkl'
     train_key = construir_clave_modelo_calibrado(
-        model_name, patron_seleccionado, x_train_df, y_train_df
+        model_name, patron_seleccionado, x_train_df, y_train_df,
+        configuration_signature=model_configuration_signature(),
     )
 
     if train_key not in st.session_state:

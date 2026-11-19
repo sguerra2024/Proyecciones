@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "descripcion": "Plantilla para consultas y referencias que inspiran la generación de soluciones.",
+  "entradas": [
+    {
+      "id": "inspiracion-001",
+      "tipo": "video",
+      "titulo": "Reemplazar por un título descriptivo",
+      "url": "https://ejemplo.org/recurso",
+      "idioma": "es",
+      "pregunta_inspiradora": "¿Qué función, mecanismo o principio podría inspirar una alternativa para el problema definido?",
+      "notas_originales": "Escribir una síntesis propia de la idea relevante; no copiar la transcripción ni el contenido del recurso.",
+      "etiquetas": [
+        "ejemplo",
+        "mecanismo"
+      ],
+      "herramientas_triz": [
+        "problema_generico",
+        "transferir_accion",
+        "contradicciones",
+        "principios_inventivos"
+      ],
+      "principios_inventivos": [
+        "01_segmentacion",
+        "13_inversion"
+      ],
+      "fuente": {
+        "autor": "Nombre del autor o creador, si está disponible",
+        "organizacion": "Organización o canal, si aplica",
+        "licencia": "Licencia del recurso o 'Todos los derechos reservados' si se conoce",
+        "url_licencia": "",
+        "atribucion_requerida": "Atribución solicitada o requerida por la licencia"
+      },
+      "metadatos_video": {
+        "duracion": "",
+        "fecha_publicacion": ""
+      }
+    }
+  ]
+}

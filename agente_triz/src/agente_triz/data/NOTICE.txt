@@ -1,0 +1,22 @@
+Material de conocimiento TRIZ incluido con agente_triz
+
+La obra "Fundamentos TRIZ: enfoque sistemático para resolver problemas
+inventivos" es una adaptación resumida y reescrita basada en el artículo
+"TRIZ" de Wikipedia en español:
+https://es.wikipedia.org/wiki/TRIZ
+
+Autoría de la fuente: contribuyentes de Wikipedia. Historial de edición:
+https://es.wikipedia.org/w/index.php?title=TRIZ&action=history
+
+Licencia de la fuente y de esta adaptación: Creative Commons
+Atribución-CompartirIgual 4.0 Internacional (CC BY-SA 4.0):
+https://creativecommons.org/licenses/by-sa/4.0/deed.es
+
+Cambios: síntesis original en español, reorganización pedagógica y ejemplos
+de aplicación escritos para agente_triz; no se copiaron los PDF del curso
+TRIZ proporcionados por el usuario.
+
+Al redistribuir o adaptar esta obra, conserva esta atribución, enlaza la
+licencia e indica los cambios. Distribuye las adaptaciones de este material
+bajo CC BY-SA 4.0 o una licencia compatible. Esta licencia se aplica al
+material de conocimiento aquí identificado, no al código fuente del paquete.

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agente-triz"
+version = "0.1.0"
+description = "Agente de resolución de problemas con contexto TRIZ y OpenRouter."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.66.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "reportlab>=4.0",
+]
+
+[project.scripts]
+agente-triz = "agente_triz.__main__:main"
+
+[tool.setuptools]
+package-dir = { agente_triz = "src/agente_triz" }
+packages = ["agente_triz"]
+
+[tool.setuptools.package-data]
+agente_triz = ["data/*.md", "data/*.txt", "data/*.json"]

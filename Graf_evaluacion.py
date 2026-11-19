@@ -1,12 +1,23 @@
 import matplotlib.pyplot as plt
 import argparse
+import math
+import queue
 import re
+import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
+
+from evaluation_history import save_recent_evaluation_history
+from model_configuration import (
+    ModelConfiguration,
+    load_model_configuration,
+    save_model_configuration,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SERIES_CANDIDATES = [
@@ -48,6 +59,307 @@ def _cumulative_data_percentage(values, limit=0.15):
         return 0.0
     included = sum(1 for value in numeric_values if abs(value) <= limit)
     return 100.0 * included / len(numeric_values)
+
+
+TEMAS_TRIZ = {
+    'Ideas para reducir el error': (
+        'Propone ideas TRIZ para reducir errores de un modelo Random Forest '
+        'de proyeccion de produccion con un patron historico.'
+    ),
+    'Peso del patrón': (
+        'Propone experimentos para elegir un peso global del patron historico '
+        'entre 0 y 80% en el objetivo de entrenamiento de un Random Forest.'
+    ),
+    'Parámetros del modelo': (
+        'Explica como experimentar con numero de arboles, profundidad maxima, '
+        'minimo de muestras por hoja y minimo de muestras para dividir nodos '
+        'de un Random Forest de regresion para reducir el error.'
+    ),
+    'Validación de ideas': (
+        'Disena una validacion cronologica sin fuga de informacion para '
+        'comparar pesos del patron y parametros de un Random Forest.'
+    ),
+}
+
+
+def _habilitar_paquete_triz():
+    source = SCRIPT_DIR / 'agente_triz' / 'src'
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
+
+
+def consultar_triz_general(tema):
+    if tema not in TEMAS_TRIZ:
+        raise ValueError('Selecciona uno de los temas generales TRIZ.')
+    _habilitar_paquete_triz()
+    from dotenv import load_dotenv
+    from agente_triz import AgenteTRIZ
+
+    load_dotenv(SCRIPT_DIR / '.env', override=False)
+    agente = AgenteTRIZ(ruta_conocimiento=':memory:')
+    try:
+        respuesta = agente.consultar(
+            TEMAS_TRIZ[tema],
+            contexto_adicional=(
+                'Consulta general sin datos de evaluacion. No conoces el error '
+                'observado ni los parametros activos. No inventes diagnosticos '
+                'ni valores optimos. Formula hipotesis y experimentos usando '
+                'TRIZ, distinguiendo hechos de supuestos. La meta de diseno '
+                'es al menos 60% de observaciones semanales con '
+                '%Dif=(real-modelo)/real entre -15% y +15%. Los cambios '
+                'requieren aprobacion humana. No garantices mejoras.'
+            ),
+        )
+        if not respuesta or not respuesta.strip():
+            raise RuntimeError('El agente TRIZ no devolvió una respuesta.')
+        return respuesta
+    finally:
+        agente.cerrar()
+
+
+class AgenteEvaluacionTRIZ:
+    """Diagnostico local y consultas TRIZ generales sin transmitir evaluaciones."""
+
+    def __init__(self, values, column=None, rango_semanas=None):
+        self.values = tuple(float(value) for value in values)
+        if not self.values or not all(math.isfinite(v) for v in self.values):
+            raise ValueError('El análisis requiere valores numéricos finitos.')
+        self.column = column
+        self.rango_semanas = rango_semanas
+        self.es_error = ''.join(str(column).split()).casefold() in {
+            '%dif', 'error_relativo'
+        }
+
+    def analizar(self):
+        if not self.es_error:
+            return (
+                f'Se graficaron {len(self.values)} observaciones. '
+                'Para interpretar subestimación, sobreestimación y la meta '
+                'del 60%, selecciona explícitamente %Dif o error_relativo '
+                '(proporción decimal: 0.15 = 15%). No se infiere que otra '
+                'columna o una serie sin etiqueta represente errores.'
+            )
+        included = sum(abs(v) <= 0.15 for v in self.values)
+        percentage = _cumulative_data_percentage(self.values)
+        positive = sum(max(v, 0.0) for v in self.values)
+        negative = sum(min(v, 0.0) for v in self.values)
+        positive_pct, negative_pct = _area_percentages(positive, negative)
+        required = (3 * len(self.values) + 4) // 5
+        if abs(negative) > positive:
+            bias = 'Predomina el área negativa: sobreestimación del modelo.'
+        elif positive > abs(negative):
+            bias = 'Predomina el área positiva: subestimación del modelo.'
+        else:
+            bias = 'Las áreas están equilibradas; esto no garantiza precisión.'
+        return '\n'.join([
+            f'Evaluación de {len(self.values)} observaciones de {self.column}.',
+            f'Dentro de ±15% (incluye los extremos): {included}/'
+            f'{len(self.values)} = {percentage:.1f}%.',
+            'Meta: al menos 60%. '
+            + ('CUMPLIDA.' if included >= required else 'NO CUMPLIDA.'),
+            f'Faltan {max(required - included, 0)} observaciones dentro del '
+            'intervalo para alcanzar la meta con este mismo total.',
+            f'Área positiva: {positive:.3f} ({positive_pct:.1f}%); '
+            f'área negativa: {negative:.3f} ({negative_pct:.1f}%).',
+            bias,
+            'Las áreas son sumas discretas de errores, no el porcentaje de '
+            'datos dentro de ±15%. No se compensan errores de signos opuestos.',
+            'Este es un diagnóstico histórico, no una validación de cambios '
+            'ni una garantía de precisión futura. Este diagnóstico no '
+            'modifica la configuración.',
+        ])
+
+    def responder(self, pregunta):
+        return consultar_triz_general(pregunta)
+
+
+def mostrar_ajustes_modelo(parent):
+    import tkinter as tk
+    from tkinter import messagebox
+
+    try:
+        config = load_model_configuration() or ModelConfiguration()
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        messagebox.showerror('Configuración del modelo', str(exc), parent=parent)
+        return
+    window = tk.Toplevel(parent)
+    window.title('Ajustes globales del modelo — aprobación Admin')
+    window.transient(parent)
+    tk.Label(
+        window, wraplength=560, justify='left',
+        text=(
+            'Aplicación local a las próximas proyecciones individuales, masivas '
+            'y API que compartan esta base de acceso. El peso global reemplaza '
+            'la selección automática por caso. No modifica la gráfica actual '
+            'ni el amortiguador. No hay mejora validada: vuelve a proyectar '
+            'y evaluar después del cambio.'
+        ),
+    ).grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+    fields = (
+        ('pattern_weight', 'Peso del patrón (%) [0–80]', config.pattern_weight * 100),
+        ('n_estimators', 'Número de árboles [10–1000]', config.n_estimators),
+        ('max_depth', 'Profundidad máxima [1–64]', config.max_depth),
+        ('min_samples_leaf', 'Mínimo de muestras por hoja [1–100]', config.min_samples_leaf),
+        ('min_samples_split', 'Mínimo de muestras para dividir [2–200]', config.min_samples_split),
+    )
+    entries = {}
+    for row, (key, label, value) in enumerate(fields, start=1):
+        tk.Label(window, text=label).grid(row=row, column=0, sticky='w', padx=10)
+        entry = tk.Entry(window)
+        entry.insert(0, str(value))
+        entry.grid(row=row, column=1, padx=10, pady=3)
+        entries[key] = entry
+    tk.Label(window, text='Usuario administrador').grid(row=6, column=0, padx=10)
+    username = tk.Entry(window)
+    username.insert(0, 'Admin')
+    username.grid(row=6, column=1, padx=10, pady=3)
+    tk.Label(window, text='Contraseña de ProyAst').grid(row=7, column=0, padx=10)
+    password = tk.Entry(window, show='*')
+    password.grid(row=7, column=1, padx=10, pady=3)
+
+    def aplicar():
+        try:
+            proposed = ModelConfiguration(
+                pattern_weight=float(entries['pattern_weight'].get()) / 100,
+                n_estimators=int(entries['n_estimators'].get()),
+                max_depth=int(entries['max_depth'].get()),
+                min_samples_leaf=int(entries['min_samples_leaf'].get()),
+                min_samples_split=int(entries['min_samples_split'].get()),
+            )
+            proposed.validate()
+            summary = '\n'.join(
+                f'{label}: {entries[key].get()}' for key, label, _ in fields
+            )
+            if not messagebox.askyesno(
+                'Aprobar configuración global',
+                summary + '\n\nSin mejora validada. ¿Aplicar a próximas proyecciones?',
+                parent=window,
+            ):
+                return
+            save_model_configuration(proposed, username.get(), password.get())
+        except (ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            messagebox.showerror('No se aplicaron los cambios', str(exc), parent=window)
+            return
+        finally:
+            password.delete(0, 'end')
+        messagebox.showinfo(
+            'Configuración aprobada',
+            'Cambios guardados. Vuelve a proyectar en ProyAst y evalúa el nuevo %Dif.',
+            parent=window,
+        )
+        window.destroy()
+
+    tk.Button(window, text='Aprobar y aplicar', command=aplicar).grid(
+        row=8, column=0, padx=10, pady=10
+    )
+    tk.Button(window, text='Cancelar', command=window.destroy).grid(row=8, column=1)
+
+
+def crear_panel_dialogo_ia(parent, agente):
+    """Muestra el diagnostico local y consulta TRIZ sin bloquear Tkinter."""
+    import tkinter as tk
+    from tkinter import scrolledtext, ttk
+
+    _habilitar_paquete_triz()
+    from agente_triz.exportacion import crear_menu_exportacion
+
+    panel = tk.LabelFrame(parent, text='Diálogo con Agente TRIZ')
+    aviso = tk.Label(
+        panel,
+        text=(
+            'TRIZ envía solo temas generales a OpenRouter, no los datos de '
+            'la evaluación. Las ideas no se aplican automáticamente.'
+        ),
+        anchor='w',
+        justify='left',
+        wraplength=580,
+    )
+    aviso.pack(fill='x', padx=6, pady=(2, 0))
+    aviso.bind('<Configure>', lambda event: aviso.configure(
+        wraplength=max(1, event.width - 4)
+    ))
+    historial = scrolledtext.ScrolledText(
+        panel, height=4, width=1, wrap='word', state='disabled'
+    )
+
+    def escribir(autor, texto):
+        historial.configure(state='normal')
+        historial.insert('end', f'{autor}:\n{texto}\n\n')
+        historial.configure(state='disabled')
+        historial.see('end')
+
+    diagnostico = agente.analizar()
+    escribir('Diagnóstico local (no enviado a TRIZ)', diagnostico)
+    entrada = tk.Frame(panel)
+    entrada.pack(side='bottom', fill='x', padx=6, pady=(0, 4))
+    tk.Label(entrada, text='Tema TRIZ:').pack(side='left')
+    pregunta = ttk.Combobox(
+        entrada, values=list(TEMAS_TRIZ), state='readonly', width=24
+    )
+    pregunta.set(next(iter(TEMAS_TRIZ)))
+    pregunta.pack(side='left', fill='x', expand=True, padx=5)
+
+    resultados = queue.Queue()
+    ocupado = False
+    pendiente = None
+    analisis = diagnostico
+
+    def cerrar_panel(event):
+        if event.widget is panel and pendiente is not None:
+            panel.after_cancel(pendiente)
+
+    panel.bind('<Destroy>', cerrar_panel)
+
+    def consultar(tema):
+        try:
+            resultados.put(('Agente TRIZ', agente.responder(tema)))
+        except Exception as exc:
+            resultados.put(('Error de TRIZ (sin cambios al modelo)', str(exc)))
+
+    def recibir():
+        nonlocal ocupado, pendiente, analisis
+        pendiente = None
+        try:
+            autor, texto = resultados.get_nowait()
+        except queue.Empty:
+            pendiente = panel.after(100, recibir)
+            return
+        escribir(autor, texto)
+        if autor == 'Agente TRIZ' and texto.strip():
+            analisis = texto
+        ocupado = False
+        enviar_button.configure(state='normal')
+
+    def enviar():
+        nonlocal ocupado, pendiente
+        if ocupado:
+            return
+        ocupado = True
+        enviar_button.configure(state='disabled')
+        tema = pregunta.get()
+        escribir('Consulta general a TRIZ', tema)
+        escribir('Estado', 'Consultando OpenRouter...')
+        threading.Thread(target=consultar, args=(tema,), daemon=True).start()
+        pendiente = panel.after(100, recibir)
+
+    enviar_button = tk.Button(entrada, text='Consultar TRIZ', command=enviar)
+    enviar_button.pack(side='left')
+    pregunta.bind('<Return>', lambda _event: enviar())
+    sugerencias = tk.Frame(panel)
+    sugerencias.pack(side='bottom', fill='x', padx=6, pady=(0, 3))
+    tk.Button(
+        sugerencias, text='Resumen local',
+        command=lambda: escribir('Diagnóstico local', agente.analizar()),
+    ).pack(side='left', padx=(0, 5))
+    tk.Button(
+        sugerencias, text='Ajustar peso y parámetros',
+        command=lambda: mostrar_ajustes_modelo(parent),
+    ).pack(side='left', padx=(0, 5))
+    exportar_button = crear_menu_exportacion(sugerencias, lambda: analisis)
+    exportar_button.configure(state='normal')
+    exportar_button.pack(side='left', padx=(0, 5))
+    historial.pack(fill='both', expand=True, padx=6, pady=3)
+    return panel
 
 
 def seleccionar_archivo_y_columna():
@@ -232,12 +544,12 @@ def seleccionar_archivo_y_columna():
         checks_frame.grid(row=7, column=0, padx=18, pady=(0, 4), sticky='w')
         ttk.Checkbutton(
             checks_frame,
-            text='Guardar %Dif e identificadores para ajustar las últimas 5 semanas por caso',
+            text='Guardar %Dif conservando hasta 5 semanas por caso',
             variable=usar_calibracion,
         ).pack(anchor='w')
         ttk.Checkbutton(
             checks_frame,
-            text='Eliminar archivos con %Dif guardados (el ajuste del amortiguador sube como 0)',
+            text='Borrar CSV con %Dif guardados (tiene prioridad sobre guardar)',
             variable=eliminar_dif,
         ).pack(anchor='w')
 
@@ -534,15 +846,14 @@ def guardar_calibracion_amortiguador(
         Path(__file__).with_name('Evaluacion') /
         'errores_evaluacion_modelo.csv'
     )
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    reporte.to_csv(destino, index=False, encoding='utf-8-sig')
+    historial = save_recent_evaluation_history(reporte, destino)
 
     periodos = pd.DataFrame()
-    if {'Anio', 'Semana'}.issubset(reporte.columns):
-        periodos = reporte[['Anio', 'Semana']].dropna().drop_duplicates()
+    if {'Anio', 'Semana'}.issubset(historial.columns):
+        periodos = historial[['Anio', 'Semana']].dropna().drop_duplicates()
 
     return {
-        'rows': int(reporte['error_relativo'].notna().sum()),
+        'rows': int(historial['error_relativo'].notna().sum()),
         'evaluated_weeks': int(len(periodos)),
         'source': str(destino),
     }
@@ -570,20 +881,13 @@ def eliminar_calibracion_amortiguador(destination_path=None):
     for ruta in candidatos:
         if not ruta.exists():
             continue
-        try:
-            lineas = ruta.read_text(
-                encoding='utf-8-sig', errors='ignore').splitlines()
-            encabezado = lineas[0].casefold() if lineas else ''
-        except OSError:
-            continue
+        lineas = ruta.read_text(encoding='utf-8-sig').splitlines()
+        encabezado = lineas[0].casefold() if lineas else ''
         es_destino = ruta == destino
         contiene_dif = '%dif' in encabezado or 'error_relativo' in encabezado
         if (es_destino or contiene_dif) and ruta.exists():
-            try:
-                ruta.unlink()
-                eliminados.append(str(ruta))
-            except OSError:
-                continue
+            ruta.unlink()
+            eliminados.append(str(ruta))
 
     destino.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=[
@@ -632,7 +936,9 @@ def obtener_rango_semanas(file_path, sheet_name=None):
     return mostrar_numero(minimo), mostrar_numero(maximo)
 
 
-def mostrar_grafica_en_dialogo(fig, title='Gráfica de evaluación'):
+def mostrar_grafica_en_dialogo(
+    fig, title='Gráfica de evaluación', agente=None
+):
     """Muestra la figura en una ventana Tkinter después de guardarla."""
     try:
         import tkinter as tk
@@ -645,11 +951,24 @@ def mostrar_grafica_en_dialogo(fig, title='Gráfica de evaluación'):
     try:
         window = tk.Tk()
         window.title(title)
-        window.geometry('1100x650')
-        window.minsize(800, 500)
-        canvas = FigureCanvasTkAgg(fig, master=window)
+        ancho = min(960, window.winfo_screenwidth() - 40)
+        alto = min(650, window.winfo_screenheight() - 100)
+        window.geometry(f'{ancho}x{alto}')
+        window.minsize(min(600, ancho), min(420, alto))
+        botones = tk.Frame(window)
+        botones.pack(side='bottom', fill='x', pady=(2, 4))
+        contenido = tk.PanedWindow(window, orient='vertical', sashwidth=8)
+        contenido.pack(fill='both', expand=True)
+        grafica = tk.Frame(contenido)
+        canvas = FigureCanvasTkAgg(fig, master=grafica)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=8)
+        canvas.get_tk_widget().configure(width=ancho, height=alto // 2)
+        canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+        contenido.add(grafica, minsize=90, stretch='always')
+        if agente is not None:
+            panel = crear_panel_dialogo_ia(contenido, agente)
+            panel.update_idletasks()
+            contenido.add(panel, minsize=panel.winfo_reqheight(), stretch='never')
 
         def guardar_grafica():
             destino = filedialog.asksaveasfilename(
@@ -670,8 +989,6 @@ def mostrar_grafica_en_dialogo(fig, title='Gráfica de evaluación'):
                     parent=window,
                 )
 
-        botones = tk.Frame(window)
-        botones.pack(pady=(0, 10))
         tk.Button(
             botones, text='Guardar gráfica', command=guardar_grafica, width=16
         ).pack(side='left', padx=5)
@@ -701,6 +1018,7 @@ def generar_grafica(
     values = sorted(values, reverse=True)
     x_values = list(range(1, len(values) + 1))
     rango_semanas = obtener_rango_semanas(file_path, sheet_name=sheet_name)
+    agente = AgenteEvaluacionTRIZ(values, column, rango_semanas)
 
     fig, ax = plt.subplots(figsize=(12, 5))
     if chart_type == 'bar':
@@ -807,9 +1125,9 @@ def generar_grafica(
         mostrar_grafica_en_dialogo(
             fig,
             title=f'Gráfica ordenada de mayor a menor - {Path(file_path).name}',
+            agente=agente,
         )
-    else:
-        plt.close(fig)
+    plt.close(fig)
     return output_path
 
 
@@ -872,8 +1190,12 @@ if __name__ == '__main__':
             except Exception:
                 pass
         except Exception as exc:
-            print(
-                f'No se pudo eliminar la calibracion del amortiguador: {exc}')
+            mensaje_error = f'No se pudo eliminar la calibracion: {exc}'
+            print(mensaje_error, file=sys.stderr)
+            if args.dialogo:
+                from tkinter import messagebox
+                messagebox.showerror('Error al borrar evaluaciones', mensaje_error)
+            raise
     elif calibrar_amortiguador and columna_seleccionada:
         try:
             info_calibracion = guardar_calibracion_amortiguador(
@@ -899,8 +1221,12 @@ if __name__ == '__main__':
             except Exception:
                 pass
         except Exception as exc:
-            print(
-                f'No se pudo actualizar la calibracion del amortiguador: {exc}')
+            mensaje_error = f'No se pudo actualizar la calibracion: {exc}'
+            print(mensaje_error, file=sys.stderr)
+            if args.dialogo:
+                from tkinter import messagebox
+                messagebox.showerror('Error al guardar evaluaciones', mensaje_error)
+            raise
 
     generar_grafica(
         file_path=archivo_seleccionado,

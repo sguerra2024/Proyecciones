@@ -287,8 +287,51 @@ corrección arbitraria de la proyección oficial.
   el factor aplicado es 1, no se ajusta ninguna semana y el origen se informa
   como `sin_predominio_area_negativa`. Esta condicion tambien rige en la API
   y no cambia el ajuste reciente de las ultimas cinco semanas.
+- **Agente TRIZ en `Graf_evaluacion.py`**: debajo de la grafica se mantiene
+  un diagnostico calculado localmente sobre las mismas observaciones.
+  Selecciona `%Dif` o `error_relativo` en proporcion decimal (`0.15` = 15%).
+  Se muestran areas positivas/negativas y la meta de al menos 60% de
+  observaciones dentro de `[-0.15, +0.15]`, incluyendo extremos. Las areas
+  no son el porcentaje en rango y los errores opuestos no se compensan.
+  La serie ordenada no se interpreta como una evolucion temporal.
+  El boton **Consultar TRIZ** consulta en segundo plano al agente real de
+  OpenRouter, usando `OPENROUTER_API_KEY` y el modelo opcional
+  `OPENROUTER_MODEL` del entorno o del `.env` del proyecto.
+  Solo se transmiten preguntas generales predefinidas sobre ideas para
+  reducir errores, peso del patron, parametros o validacion. No se envian
+  valores de evaluacion, archivos, identificadores, parametros activos,
+  texto libre, historial ni documentos de conocimiento locales.
+  Los fallos del servicio se muestran en el historial sin modificar el modelo.
+  **Exportar análisis** permite guardar el diagnóstico local en PDF, Word
+  o Excel desde que se abre la vista previa. Cuando llega una respuesta
+  TRIZ válida, el menú exporta esa respuesta. Si otra consulta falla, se
+  conserva el último texto exportable. Guardar no envía otra consulta.
+  La vista previa se abre en una ventana compacta. El historial tiene su
+  propia barra de desplazamiento y el separador permite dar más espacio a
+  la gráfica o al diálogo sin ocultar los controles.
+- **Ajustar peso y parametros** abre un formulario manual con estos limites:
+  peso global del patron 0-80%, arboles 10-1000, profundidad maxima 1-64,
+  muestras minimas por hoja 1-100 y para dividir un nodo 2-200.
+  Los limites de recursos son salvaguardas de la interfaz, no valores optimos.
+  **Aprobar y aplicar** requiere confirmar los valores y autenticar al usuario
+  Admin activo con su contrasena de ProyAst. Primero inicia ProyAst para
+  configurar ese usuario; no se crean credenciales alternativas.
+  Las aprobaciones quedan en `model_configuration_history` dentro de
+  `ACCESS_DB_PATH` (por defecto `data/control_acceso.db`), con fecha y autor,
+  sin guardar contrasenas. Se usa la ultima aprobacion en los proximos
+  entrenamientos individuales, masivos y de la API local que compartan la
+  misma base de acceso. El peso aprobado reemplaza la seleccion automatica
+  por caso (`global_aprobado`), y los caches incluyen la configuracion para
+  reentrenar al cambiar parametros aunque no cambien los datos.
+  Sin aprobacion se conserva el comportamiento anterior.
+  No se modifica la grafica existente, los limites del ajuste reciente ni el
+  amortiguador. TRIZ no aplica valores automaticamente. La mejora no esta
+  validada: vuelve a proyectar y evaluar el nuevo `%Dif`. La busqueda numerica
+  automatica, su validacion cronologica y el almacenamiento compartido entre
+  servicios de Render siguen pendientes.
 - **Calibracion del peso del patron en el objetivo de entrenamiento**:
-  ProyAst (individual y masivo) y la API comparan pesos de 0% a 80%, en pasos
+  Sin un peso global aprobado, ProyAst (individual y masivo) y la API
+  comparan pesos de 0% a 80%, en pasos
   de 10 puntos, incluyendo siempre el peso configurado (30% por defecto).
   Se usan hasta las cinco semanas recientes con `%dif` guardado por
   `Graf_evaluacion.py` para ese `Bloque&Varid`. El reporte identifica los
@@ -328,6 +371,12 @@ corrección arbitraria de la proyección oficial.
 - La regla del ciclo usa una ventana base de 16 semanas. Cuando existen 16 o
 	mas semanas, toma las ultimas 16 y excluye las 4 mas recientes, por lo que el
 	calculo efectivo es de 12 semanas.
+- Al guardar desde `Graf_evaluacion.py`, se combinan las evaluaciones existentes
+	con las nuevas y se conservan hasta cinco periodos por caso. Si se vuelve a
+	guardar un caso y periodo, sus registros nuevos reemplazan los anteriores.
+	La casilla de borrado tiene prioridad sobre guardar: elimina los CSV de la
+	carpeta de evaluacion que contengan `%dif` o `error_relativo` y vacia el
+	historial. Las copias de seguridad no se restauran automaticamente.
 - Si existen menos de 16 semanas, no se excluyen semanas adicionales: se usan
 	todas las semanas disponibles. En el informe actual hay 4 periodos unicos,
 	por lo que el amortiguador analiza actualmente 4 semanas efectivas, no 12.

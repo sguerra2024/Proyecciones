@@ -236,5 +236,9 @@ def test_streamlit_model_cache_depends_on_training_data_and_target():
     assert baseline == key("001ROSA", "002ROSA", features.copy(), [100, 200])
     assert baseline != key("001ROSA", "002ROSA", features, [110, 200])
     assert baseline != key("001ROSA", "003ROSA", features, [100, 200])
+    assert baseline != key(
+        "001ROSA", "002ROSA", features, [100, 200],
+        configuration_signature='approved-parameters',
+    )
     features.loc[0, "Tallos/m2"] = 3
     assert baseline != key("001ROSA", "002ROSA", features, [100, 200])

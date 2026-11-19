@@ -7,6 +7,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from model_configuration import load_model_configuration
+
+from evaluation_history import (
+    RECENT_EVALUATION_WEEKS,
+    case_from_fields,
+    normalize_block as _normalize_block,
+    normalize_recent_case as _normalize_recent_case,
+    save_recent_evaluation_history,
+)
 
 REQUIRED_COLUMNS = {"Bloque&Varid", "Tallos/m2", "Produccion"}
 PRODUCTION_REQUIRED_COLUMNS = REQUIRED_COLUMNS | {
@@ -35,29 +44,11 @@ DEFAULT_MAX_BUFFER_RATE = 0.25
 MAX_BUFFER_AREA_RATE = 0.25
 BUFFER_RISK_THRESHOLD = 0.60
 DEFAULT_EVALUATED_WEEKS = 16
-RECENT_ADJUSTMENT_WEEKS = 5
+RECENT_ADJUSTMENT_WEEKS = RECENT_EVALUATION_WEEKS
 RECENT_ADJUSTMENT_MIN_FACTOR = 0.75
 RECENT_ADJUSTMENT_MAX_FACTOR = 1.30
 REAL_PRODUCTION_TARGET_WEIGHT = 0.70
 PATTERN_PRODUCTION_TARGET_WEIGHT = 0.30
-
-
-def _normalize_recent_case(value: Any) -> str:
-    """Normaliza el identificador compuesto de bloque y variedad."""
-    text = "" if value is None or pd.isna(value) else str(value)
-    text = "".join(text.split())
-    prefix_length = len(text) - len(text.lstrip("0123456789"))
-    if 0 < prefix_length < 3 and prefix_length < len(text):
-        text = text[:prefix_length].zfill(3) + text[prefix_length:]
-    return text.casefold()
-
-
-def _normalize_block(value: Any) -> str:
-    text = "" if value is None or pd.isna(value) else str(value).strip()
-    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
-    if pd.notna(numeric) and np.isfinite(numeric) and float(numeric).is_integer():
-        return f"{int(numeric):03d}"
-    return text
 
 
 def load_overestimation_calibration(
@@ -151,19 +142,22 @@ def save_buffer_evaluation_report(
     )
     report["%dif"] = error_report["%dif"].to_numpy()
     report["error_relativo"] = report["%dif"]
+    for canonical in ("Anio", "Semana", "Bloque", "Variedad", "Bloque&Varid"):
+        source_column = normalized_columns.get(canonical.casefold())
+        if source_column is not None and source_column != canonical:
+            report.rename(columns={source_column: canonical}, inplace=True)
 
     destination = Path(destination_path) if destination_path else (
         Path(__file__).with_name("Evaluacion")
         / "errores_evaluacion_modelo.csv"
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    report.to_csv(destination, index=False, encoding="utf-8-sig")
+    save_recent_evaluation_history(report, destination)
 
     periods = pd.DataFrame()
-    if {"anio", "semana"}.issubset(normalized_columns):
-        periods = report[[
-            normalized_columns["anio"], normalized_columns["semana"]
-        ]].apply(pd.to_numeric, errors="coerce").dropna().drop_duplicates()
+    if {"Anio", "Semana"}.issubset(report.columns):
+        periods = report[["Anio", "Semana"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).dropna().drop_duplicates()
     return {
         "rows": int(report["%dif"].notna().sum()),
         "evaluated_weeks": int(len(periods)),
@@ -216,7 +210,9 @@ def get_varieties(df: pd.DataFrame, finca: str | None = None) -> list[str]:
 
 def build_production_model() -> RandomForestRegressor:
     """Crea el unico Random Forest usado por Streamlit y la API."""
-    return RandomForestRegressor(**MODEL_PARAMS)
+    config = load_model_configuration()
+    params = {**MODEL_PARAMS, **(config.model_params() if config else {})}
+    return RandomForestRegressor(**params)
 
 
 def fit_production_model(
@@ -389,12 +385,11 @@ def load_recent_media_adjustments(
     case_column = normalized_columns.get("bloque&varid")
     if block_column is not None and variety_column is not None:
         working["__caso"] = [
-            _normalize_recent_case(
-                _normalize_block(block)
-                + ("" if pd.isna(variety) else str(variety).strip())
-            )
-            for block, variety in zip(
-                working[block_column], working[variety_column]
+            case_from_fields(block, variety, case)
+            for block, variety, case in zip(
+                working[block_column], working[variety_column],
+                working[case_column] if case_column is not None
+                else [None] * len(working),
             )
         ]
     elif case_column is not None:
@@ -890,6 +885,10 @@ def calibrate_pattern_target_weight(
         "mape": None,
         "baseline_mape": None,
     }
+    config = load_model_configuration()
+    if config is not None:
+        result.update(weight=config.pattern_weight, status="global_aprobado")
+        return result
     periods = adjustments.get("periods_by_case", {}).get(
         _normalize_recent_case(selected_case), []
     )

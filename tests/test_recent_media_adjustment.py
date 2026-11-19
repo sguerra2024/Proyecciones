@@ -8,7 +8,10 @@ from projection_core import (
     apply_recent_media_adjustment,
     load_recent_media_adjustments,
 )
-from Graf_evaluacion import guardar_calibracion_amortiguador
+from Graf_evaluacion import (
+    eliminar_calibracion_amortiguador,
+    guardar_calibracion_amortiguador,
+)
 import projection_core
 
 
@@ -233,3 +236,90 @@ def test_checkbox_calibration_rejects_missing_case_identifiers(tmp_path):
 
     with pytest.raises(ValueError, match='Bloque.*Variedad'):
         guardar_calibracion_amortiguador(source, '%Dif')
+
+
+def test_evaluation_history_merges_replaces_and_retains_five_weeks_per_case(tmp_path):
+    source = tmp_path / 'entrada.csv'
+    destination = tmp_path / 'history' / 'errores.csv'
+    rows = [
+        {'Bloque': 1, 'Variedad': 'ROSA', 'Anio': 2026,
+         'Semana': week, '%Dif': -week / 100}
+        for week in range(1, 7)
+    ] + [
+        {'Bloque': 2, 'Variedad': 'OTRA', 'Anio': 2026,
+         'Semana': 1, '%Dif': 0.1},
+    ]
+    pd.DataFrame(rows).to_csv(source, index=False)
+    guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    first = pd.read_csv(destination)
+    assert first.loc[first['Bloque'] == 1, 'Semana'].tolist() == [2, 3, 4, 5, 6]
+    assert first.loc[first['Bloque'] == 2, 'Semana'].tolist() == [1]
+
+    pd.DataFrame([
+        {'Bloque&Varid': '001rosa', 'Anio': 2026, 'Semana': 6, '%Dif': -0.5},
+        {'Bloque&Varid': '001rosa', 'Anio': 2027, 'Semana': 1, '%Dif': 0.2},
+    ]).to_csv(source, index=False)
+    for _ in range(2):
+        guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    saved = pd.read_csv(destination)
+    config = load_recent_media_adjustments(destination)
+    assert len(saved) == 6
+    assert config['periods_by_case']['001rosa'] == [
+        (2026, 3), (2026, 4), (2026, 5), (2026, 6), (2027, 1)
+    ]
+    assert np.isclose(config['factors_by_case']['001rosa'], 0.916)
+    assert config['periods_by_case']['002otra'] == [(2026, 1)]
+
+
+def test_delete_history_then_new_evaluation_does_not_restore_old_data(tmp_path):
+    source = tmp_path / 'entrada.csv'
+    destination = tmp_path / 'history' / 'errores.csv'
+    data = pd.DataFrame({
+        'Bloque&Varid': ['001ROSA'], 'Anio': [2026],
+        'Semana': [44], '%Dif': [-0.2],
+    })
+    data.to_csv(source, index=False)
+    guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    eliminar_calibracion_amortiguador(destination)
+    assert not load_recent_media_adjustments(destination)['available']
+    data['Semana'] = 45
+    data.to_csv(source, index=False)
+    guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    assert load_recent_media_adjustments(destination)['periods_by_case'] == {
+        '001rosa': [(2026, 45)]
+    }
+
+
+def test_invalid_history_update_does_not_replace_existing_file(tmp_path):
+    source = tmp_path / 'entrada.csv'
+    destination = tmp_path / 'errores.csv'
+    data = pd.DataFrame({
+        'Bloque&Varid': ['001ROSA'], 'Anio': [2026],
+        'Semana': [44], '%Dif': [-0.2],
+    })
+    data.to_csv(source, index=False)
+    guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    before = destination.read_bytes()
+    data['Semana'] = 54
+    data.to_csv(source, index=False)
+    with pytest.raises(ValueError, match='invalidos'):
+        guardar_calibracion_amortiguador(source, '%Dif', destination_path=destination)
+    assert destination.read_bytes() == before
+
+
+def test_excel_report_writer_also_preserves_history(tmp_path):
+    source = tmp_path / 'evaluacion.xlsx'
+    destination = tmp_path / 'errores.csv'
+    data = pd.DataFrame({
+        'bloque&varid': ['001ROSA'], 'anio': [2026], 'semana': [44],
+        'Produccion': [100.0], 'Estimado_modelo': [120.0],
+    })
+    data.to_excel(source, index=False)
+    projection_core.save_buffer_evaluation_report(source, destination_path=destination)
+    data['semana'] = 45
+    data['Estimado_modelo'] = 110.0
+    data.to_excel(source, index=False)
+    projection_core.save_buffer_evaluation_report(source, destination_path=destination)
+    result = load_recent_media_adjustments(destination)
+    assert result['periods_by_case']['001rosa'] == [(2026, 44), (2026, 45)]
+    assert np.isclose(result['factors_by_case']['001rosa'], 0.85)
